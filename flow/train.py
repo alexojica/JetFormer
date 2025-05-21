@@ -12,6 +12,7 @@ from flow.jet_flow import JetModel
 from flow.dataset import TFDSImagenet64 # Import the new dataset
 from tqdm import tqdm
 import wandb # Import wandb
+import pathlib # Added for path handling
 
 # (Placeholder) A simple random dataset for ImageNet-like data
 # class DummyImageDataset(Dataset): ... # Removed DummyImageDataset
@@ -367,8 +368,26 @@ def main():
     print("Training finished.")
     # Add saving checkpoint logic here
     print("Saving final model checkpoint...")
-    torch.save(model.state_dict(), "jet_model_final.pth")
-    wandb.save("jet_model_final.pth")
+    
+    # Ensure the W&B run directory exists and save checkpoint there
+    if wandb.run is not None:
+        save_dir = pathlib.Path(wandb.run.dir) / "checkpoints"
+        save_dir.mkdir(parents=True, exist_ok=True)
+        model_save_path = save_dir / "jet_model_final.pth"
+        
+        torch.save(model.state_dict(), str(model_save_path))
+        
+        # Save the file using a path relative to the wandb run directory
+        # This tells W&B the file is already in its managed space.
+        wandb.save(str(model_save_path), policy="now")
+        print(f"Model saved to {model_save_path} and uploaded to W&B.")
+    else:
+        # Fallback if W&B is not initialized (e.g., offline mode or error)
+        model_save_path = pathlib.Path("flow") / "jet_model_final.pth"
+        model_save_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(model.state_dict(), str(model_save_path))
+        print(f"Model saved locally to {model_save_path} (W&B run not available for upload).")
+
     wandb.finish()
 
 if __name__ == "__main__":
