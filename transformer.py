@@ -1,250 +1,138 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
-from transformers import GPT2Tokenizer
-from dataset import prepare_dataloaders
-from torch.utils.data import Dataset
 
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=512):
+class RoPE(nn.Module):
+    def __init__(self, d_model, max_seq_len=2048):
         super().__init__()
-        position = torch.arange(max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
-        pe = torch.zeros(1, max_len, d_model)
-        pe[0, :, 0::2] = torch.sin(position * div_term)
-        pe[0, :, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        return x + self.pe[:, :x.size(1), :]
+        self.d_model = d_model
+        self.max_seq_len = max_seq_len
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, d_model, 2).float() / d_model))
+        self.register_buffer('inv_freq', inv_freq)
+        
+        self._cached_cos = None
+        self._cached_sin = None
+        self._cached_seq_len = 0
+    
+    def _rope_cache(self, seq_len, device):
+        if seq_len <= self._cached_seq_len and self._cached_cos is not None:
+            return self._cached_cos[:seq_len], self._cached_sin[:seq_len]
+        
+        t = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
+        freqs = torch.outer(t, self.inv_freq)
+        
+        cos = torch.cos(freqs)
+        sin = torch.sin(freqs)
+        
+        self._cached_cos = cos
+        self._cached_sin = sin
+        self._cached_seq_len = seq_len
+        
+        return cos, sin
+    
+    def apply_rope(self, x, position_ids=None): # [batch_size, n_heads, seq_len, head_dim]
+        _, _, seq_len, head_dim = x.shape
+        
+        if position_ids is None:
+            position_ids = torch.arange(seq_len, device=x.device)
+        
+        cos, sin = self._rope_cache(seq_len, x.device)
+        
+        cos = cos[position_ids]  # [seq_len, head_dim//2]
+        sin = sin[position_ids]  # [seq_len, head_dim//2]
+        
+        cos = cos.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, head_dim//2]
+        sin = sin.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, head_dim//2]
+        
+        x1 = x[..., :head_dim//2]  # [batch_size, n_heads, seq_len, head_dim//2]
+        x2 = x[..., head_dim//2:]  # [batch_size, n_heads, seq_len, head_dim//2]
+        
+        rotated_x1 = x1 * cos - x2 * sin
+        rotated_x2 = x1 * sin + x2 * cos
+        return torch.cat([rotated_x1, rotated_x2], dim=-1)
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, d_model, num_heads, dropout=0.1):
+    def __init__(self, d_model, n_heads, dropout=0.1, max_seq_len=2048):
         super().__init__()
-        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
-        
-        self.num_heads = num_heads
         self.d_model = d_model
-        self.head_dim = d_model // num_heads
+        self.n_heads = n_heads
+        self.d_k = d_model // n_heads
         
-        # Linear projections for Q, K, V
-        self.q_proj = nn.Linear(d_model, d_model)
-        self.k_proj = nn.Linear(d_model, d_model)
-        self.v_proj = nn.Linear(d_model, d_model)
-        self.out_proj = nn.Linear(d_model, d_model)
+        assert self.d_k % 2 == 0, "Head dimension must be even for RoPE"
+        
+        self.w_q = nn.Linear(d_model, d_model, bias=False)
+        self.w_k = nn.Linear(d_model, d_model, bias=False)
+        self.w_v = nn.Linear(d_model, d_model, bias=False)
+        self.w_o = nn.Linear(d_model, d_model, bias=False)
         
         self.dropout = nn.Dropout(dropout)
+        self.rope = RoPE(self.d_k, max_seq_len)
         
-    def forward(self, x):
-        batch_size, seq_len, d_model = x.size()
+    def forward(self, query, key, value, mask=None, position_ids=None):
+        B, L, D = query.shape
+        key_len = key.shape[1]
         
-        # Project queries, keys, and values
-        q = self.q_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        Q = self.w_q(query).reshape(B, L, self.n_heads, self.d_k).transpose(1, 2)
+        K = self.w_k(key).reshape(B, key_len, self.n_heads, self.d_k).transpose(1, 2)
+        V = self.w_v(value).reshape(B, key_len, self.n_heads, self.d_k).transpose(1, 2)
         
-        # Scaled dot-product attention
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        if position_ids is None:
+            q_position_ids = torch.arange(L, device=query.device)
+            k_position_ids = torch.arange(key_len, device=key.device)
+        else:
+            q_position_ids = position_ids[:L]
+            k_position_ids = position_ids[:key_len]
         
-        # Apply causal mask
-        mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device), diagonal=1).bool()
-        scores = scores.masked_fill(mask.unsqueeze(0).unsqueeze(0), float('-inf'))
+        Q = self.rope.apply_rope(Q, q_position_ids)
+        K = self.rope.apply_rope(K, k_position_ids)
         
-        # Apply softmax and dropout
-        attn_weights = torch.softmax(scores, dim=-1)
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+        if mask is not None:
+            scores = scores.masked_fill(mask == 0, -1e9)
+        
+        attn_weights = F.softmax(scores, dim=-1)
         attn_weights = self.dropout(attn_weights)
         
-        # Apply attention weights to values
-        context = torch.matmul(attn_weights, v)
+        out = torch.matmul(attn_weights, V)
+        out = out.transpose(1, 2).contiguous().reshape(B, L, D)
         
-        # Reshape and project output
-        context = context.transpose(1, 2).contiguous().view(batch_size, seq_len, d_model)
-        output = self.out_proj(context)
-        
-        return output
+        return self.w_o(out)
 
-class FeedForward(nn.Module):
-    def __init__(self, d_model, d_ff, dropout=0.1):
+class TransformerBlock(nn.Module):
+    def __init__(self, d_model, n_heads, d_ff, dropout=0.1, max_seq_len=2048):
         super().__init__()
-        self.net = nn.Sequential(
+        self.attention = MultiHeadAttention(d_model, n_heads, dropout, max_seq_len)
+        self.feed_forward = nn.Sequential(
             nn.Linear(d_model, d_ff),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(d_ff, d_model),
-            nn.Dropout(dropout)
+            nn.Linear(d_ff, d_model)
         )
-        
-    def forward(self, x):
-        return self.net(x)
-
-class DecoderBlock(nn.Module):
-    def __init__(self, d_model, num_heads, d_ff, dropout=0.1):
-        super().__init__()
-        self.self_attn = MultiHeadAttention(d_model, num_heads, dropout)
-        self.feed_forward = FeedForward(d_model, d_ff, dropout)
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
+        self.norm1 = nn.RMSNorm(d_model)
+        self.norm2 = nn.RMSNorm(d_model)
         self.dropout = nn.Dropout(dropout)
         
-    def forward(self, x):
-        # Self attention with residual connection and layer norm
-        attn_output = self.self_attn(x)
-        x = self.norm1(x + self.dropout(attn_output))
+    def forward(self, x, mask=None, position_ids=None):
+        attn_out = self.attention(x, x, x, mask, position_ids)
+        x = self.norm1(x + self.dropout(attn_out))
         
-        # Feed forward with residual connection and layer norm
-        ff_output = self.feed_forward(x)
-        x = self.norm2(x + self.dropout(ff_output))
+        ff_out = self.feed_forward(x)
+        x = self.norm2(x + self.dropout(ff_out))
         
         return x
-
-class DecoderOnlyTransformer(nn.Module):
-    def __init__(
-        self,
-        vocab_size,
-        d_model=256,
-        num_heads=8,
-        num_layers=6,
-        d_ff=1024,
-        max_seq_len=512,
-        dropout=0.1
-    ):
+    
+class Transformer(nn.Module):
+    def __init__(self, d_model, n_heads, n_layers, d_ff, dropout=0.1, max_seq_len=2048):
         super().__init__()
-        
-        # Token embeddings
-        self.token_embedding = nn.Embedding(vocab_size, d_model)
-        self.position_embedding = PositionalEncoding(d_model, max_seq_len)
-        
-        # Decoder blocks
-        self.decoder_blocks = nn.ModuleList([
-            DecoderBlock(d_model, num_heads, d_ff, dropout)
-            for _ in range(num_layers)
+        self.layers = nn.ModuleList([
+            TransformerBlock(d_model, n_heads, d_ff, dropout, max_seq_len) 
+            for _ in range(n_layers)
         ])
+        self.norm = nn.RMSNorm(d_model)
         
-        # Final layer norm and output projection
-        self.norm = nn.LayerNorm(d_model)
-        self.output = nn.Linear(d_model, vocab_size, bias=False)
-        
-        # Initialize weights
-        self.apply(self._init_weights)
-        
-        # Tie weights
-        self.output.weight = self.token_embedding.weight
-        
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-            if module.bias is not None:
-                torch.nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-        elif isinstance(module, nn.LayerNorm):
-            torch.nn.init.ones_(module.weight)
-            torch.nn.init.zeros_(module.bias)
-    
-    def forward(self, x):
-        # Get token embeddings
-        x = self.token_embedding(x)
-        
-        # Add positional embeddings
-        x = self.position_embedding(x)
-        
-        # Apply decoder blocks
-        for block in self.decoder_blocks:
-            x = block(x)
-        
-        # Final layer norm and output projection
+    def forward(self, x, mask=None, position_ids=None):
+        for layer in self.layers:
+            x = layer(x, mask, position_ids)
         x = self.norm(x)
-        logits = self.output(x)
-        
-        return logits
-
-class TinyStoriesDataset(Dataset):
-    def __init__(self, dataset, tokenizer, max_length=512):
-        self.dataset = dataset
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-        
-    def __len__(self):
-        return len(self.dataset)
-    
-    def __getitem__(self, idx):
-        story = self.dataset[idx]['story']
-        
-        # Tokenize the story
-        encoding = self.tokenizer(
-            story,
-            max_length=self.max_length,
-            padding='max_length',
-            truncation=True,
-            return_tensors='pt'
-        )
-        
-        # Remove batch dimension
-        encoding = {k: v.squeeze(0) for k, v in encoding.items()}
-        return encoding
-
-def create_model(vocab_size=None):
-    """Create a TinyStories transformer model."""
-    if vocab_size is None:
-        tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
-        vocab_size = tokenizer.vocab_size
-    
-    model = DecoderOnlyTransformer(
-        vocab_size=vocab_size,
-        d_model=256,
-        num_heads=8,
-        num_layers=6,
-        d_ff=1024,
-        max_seq_len=512,
-        dropout=0.1
-    )
-    
-    return model
-
-def generate_text(model, tokenizer, prompt, max_length=100, temperature=0.7):
-    """Generate text using the trained model."""
-    model.eval()
-    
-    # Tokenize prompt
-    input_ids = tokenizer.encode(prompt, return_tensors='pt')
-    
-    with torch.no_grad():
-        for _ in range(max_length):
-            # Get model predictions
-            outputs = model(input_ids)
-            next_token_logits = outputs[:, -1, :] / temperature
-            
-            # Sample from the distribution
-            probs = torch.softmax(next_token_logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)
-            
-            # Append to input_ids
-            input_ids = torch.cat([input_ids, next_token], dim=1)
-            
-            # Stop if we generate an EOS token
-            if next_token.item() == tokenizer.eos_token_id:
-                break
-    
-    return tokenizer.decode(input_ids[0], skip_special_tokens=True)
-
-if __name__ == "__main__":
-    # Test the model and dataset
-    train_loader, val_loader, tokenizer = prepare_dataloaders()
-    model = create_model()
-    
-    # Print model summary
-    print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
-    
-    # Test forward pass with a batch from the dataset
-    batch = next(iter(train_loader))
-    input_ids = batch['input_ids']
-    
-    output = model(input_ids)
-    print(f"\nInput shape: {input_ids.shape}")
-    print(f"Output shape: {output.shape}")
-    
-    # Test generation
-    prompt = "Once upon a time"
-    generated = generate_text(model, tokenizer, prompt)
-    print(f"\nGenerated text:")
-    print(generated) 
+        return x

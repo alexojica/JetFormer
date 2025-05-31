@@ -1,257 +1,329 @@
 import torch
-import torch.nn as nn
-from torch.optim import AdamW
+import torch.nn.functional as F
+import torch.optim as optim
 import time
-from tqdm import tqdm
-from dataset import prepare_dataloaders
-from transformer import DecoderOnlyTransformer
+import wandb
+import argparse
+import yaml
 import math
 import os
-import wandb
+import numpy as np
+from torch.utils.data import DataLoader
+from dataset import LAIONPOPTextImageDataset
+from jetformer import JetFormer
+from PIL import Image
+import torchvision.transforms as transforms
 
-def get_grad_norm(model):
-    """Calculate the total gradient norm of the model."""
-    total_norm = 0.0
-    for p in model.parameters():
-        if p.grad is not None:
-            param_norm = p.grad.data.norm(2)
-            total_norm += param_norm.item() ** 2
-    return math.sqrt(total_norm)
+IMAGE_SIZE = (256, 256, 3)
 
-def train_model(
-    model,
-    train_loader,
-    val_loader,
-    num_epochs=3,
-    learning_rate=3e-4,
-    weight_decay=0.1,
-    max_grad_norm=1.0,
-    device='cpu',
-    save_path='best_model.pt',
-    use_wandb=True,
-    wandb_project="tinystories-transformer",
-    wandb_name=None
-):
-    """Train the model."""
-    model = model.to(device)
-    optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay, eps=1e-8)
+def image_loss_fn(gmm_dist, image_tokens, log_det, noise_nll=0):
+    log_prob = -gmm_dist.log_prob(image_tokens)
+    log_prob = log_prob.reshape(log_det.shape[0], -1)
+    nll = (torch.sum(log_prob, dim=1) + noise_nll) / (IMAGE_SIZE[0] * IMAGE_SIZE[1] * IMAGE_SIZE[2])
+    nll = nll / math.log(2)
+    log_det = log_det / (IMAGE_SIZE[0] * IMAGE_SIZE[1] * IMAGE_SIZE[2]) - math.log(127.5)
+    log_det = log_det / math.log(2)
+    return nll - log_det, log_det
+
+def compute_text_loss(text_logits, text_tokens, text_loss_mask, vocab_size):
+    logits_flat = text_logits.reshape(-1, vocab_size)  # [batch*seq_len, vocab_size]
+    tokens_flat = text_tokens.reshape(-1)  # [batch*seq_len]
+    mask_flat = text_loss_mask.reshape(-1)  # [batch*seq_len]
     
-    criterion = nn.CrossEntropyLoss(ignore_index=0)  # ignore padding token
-    best_val_loss = float('inf')
+    if not mask_flat.any():
+        return torch.tensor(0.0, device=text_logits.device, requires_grad=True)
     
-    # Initialize wandb if enabled
-    if use_wandb:
-        wandb.init(
-            project=wandb_project,
-            name=wandb_name,
-            config={
-                "architecture": "decoder-only-transformer",
-                "dataset": "TinyStories",
-                "d_model": model.token_embedding.embedding_dim,
-                "num_heads": model.decoder_blocks[0].self_attn.num_heads,
-                "num_layers": len(model.decoder_blocks),
-                "d_ff": model.decoder_blocks[0].feed_forward.net[0].out_features,
-                "max_seq_len": model.position_embedding.pe.size(1),
-                "vocab_size": model.token_embedding.num_embeddings,
-                "learning_rate": learning_rate,
-                "weight_decay": weight_decay,
-                "max_grad_norm": max_grad_norm,
-                "batch_size": train_loader.batch_size,
-                "num_epochs": num_epochs,
-                "device": str(device),
-                "num_parameters": sum(p.numel() for p in model.parameters())
-            }
-        )
-        # Log model architecture
-        wandb.watch(model, log="all", log_freq=100)
+    loss = F.cross_entropy(
+        logits_flat[mask_flat],
+        tokens_flat[mask_flat],
+        reduction='mean'
+    )
+    return loss
+
+def generate_text_to_image_samples(model, dataset, device, num_samples=3, temperature=1.0):
+    model.eval()
+    samples = []
     
-    print(f"\nTraining on {device}")
-    print(f"Number of parameters: {sum(p.numel() for p in model.parameters())}")
-    print(f"Training samples: {len(train_loader.dataset)}")
-    print(f"Validation samples: {len(val_loader.dataset)}")
-    print(f"Batch size: {train_loader.batch_size}")
-    print(f"Learning rate: {learning_rate}")
-    print(f"Weight decay: {weight_decay}")
-    print(f"Max gradient norm: {max_grad_norm}")
+    prompt_texts = [
+        "a car",
+        "a cat", 
+        "a dog"
+    ]
+    with torch.no_grad():
+        for i, prompt_text in enumerate(prompt_texts[:num_samples]):
+            try:
+                tokenized = dataset.tokenize_text(prompt_text)
+                text_tokens = tokenized['tokens'].unsqueeze(0).to(device)  # [1, seq_len]
+                text_mask = tokenized['text_mask'].unsqueeze(0).to(device)
+                
+                image_tokens = torch.zeros(1, model.image_seq_len, model.image_token_dim, device=device)
+                
+                text_first_mask = torch.tensor([True], device=device)
+                
+                total_len = text_tokens.shape[1] + model.image_seq_len + 1  # +1 for BOI token
+                full_mask = torch.ones(1, text_tokens.shape[1], device=device, dtype=torch.bool)
+                
+                for pos in range(model.image_seq_len):
+                    _, image_logits = model(text_tokens, image_tokens, text_first_mask, full_mask)
+                    
+                    if pos < image_logits.shape[1]:
+                        gmm_dist, _ = model.gmm(image_logits[:, pos:pos+1], image_tokens[:, pos:pos+1])
+                        
+                        if temperature != 1.0:
+                            sampled_token = gmm_dist.sample()
+                            sampled_token = sampled_token * temperature
+                        else:
+                            sampled_token = gmm_dist.sample()
+                        
+                        image_tokens[0, pos] = sampled_token.squeeze()
+                
+                images, _ = model.jet.inverse(image_tokens)
+                
+                image = images[0]
+                image = torch.clamp(image, -1, 1)
+                image = (image + 1) / 2
+                image_np = image.permute(1, 2, 0).cpu().numpy()
+                image_pil = Image.fromarray((image_np * 255).astype(np.uint8))
+                
+                samples.append({
+                    'prompt': prompt_text,
+                    'image': image_pil
+                })
+                    
+            except Exception as e:
+                print(f"Failed to generate text-to-image sample {i}: {e}")
+                import traceback
+                traceback.print_exc()
+                placeholder = Image.new('RGB', (256, 256), color='red')
+                samples.append({
+                    'prompt': prompt_text,
+                    'image': placeholder
+                })
     
-    start_time = time.time()
+    model.train()
+    return samples
+
+def train(config_path):
+    with open(config_path, 'r') as f:
+        config_dict = yaml.safe_load(f)
+
     
-    for epoch in range(num_epochs):
-        model.train()
-        total_loss = 0
-        total_tokens = 0
-        batch_count = 0
+    wandb.init(
+        project="jetformer-laion-pop",
+        config=config_dict
+    )
+    if os.environ.get('DEBUG') is not None:
+        torch.autograd.set_detect_anomaly(True)
+    
+    config = wandb.config
+    device = 'mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    print(f"Using device: {device}")
+    
+    model = JetFormer(
+        vocab_size=config.vocab_size,
+        d_model=config.d_model,
+        n_heads=config.n_heads,
+        n_layers=config.n_layers,
+        d_ff=config.d_ff,
+        max_seq_len=config.max_seq_len,
+        num_mixtures=config.num_mixtures,
+        dropout=config.dropout,
+        jet_depth=config.jet_depth,
+        jet_block_depth=config.jet_block_depth,
+        jet_emb_dim=config.jet_emb_dim,
+        jet_num_heads=config.jet_num_heads,
+        patch_size=config.patch_size,
+    ).to(device)
+    
+    total_params = sum(p.numel() for p in model.parameters())
+    jet_params = sum(p.numel() for p in model.jet.parameters())
+    transformer_params = total_params - jet_params
+    
+    print(f"Total parameters: {total_params:,}")
+    print(f"Jet flow parameters: {jet_params:,}")
+    print(f"Transformer parameters: {transformer_params:,}")
+    
+    wandb.summary.update({
+        "model/total_params": total_params,
+        "model/jet_params": jet_params,
+        "model/transformer_params": transformer_params
+    })
+
+    compiled_enabled = config.get('torch_compile', False)
+    if compiled_enabled:
+        model = torch.compile(model, mode="reduce-overhead")
+        print("Model compiled with torch.compile")
+    else:
+        print("Model not compiled with torch.compile")
+    
+    print("Creating LAION-POP dataset...")
+    dataset = LAIONPOPTextImageDataset(
+        vocab_size=config.vocab_size,
+        max_text_len=config.max_seq_len,
+        max_samples=config.max_samples,
+        use_cogvlm_captions=config.get('use_cogvlm_captions', True),
+        min_resolution=config.get('min_resolution', 512),
+        num_workers=config.get('num_workers', 4),
+        ignore_pad=config.get('ignore_pad', False)
+    )
+    
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=config.batch_size, 
+        shuffle=True,
+        num_workers=1,
+        prefetch_factor=1,
+        persistent_workers=False,
+        drop_last=True
+    )
+    
+    print(f"Dataset size: {len(dataset)}")
+    print(f"Batches per epoch: {len(dataloader)}")
+    
+    optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=0.0001, betas=(0.9, 0.95))
+    
+    total_steps = len(dataloader) * config.num_epochs
+    
+    scheduler = optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=config.learning_rate,
+        total_steps=total_steps,
+        pct_start=0.1, # warmup
+        anneal_strategy='cos'
+    )
+    
+    model.train()
+    step = 0
+    
+    for epoch in range(config.num_epochs):
+        epoch_losses = {
+            'total': 0.0,
+            'text': 0.0,
+            'image_gen': 0.0,
+            'flow': 0.0
+        }
+        num_batches = 0
         
-        progress_bar = tqdm(train_loader, desc=f'Epoch {epoch + 1}/{num_epochs}')
-        
-        for batch in progress_bar:
-            input_ids = batch['input_ids'].to(device)
+        for batch_idx, batch in enumerate(dataloader):
+            start_time = time.time()
             
-            # Forward pass
-            logits = model(input_ids)
+            text_tokens = batch['text'].to(device)
+            text_mask = batch['text_mask'].to(device)
+            text_loss_mask = batch['text_loss'].to(device)
+            images = batch['image'].to(device)
+            batch_size = text_tokens.shape[0]
+
+            log_det, image_tokens = model.flow(images)
             
-            # Calculate loss
-            loss = criterion(logits.view(-1, logits.size(-1)), input_ids.view(-1))
+            text_first_mask = torch.bernoulli(torch.ones(batch_size) * 0.5).bool()
+            # for each sequence, choose a uniform noise from 0 to config.noise_std and consider text_first_mask
+            noise_std = torch.rand(batch_size) * config.get('noise_std', 0.1)
+            noise_std = torch.where(text_first_mask, noise_std, 0.0).unsqueeze(-1).unsqueeze(-1)
             
-            # Backward pass
+            # add noise to image tokens for text-first samples
+            noise = torch.randn_like(image_tokens) * noise_std.to(device)
+            image_tokens_noisy = image_tokens + noise
+                            
+            text_logits, image_logits = model(text_tokens, image_tokens_noisy, text_first_mask, text_mask)
+            text_loss = compute_text_loss(text_logits, text_tokens, text_loss_mask, config.vocab_size)
+            
+            gmm_dist, image_tokens = model.gmm(image_logits, image_tokens)
+            image_loss, log_det_loss = image_loss_fn(gmm_dist, image_tokens, log_det, 0.0)
+
+            
+            loss = (config.get('text_loss_weight', 1.0) * text_loss) + (config.get('image_loss_weight', 1.0) * image_loss.mean())
+            
             optimizer.zero_grad()
             loss.backward()
-            
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-            
-            # Get gradient norm before step
-            grad_norm = get_grad_norm(model)
-            
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            scheduler.step()
             
-            # Update metrics
-            total_loss += loss.item()
-            total_tokens += input_ids.numel()
-            batch_count += 1
+            epoch_losses['total'] += loss.item()
+            epoch_losses['text'] += text_loss.item()
+            epoch_losses['image_gen'] += image_loss.mean().item()
+            epoch_losses['flow'] += log_det_loss.mean().item()
+            num_batches += 1
             
-            # Calculate tokens per second
-            elapsed_time = time.time() - start_time
-            tokens_per_sec = total_tokens / elapsed_time
-            
-            # Update progress bar
-            progress_bar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'avg_loss': f'{total_loss/batch_count:.4f}',
-                'grad_norm': f'{grad_norm:.4f}',
-                'lr': f'{optimizer.param_groups[0]["lr"]:.6f}',
-                'tokens/sec': f'{tokens_per_sec:.0f}'
-            })
-            
-            # Log to wandb
-            if use_wandb:
+            if step % 10 == 0:
+                
                 wandb.log({
-                    'train/loss': loss.item(),
-                    'train/avg_loss': total_loss/batch_count,
-                    'train/grad_norm': grad_norm,
-                    'train/learning_rate': optimizer.param_groups[0]['lr'],
-                    'train/tokens_per_sec': tokens_per_sec,
-                    'train/epoch': epoch + 1,
-                    'train/step': batch_count
+                    "train/total_loss": loss.item(),
+                    "train/text_loss": text_loss.item(),
+                    "train/image_gen_loss": image_loss.mean().item(),
+                    "train/flow_loss": log_det_loss.mean().item(),
+                    "train/learning_rate": scheduler.get_last_lr()[0],
+                    "train/step": step,
+                    "train/epoch": epoch,
+                    "train/batch_time": time.time() - start_time,
                 })
-        
-        # Validation
-        model.eval()
-        val_loss = 0
-        val_tokens = 0
-        
-        with torch.no_grad():
-            for batch in tqdm(val_loader, desc='Validation'):
-                input_ids = batch['input_ids'].to(device)
-                
-                logits = model(input_ids)
-                loss = criterion(logits.view(-1, logits.size(-1)), input_ids.view(-1))
-                
-                val_loss += loss.item()
-                val_tokens += input_ids.numel()
-        
-        val_loss = val_loss / len(val_loader)
-        val_perplexity = math.exp(val_loss)
-        
-        # Log validation metrics to wandb
-        if use_wandb:
-            wandb.log({
-                'val/loss': val_loss,
-                'val/perplexity': val_perplexity,
-                'val/epoch': epoch + 1
-            })
-        
-        print(f"\nEpoch {epoch + 1} Summary:")
-        print(f"Training loss: {total_loss/len(train_loader):.4f}")
-        print(f"Validation loss: {val_loss:.4f}")
-        print(f"Validation perplexity: {val_perplexity:.2f}")
-        print(f"Training speed: {tokens_per_sec:.0f} tokens/sec")
-        print(f"Epoch time: {time.time() - start_time:.2f} seconds")
-        
-        # Save best model
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            checkpoint = {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'val_loss': val_loss,
-                'val_perplexity': val_perplexity
-            }
-            torch.save(checkpoint, save_path)
-            print(f"Saved best model with validation loss: {val_loss:.4f}")
             
-            # Save model to wandb
-            if use_wandb:
-                wandb.save(save_path)
-    
-    total_time = time.time() - start_time
-    print(f"\nTraining completed in {total_time:.2f} seconds")
-    print(f"Best validation loss: {best_val_loss:.4f}")
-    print(f"Best validation perplexity: {math.exp(best_val_loss):.2f}")
-    
-    if use_wandb:
-        wandb.finish()
+            if batch_idx % 100 == 0:
+                print(f"Epoch {epoch+1}/{config.num_epochs}, "
+                        f"Batch {batch_idx}/{len(dataloader)}, "
+                        f"Total Loss: {loss.item():.4f}, "
+                        f"Text: {text_loss.item():.4f}, "
+                        f"Image Gen: {image_loss.mean().item():.4f}, "
+                        f"Flow: {log_det_loss.mean().item():.4f}")
+                
+                print("Generating samples for wandb logging...")
+                try:
+                    text_to_image_samples = generate_text_to_image_samples(model, dataset, device, num_samples=3, temperature=0.8)
+                    
+                    # Create a new table each time instead of reusing the same one
+                    generation_table = wandb.Table(
+                        columns=["Batch", "Sample ID", "Text Prompt", "Image"]
+                    )
+                    
+                    for i, sample in enumerate(text_to_image_samples):
+                        generation_table.add_data(
+                            batch_idx,
+                            i+1,
+                            sample['prompt'],
+                            wandb.Image(sample['image'])
+                        )
+                    
+                    # Also log individual images with step for better tracking
+                    image_dict = {}
+                    for i, sample in enumerate(text_to_image_samples):
+                        image_dict[f"generation/image_{i+1}_{sample['prompt']}"] = wandb.Image(sample['image'])
+                    
+                    wandb.log({
+                        "generation/samples_table": generation_table,
+                        **image_dict,
+                        "generation/step": step
+                    })
+                    
+                    print(f"  Text-to-image samples: {len(text_to_image_samples)}")
+                except Exception as e:
+                    print(f"Failed to generate samples: {e}")
+                    import traceback
+                    traceback.print_exc()
 
-def main():
-    # Model parameters
-    d_model = 256
-    num_heads = 8
-    num_layers = 6
-    d_ff = 1024
-    max_seq_len = 512
-    vocab_size = 50257  # GPT-2 vocabulary size
-    
-    # Training parameters
-    batch_size = 32
-    num_epochs = 3
-    learning_rate = 3e-4
-    weight_decay = 0.1
-    max_grad_norm = 1.0
-    subset_size = None  # Number of training samples to use
-    
-    # Wandb parameters
-    use_wandb = True
-    wandb_project = "tinystories-transformer"
-    wandb_name = f"transformer-d{d_model}-h{num_heads}-l{num_layers}"
-    
-    # Device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    # Prepare dataloaders
-    train_loader, val_loader, tokenizer = prepare_dataloaders(
-        batch_size=batch_size,
-        max_length=max_seq_len,
-        seed=42,
-        subset_size=subset_size
-    )
-    
-    # Create model
-    model = DecoderOnlyTransformer(
-        vocab_size=vocab_size,
-        d_model=d_model,
-        num_heads=num_heads,
-        num_layers=num_layers,
-        d_ff=d_ff,
-        max_seq_len=max_seq_len,
-        dropout=0.1
-    )
-    
-    # Train model
-    train_model(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        num_epochs=num_epochs,
-        learning_rate=learning_rate,
-        weight_decay=weight_decay,
-        max_grad_norm=max_grad_norm,
-        device=device,
-        save_path='best_model.pt',
-        use_wandb=use_wandb,
-        wandb_project=wandb_project,
-        wandb_name=wandb_name
-    )
+            if batch_idx % 2000 == 0:
+                print(f"Saving checkpoint for epoch {epoch+1} at batch {batch_idx}")
+                checkpoint = {
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'epoch': epoch,
+                    'config': dict(config),
+                }
+                torch.save(checkpoint, f'jetformer_laion_pop_epoch_{epoch+1}_batch_{batch_idx}.pt')
+                print(f"✓ Saved checkpoint for epoch {epoch+1} at batch {batch_idx}")
+                
+            step += 1
+                
+    print("Training completed!")
+    wandb.finish()
+    return model
+
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description='Train JetFormer model')
+    parser.add_argument('--config', type=str, required=True, help='Path to YAML config file')
+    args = parser.parse_args()
+    
+    # train model
+    model = train(args.config)
