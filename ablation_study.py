@@ -289,26 +289,26 @@ if __name__ == "__main__":
     # Ablation configurations
     ablation_configs = [
         # Baseline: Original transformer
-        {
-            **base_config,
-            "model_type": "transformer",
-            "d_model": 2048,
-            "n_heads": 8,
-            "n_layers": 18,
-            "d_ff": 32768
-        },
+        # {
+        #     **base_config,
+        #     "model_type": "transformer",
+        #     "d_model": 2048,
+        #     "n_heads": 8,
+        #     "n_layers": 18,
+        #     "d_ff": 32768
+        # },
         
         # Model size ablation
-        {**base_config, "model_type": "gemma", "model_size": "2b", "pe_type": "rope", "activation": "gelu"},
+        # {**base_config, "model_type": "gemma", "model_size": "2b", "pe_type": "rope", "activation": "gelu"},
         {**base_config, "model_type": "gemma", "model_size": "7b", "pe_type": "rope", "activation": "gelu"},
         
         # Positional encoding ablation
-        {**base_config, "model_type": "gemma", "model_size": "2b", "pe_type": "abs", "activation": "gelu"},
-        {**base_config, "model_type": "gemma", "model_size": "2b", "pe_type": None, "activation": "gelu"},
+        # {**base_config, "model_type": "gemma", "model_size": "2b", "pe_type": "abs", "activation": "gelu"},
+        # {**base_config, "model_type": "gemma", "model_size": "2b", "pe_type": None, "activation": "gelu"},
         
         # Activation function ablation
-        {**base_config, "model_type": "gemma", "model_size": "2b", "pe_type": "rope", "activation": "relu"},
-        {**base_config, "model_type": "gemma", "model_size": "2b", "pe_type": "rope", "activation": "silu"}
+        # {**base_config, "model_type": "gemma", "model_size": "2b", "pe_type": "rope", "activation": "relu"},
+        # {**base_config, "model_type": "gemma", "model_size": "2b", "pe_type": "rope", "activation": "silu"}
     ]
     
     # Run ablation studies
