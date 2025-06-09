@@ -506,9 +506,9 @@ class TinyStoriesDataset(Dataset):
         tokenization_result = self.tokenize_text(text)
         
         return {
-            'text': tokenization_result['tokens'],
-            'text_mask': tokenization_result['text_mask'],
-            'text_loss': tokenization_result['text_loss'],
+            'input_ids': tokenization_result['tokens'],
+            'attention_mask': tokenization_result['text_mask'],
+            'labels': tokenization_result['tokens'], 
             'raw_text': text,
             'key': key,
         }

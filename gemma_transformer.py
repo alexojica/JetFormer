@@ -11,6 +11,7 @@ class MultiQueryAttention(nn.Module):
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads
         self.d_k = d_model // n_heads
+        self.pe_type = pe_type
         
         assert self.d_k % 2 == 0, "Head dimension must be even for RoPE"
         assert n_heads % n_kv_heads == 0, "Number of heads must be divisible by number of KV heads"
