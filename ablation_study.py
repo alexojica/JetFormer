@@ -163,7 +163,7 @@ def run_ablation_study(config):
     
     # Create datasets and dataloaders
     train_dataset = TinyStoriesDataset(max_text_len=config["max_seq_len"], split="train")
-    val_dataset = TinyStoriesDataset(max_text_len=config["max_seq_len"], split="val")
+    val_dataset = TinyStoriesDataset(max_text_len=config["max_seq_len"], split="validation")
     
     train_loader = DataLoader(
         train_dataset,
