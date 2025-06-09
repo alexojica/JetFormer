@@ -39,3 +39,5 @@ dist/
 *.egg-info/
 
 laion_pop_cache/
+tinystories_cache/
+sentencepiece.model
