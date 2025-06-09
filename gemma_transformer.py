@@ -138,8 +138,8 @@ class GemmaTransformer(nn.Module):
             d_model=2048,      # Hidden dimension
             n_heads=8,         # Number of attention heads
             n_kv_heads=1,      # Single KV head for multi-query attention
-            n_layers=18,       # Number of transformer layers
-            d_ff=32768,        # Feed-forward hidden dimensions
+            n_layers=12,       # Number of transformer layers
+            d_ff=4096,        # Feed-forward hidden dimensions
             dropout=dropout,
             max_seq_len=max_seq_len,
             pe_type=pe_type,
@@ -151,11 +151,11 @@ class GemmaTransformer(nn.Module):
     def from_7b_config(cls, dropout=0.1, max_seq_len=2048, pe_type="rope", activation="gelu", vocab_size=32000):
         """Initialize Gemma 7B model with the correct parameters."""
         return cls(
-            d_model=3072,      # Hidden dimension
+            d_model=2048,      # Hidden dimension
             n_heads=16,        # Number of attention heads
             n_kv_heads=16,     # 16 KV heads for multi-query attention
-            n_layers=28,       # Number of transformer layers
-            d_ff=49152,        # Feed-forward hidden dimensions
+            n_layers=18,       # Number of transformer layers
+            d_ff=8192,        # Feed-forward hidden dimensions
             dropout=dropout,
             max_seq_len=max_seq_len,
             pe_type=pe_type,
