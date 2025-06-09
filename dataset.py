@@ -350,3 +350,165 @@ class LAIONPOPTextImageDataset(Dataset): # tokenizer: gs://t5-data/vocabs/cc_en.
         
         # If all retries failed, raise an error
         raise RuntimeError(f"Failed to load any valid sample after {max_retries} attempts starting from index {original_idx}")
+
+class TinyStoriesDataset(Dataset):
+    def __init__(
+        self,
+        vocab_size=32000,
+        tokenizer_path="gs://t5-data/vocabs/cc_en.32000/sentencepiece.model",
+        max_text_len=64,
+        cache_dir="./tinystories_cache",
+        split="train",
+        max_samples=None,
+        eos_id=1,
+        bos_id=32000,
+        ignore_pad=False,
+    ):
+        self.vocab_size = vocab_size
+        self.max_text_len = max_text_len
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(exist_ok=True)
+        self.max_samples = max_samples
+        self.eos_id = eos_id
+        self.bos_id = bos_id
+        self.ignore_pad = ignore_pad
+
+        # Download/prepare tokenizer model
+        local_tokenizer_path = self._download_tokenizer_model(tokenizer_path)
+        
+        self.tokenizer = SentencePieceProcessor()
+        self.tokenizer.Load(local_tokenizer_path)
+        if self.tokenizer.vocab_size() != self.vocab_size:
+            raise ValueError(f"Vocab size mismatch: {self.tokenizer.vocab_size()} != {self.vocab_size}")
+        
+        print(f"Loading TinyStories dataset ({split} split)...")
+        self.data = self._load_tinystories_dataset(split)
+        print(f"Loaded {len(self.data)} samples from TinyStories dataset")
+
+    def _download_tokenizer_model(self, tokenizer_path):
+        """Download tokenizer model if it's a Google Storage URL"""
+        if tokenizer_path.startswith('gs://'):
+            cache_path = self.cache_dir / "sentencepiece.model"
+            
+            if not cache_path.exists():
+                print(f"Downloading tokenizer model to {cache_path}...")
+                
+                public_url = tokenizer_path.replace('gs://', 'https://storage.googleapis.com/')
+                
+                try:
+                    import urllib.request
+                    print(f"Downloading from {public_url}")
+                    urllib.request.urlretrieve(public_url, cache_path)
+                    print(f"Successfully downloaded tokenizer model to {cache_path}")
+                except Exception as e:
+                    print(f"Failed to download tokenizer from {public_url}: {e}")
+                    print("Please manually download the SentencePiece model and provide a local path")
+                    raise e
+            
+            return str(cache_path)
+        else:
+            return tokenizer_path
+
+    def _load_tinystories_dataset(self, split):
+        """Load TinyStories dataset from Hugging Face"""
+        try:
+            print("Downloading TinyStories dataset from Hugging Face...")
+            
+            # Load the dataset
+            dataset = load_dataset("roneneldan/TinyStories", split=split)
+            
+            print(f"Raw dataset size: {len(dataset)}")
+            
+            # Filter and collect samples
+            data = []
+            count = 0
+            
+            print("Processing TinyStories samples...")
+            for item in dataset:
+                try:
+                    text = item.get('text', '').strip()
+                    
+                    if text and len(text) > 10:
+                        data.append({
+                            'text': text,
+                            'key': str(count),
+                        })
+                        count += 1
+                        
+                        if self.max_samples and count >= self.max_samples:
+                            break
+                        
+                    if count % 10000 == 0 and count > 0:
+                        print(f"Processed {count} samples")
+                        
+                except Exception as e:
+                    continue
+            
+            print(f"Processing complete: {count} samples loaded")
+            return data
+            
+        except Exception as e:
+            print(f"Error loading TinyStories dataset: {e}")
+            raise e
+
+    def tokenize_text(self, text):
+        text = text.strip()
+
+        prefixes_to_remove = [
+            "this image shows", "this image depicts", "the image shows",
+            "the image depicts", "this is an image of", "this is a photo of",
+            "in this image", "the photo shows"
+        ]
+        
+        for prefix in prefixes_to_remove:
+            if text.startswith(prefix):
+                text = text[len(prefix):].strip()
+                if text.startswith(','):
+                    text = text[1:].strip()
+                break
+        
+        # Tokenize using SentencePiece
+        tokens = self.tokenizer.EncodeAsIds(text)
+        
+        # Add EOS token manually
+        tokens = tokens + [self.eos_id]
+        
+        text_mask = [1] * len(tokens)
+        text_loss = [1] * len(tokens)
+        pad_value = 1
+        
+        # Truncate if too long
+        if len(tokens) > self.max_text_len:
+            tokens = tokens[:self.max_text_len]
+            text_mask = text_mask[:self.max_text_len]
+            text_loss = text_loss[:self.max_text_len]
+        else:
+            # Pad to max_text_len
+            padding_len = self.max_text_len - len(tokens)
+            tokens.extend([pad_value] * padding_len)
+            text_mask.extend([pad_value] * padding_len)
+            text_loss.extend([pad_value] * padding_len)
+        
+        return {
+            'tokens': torch.tensor(tokens, dtype=torch.long),
+            'text_mask': torch.tensor(text_mask, dtype=torch.bool),
+            'text_loss': torch.tensor(text_loss, dtype=torch.bool)
+        }
+    
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, idx):
+        item = self.data[idx]
+        text = item['text']
+        key = item['key']
+        
+        tokenization_result = self.tokenize_text(text)
+        
+        return {
+            'text': tokenization_result['tokens'],
+            'text_mask': tokenization_result['text_mask'],
+            'text_loss': tokenization_result['text_loss'],
+            'raw_text': text,
+            'key': key,
+        }
