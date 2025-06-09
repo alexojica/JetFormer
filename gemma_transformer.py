@@ -109,22 +109,30 @@ class GemmaBlock(nn.Module):
         return x
 
 class GemmaTransformer(nn.Module):
-    def __init__(self, d_model, n_heads, n_kv_heads, n_layers, d_ff, dropout=0.1, max_seq_len=2048, pe_type="rope", activation="gelu"):
+    def __init__(self, d_model, n_heads, n_kv_heads, n_layers, d_ff, dropout=0.1, max_seq_len=2048, pe_type="rope", activation="gelu", vocab_size=32000):
         super().__init__()
+        self.d_model = d_model
+        self.vocab_size = vocab_size
+        
+        self.embedding = nn.Embedding(vocab_size, d_model)
+        torch.nn.init.normal_(self.embedding.weight, mean=0.0, std=1.0)
+        
         self.layers = nn.ModuleList([
             GemmaBlock(d_model, n_heads, n_kv_heads, d_ff, dropout, max_seq_len, pe_type, activation) 
             for _ in range(n_layers)
         ])
         self.norm = nn.RMSNorm(d_model)
+        self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
         
     def forward(self, x, mask=None, position_ids=None):
+        x = self.embedding(x)
         for layer in self.layers:
             x = layer(x, mask, position_ids)
         x = self.norm(x)
-        return x
+        return self.lm_head(x)
 
     @classmethod
-    def from_2b_config(cls, dropout=0.1, max_seq_len=2048, pe_type="rope", activation="gelu"):
+    def from_2b_config(cls, dropout=0.1, max_seq_len=2048, pe_type="rope", activation="gelu", vocab_size=32000):
         """Initialize Gemma 2B model with the correct parameters."""
         return cls(
             d_model=2048,      # Hidden dimension
@@ -135,11 +143,12 @@ class GemmaTransformer(nn.Module):
             dropout=dropout,
             max_seq_len=max_seq_len,
             pe_type=pe_type,
-            activation=activation
+            activation=activation,
+            vocab_size=vocab_size
         )
 
     @classmethod
-    def from_7b_config(cls, dropout=0.1, max_seq_len=2048, pe_type="rope", activation="gelu"):
+    def from_7b_config(cls, dropout=0.1, max_seq_len=2048, pe_type="rope", activation="gelu", vocab_size=32000):
         """Initialize Gemma 7B model with the correct parameters."""
         return cls(
             d_model=3072,      # Hidden dimension
@@ -150,5 +159,6 @@ class GemmaTransformer(nn.Module):
             dropout=dropout,
             max_seq_len=max_seq_len,
             pe_type=pe_type,
-            activation=activation
+            activation=activation,
+            vocab_size=vocab_size
         ) 
