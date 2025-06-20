@@ -61,6 +61,9 @@ flow/                # core training + model + ablation tools
 README.md            # you are here
 requirements.txt     # project dependencies
 ```
+This will:
+- Train a GemmaTransformer (2B, RoPE, ReLU) on 1000 training and 200 validation samples
+- Log metrics (loss, NLL, perplexity, grad norm) to wandb
 
 ### Development
 - Python 3.10+ recommended.
