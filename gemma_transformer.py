@@ -131,6 +131,22 @@ class GemmaTransformer(nn.Module):
         x = self.norm(x)
         return self.lm_head(x)
 
+    # @classmethod
+    # def from_2b_config(cls, dropout=0.1, max_seq_len=512, pe_type="rope", activation="gelu", vocab_size=32000):
+    #     """Initialize Gemma 2B model with the correct parameters."""
+    #     return cls(
+    #         d_model=256,      # Hidden dimension
+    #         n_heads=8,         # Number of attention heads
+    #         n_kv_heads=1,      # Single KV head for multi-query attention
+    #         n_layers=12,       # Number of transformer layers
+    #         d_ff=1024,        # Feed-forward hidden dimensions
+    #         dropout=dropout,
+    #         max_seq_len=max_seq_len,
+    #         pe_type=pe_type,
+    #         activation=activation,
+    #         vocab_size=vocab_size
+    #     )
+    
     @classmethod
     def from_2b_config(cls, dropout=0.1, max_seq_len=2048, pe_type="rope", activation="gelu", vocab_size=32000):
         """Initialize Gemma 2B model with the correct parameters."""

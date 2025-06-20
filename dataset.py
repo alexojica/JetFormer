@@ -424,6 +424,9 @@ class TinyStoriesDataset(Dataset):
             count = 0
             
             print("Processing TinyStories samples...")
+            # Use quarter of the samples
+            # max_samples = 2000 if split=="train" else 200
+            
             for item in dataset:
                 try:
                     text = item.get('text', '').strip()
