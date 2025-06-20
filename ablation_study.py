@@ -51,7 +51,7 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, grad_clip=1.0
         combined_mask = combined_mask.unsqueeze(1)
         
         # Forward pass
-        logits = model(input_ids, attention_mask)
+        logits = model(input_ids, combined_mask)
         loss, nll, perplexity = compute_metrics(logits, input_ids)
         
         # Backward pass
@@ -104,7 +104,7 @@ def evaluate(model, val_loader, device):
             combined_mask = causal_mask.unsqueeze(0) & (padding_mask & padding_mask.transpose(-1, -2))
             combined_mask = combined_mask.unsqueeze(1)
             
-            logits = model(input_ids, attention_mask)
+            logits = model(input_ids, combined_mask)
             loss, nll, perplexity = compute_metrics(logits, input_ids)
             
             total_loss += loss.item()
@@ -162,8 +162,8 @@ def run_ablation_study(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # Create datasets and dataloaders
-    train_dataset = TinyStoriesDataset(max_text_len=config["max_seq_len"], split="train")
-    val_dataset = TinyStoriesDataset(max_text_len=config["max_seq_len"], split="validation")
+    train_dataset = TinyStoriesDataset(max_text_len=config["max_seq_len"], split="train", max_samples=5000)
+    val_dataset = TinyStoriesDataset(max_text_len=config["max_seq_len"], split="validation", max_samples=500)
     
     train_loader = DataLoader(
         train_dataset,
@@ -274,16 +274,34 @@ def run_ablation_study(config):
 
 if __name__ == "__main__":
     # Base configuration
+    # STILL TOO BIG
+    # base_config = {
+    #     "max_seq_len": 2048,
+    #     "batch_size": 2,
+    #     "learning_rate": 1e-4,
+    #     "num_workers": 0,
+    #     "pin_memory": False,
+    #     "min_lr": 1e-5,
+    #     "weight_decay": 0.01,
+    #     "num_epochs": 5,
+    #     "dropout": 0.1,
+    #     "grad_clip": 1.0
+    # }
+
     base_config = {
-        "max_seq_len": 2048,
-        "batch_size": 4,
-        "num_workers": 4,
+        "max_seq_len": 128,  # Shorter sequence length
+        "batch_size": 2,     # Smaller batch size
         "learning_rate": 1e-4,
         "min_lr": 1e-5,
         "weight_decay": 0.01,
-        "num_epochs": 10,
+        "num_epochs": 10,     # Fewer epochs
+        "num_workers": 0,
         "dropout": 0.1,
-        "grad_clip": 1.0
+        "grad_clip": 1.0,
+        "d_model": 256,      # Smaller model
+        "n_heads": 4,        # Fewer heads
+        "n_layers": 2,       # Fewer layers
+        "d_ff": 1024         # Smaller feed-forward
     }
     
     # Ablation configurations
@@ -300,10 +318,11 @@ if __name__ == "__main__":
         
         # Model size ablation
         # {**base_config, "model_type": "gemma", "model_size": "2b", "pe_type": "rope", "activation": "gelu"},
-        {**base_config, "model_type": "gemma", "model_size": "7b", "pe_type": "rope", "activation": "gelu"},
+        # {**base_config, "model_type": "gemma", "model_size": "7b", "pe_type": "rope", "activation": "gelu"},
         
         # Positional encoding ablation
-        # {**base_config, "model_type": "gemma", "model_size": "2b", "pe_type": "abs", "activation": "gelu"},
+        
+        {**base_config, "model_type": "gemma", "model_size": "2b", "pe_type": "abs", "activation": "gelu"},
         # {**base_config, "model_type": "gemma", "model_size": "2b", "pe_type": None, "activation": "gelu"},
         
         # Activation function ablation

@@ -154,8 +154,8 @@ def run_quick_test(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # Create datasets and dataloaders with small subset
-    train_dataset = TinyStoriesDataset(max_text_len=config["max_seq_len"], split="train", max_samples=100)
-    val_dataset = TinyStoriesDataset(max_text_len=config["max_seq_len"], split="validation", max_samples=20)
+    train_dataset = TinyStoriesDataset(max_text_len=config["max_seq_len"], split="train", max_samples=1000)
+    val_dataset = TinyStoriesDataset(max_text_len=config["max_seq_len"], split="validation", max_samples=200)
     
     train_loader = DataLoader(
         train_dataset,
@@ -217,13 +217,13 @@ if __name__ == "__main__":
         "learning_rate": 1e-4,
         "min_lr": 1e-5,
         "weight_decay": 0.01,
-        "num_epochs": 2,     # Fewer epochs
+        "num_epochs": 10,     # Fewer epochs
         "dropout": 0.1,
         "grad_clip": 1.0,
         "model_type": "gemma",
         "model_size": "2b",
         "pe_type": "rope",
-        "activation": "gelu",
+        "activation": "relu",
         "d_model": 256,      # Smaller model
         "n_heads": 4,        # Fewer heads
         "n_layers": 2,       # Fewer layers
