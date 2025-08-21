@@ -6,3 +6,34 @@ __pycache__/
 *.pkl
 *.json
 *.csv
+*.pt
+laion_pop_cache/
+data/
+venv/
+logs/
+outputs/
+# checkpoints/
+run*/
+*.log
+
+# IDE/editor
+.idea/
+.vscode/
+*.code-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Model weights and large bins
+*.ckpt
+*.bin
+*.safetensors
+
+# Notebooks
+*.ipynb_checkpoints
+
+# Build/dist
+build/
+dist/
+*.egg-info/
