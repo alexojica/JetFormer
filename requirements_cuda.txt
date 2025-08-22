@@ -1,0 +1,11 @@
+torch>=2.0.0
+torchvision>=0.15.0
+numpy<2.0.0
+pillow>=9.0.0
+tqdm>=4.65.0
+wandb>=0.15.0
+einops>=0.7.0
+tensorflow_datasets>=4.9.0
+kagglehub>=0.3.4
+pandas>=2.0.0
+
