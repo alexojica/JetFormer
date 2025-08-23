@@ -406,7 +406,11 @@ def main():
     if is_main_process:
         print("Loading datasets...")
     dataset_choice = config.get("dataset", "imagenet64_kaggle")
-    resolution = int(config["resolution"]) if "resolution" in config else (64 if dataset_choice != "imagenet32_tfds" else 32)
+    # Force dataset-appropriate default resolutions to ensure token counts match posemb
+    if dataset_choice in ("cifar10", "imagenet32_tfds"):
+        resolution = 32
+    else:
+        resolution = int(config["resolution"]) if "resolution" in config else 64
 
     def _build_datasets():
         if dataset_choice == "imagenet64_kaggle":

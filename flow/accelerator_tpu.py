@@ -141,13 +141,21 @@ class TPUAccelerator:
     # ---------- AMP / Scaler ----------
     @contextmanager
     def autocast(self, enabled: bool):
-        # Use bfloat16 autocast on XLA when requested
+        # Use bfloat16 autocast on XLA when requested. Ensure proper context cleanup on exceptions.
+        if not enabled:
+            yield
+            return
+        ctx = None
         try:
-            with torch.amp.autocast("xla", enabled=enabled, dtype=torch.bfloat16):
+            try:
+                ctx = torch.amp.autocast("xla", enabled=True, dtype=torch.bfloat16)
+            except Exception:
+                ctx = torch.autocast("xla", enabled=True, dtype=torch.bfloat16)
+            with ctx:
                 yield
-        except Exception:
-            with torch.autocast("xla", enabled=enabled, dtype=torch.bfloat16):
-                yield
+        finally:
+            # Context managers above handle their own exit; nothing to do here.
+            pass
 
     def create_grad_scaler(self, enabled: bool):
         # XLA does not use GradScaler; return a no-op wrapper for API parity
