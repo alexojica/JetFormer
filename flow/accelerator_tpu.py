@@ -1,6 +1,7 @@
 import os
 from contextlib import contextmanager
 import torch
+import numpy as np
 
 try:
     import torch_xla.core.xla_model as xm
@@ -10,10 +11,15 @@ try:
         from torch_xla import runtime as xr  # type: ignore
     except Exception:
         xr = None
+    try:
+        import torch_xla.distributed.spmd as xs  # type: ignore
+    except Exception:
+        xs = None
 except Exception as _e:
     xm = None
     pl = None
     xr = None
+    xs = None
 
 
 class _NullScaler:
@@ -63,6 +69,19 @@ class TPUAccelerator:
         self._device_prefetch_size = int(config.get("device_prefetch_size", 4))
         self._host_to_device_transfer_threads = int(config.get("host_to_device_transfer_threads", 1))
 
+        # Prepare a batch-sharding spec across all global runtime devices (hosts×cores) when available
+        self._input_sharding = None
+        try:
+            if xs is not None and xr is not None and hasattr(xr, "global_runtime_device_count"):
+                global_devices = int(xr.global_runtime_device_count())
+                if global_devices > 1:
+                    device_ids = np.arange(global_devices)
+                    mesh_shape = (global_devices, 1, 1, 1)
+                    input_mesh = xs.Mesh(device_ids, mesh_shape, ('B', 'C', 'W', 'H'))
+                    self._input_sharding = xs.ShardingSpec(input_mesh, (0, 1, 2, 3))
+        except Exception:
+            self._input_sharding = None
+
     # ---------- Process info ----------
     @property
     def is_main_process(self) -> bool:
@@ -102,6 +121,7 @@ class TPUAccelerator:
             return pl.MpDeviceLoader(
                 dataloader,
                 self.device,
+                input_sharding=self._input_sharding,
                 loader_prefetch_size=self._loader_prefetch_size,
                 device_prefetch_size=self._device_prefetch_size,
                 host_to_device_transfer_threads=self._host_to_device_transfer_threads,
