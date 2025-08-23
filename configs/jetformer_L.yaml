@@ -1,0 +1,40 @@
+vocab_size: 32000
+max_seq_len: 64
+
+# Autoregressive transformer (L)
+d_model: 1536
+n_heads: 16
+n_layers: 48
+d_ff: 6144
+dropout: 0.1
+num_mixtures: 1024
+
+# Flow (Jet)
+jet_depth: 32
+jet_block_depth: 6
+jet_emb_dim: 512
+jet_num_heads: 8
+
+# Image tokenization
+patch_size: 16
+image_ar_dim: 128
+
+# Optimization
+learning_rate: 0.001
+batch_size: 16
+num_epochs: 1
+torch_compile: false
+
+# Curriculum & latent noise
+rgb_sigma0: 64.0
+rgb_sigma_final: 3.0
+latent_noise_std: 0.3
+
+# Loss balancing
+text_loss_weight: 0.0025
+image_loss_weight: 1.0
+
+# CFG
+cfg_strength: 4.0
+cfg_drop_prob: 0.1
+
