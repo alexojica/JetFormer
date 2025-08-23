@@ -299,6 +299,11 @@ def main():
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"], help="Device to use (GPU backend). Ignored on TPU.")
     parser.add_argument("--distributed", type=str2bool, default=False, help="Force-enable DDP (GPU backend). If WORLD_SIZE>1 this is auto-enabled.")
 
+    # TPU/XLA input pipeline tuning knobs (mirroring example_xla.py best practices)
+    parser.add_argument("--loader_prefetch_size", type=int, default=8, help="Host-side prefetch queue length for MpDeviceLoader on XLA")
+    parser.add_argument("--device_prefetch_size", type=int, default=4, help="Device-side prefetch queue length for MpDeviceLoader on XLA")
+    parser.add_argument("--host_to_device_transfer_threads", type=int, default=1, help="Number of host→device transfer threads for MpDeviceLoader on XLA")
+
     # Sampling parameters
     parser.add_argument("--num_sample_images", type=int, default=4, help="Number of images to sample when sampling is enabled")
     parser.add_argument("--sample_every_epochs", type=int, default=2, help="Sample images every N epochs (set 0 to disable periodic sampling)")

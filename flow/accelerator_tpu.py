@@ -5,9 +5,15 @@ import torch
 try:
     import torch_xla.core.xla_model as xm
     import torch_xla.distributed.parallel_loader as pl
+    try:
+        # Prefer PJRT SPMD execution when available
+        from torch_xla import runtime as xr  # type: ignore
+    except Exception:
+        xr = None
 except Exception as _e:
     xm = None
     pl = None
+    xr = None
 
 
 class _NullScaler:
@@ -33,6 +39,13 @@ class TPUAccelerator:
         if xm is None:
             raise ImportError("torch_xla is required for TPUAccelerator. Install torch_xla and launch with xla_spawn.")
 
+        # Enable SPMD automatically when possible (mirrors example_xla.py behavior)
+        try:
+            if xr is not None and hasattr(xr, "use_spmd"):
+                xr.use_spmd(auto=True)
+        except Exception:
+            pass
+
         self.device = xm.xla_device()
         try:
             self._world_size = xm.xrt_world_size()
@@ -44,6 +57,11 @@ class TPUAccelerator:
             self._rank = int(os.environ.get("RANK", "0"))
 
         self.ddp_enabled = self._world_size > 1
+
+        # Persist selected input pipeline tuning knobs from config
+        self._loader_prefetch_size = int(config.get("loader_prefetch_size", 8))
+        self._device_prefetch_size = int(config.get("device_prefetch_size", 4))
+        self._host_to_device_transfer_threads = int(config.get("host_to_device_transfer_threads", 1))
 
     # ---------- Process info ----------
     @property
@@ -80,7 +98,17 @@ class TPUAccelerator:
         """Wrap a PyTorch DataLoader with XLA's MpDeviceLoader for input pipelining."""
         if pl is None:
             return dataloader
-        return pl.MpDeviceLoader(dataloader, self.device)
+        try:
+            return pl.MpDeviceLoader(
+                dataloader,
+                self.device,
+                loader_prefetch_size=self._loader_prefetch_size,
+                device_prefetch_size=self._device_prefetch_size,
+                host_to_device_transfer_threads=self._host_to_device_transfer_threads,
+            )
+        except TypeError:
+            # Older torch_xla without these kwargs
+            return pl.MpDeviceLoader(dataloader, self.device)
 
     # ---------- Model wrapping ----------
     def wrap_model(self, model: torch.nn.Module) -> torch.nn.Module:
