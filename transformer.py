@@ -32,18 +32,25 @@ class RoPE(nn.Module):
         return cos, sin
     
     def apply_rope(self, x, position_ids=None): # [batch_size, n_heads, seq_len, head_dim]
-        _, _, seq_len, head_dim = x.shape
+        B, _, seq_len, head_dim = x.shape
         
         if position_ids is None:
+            # [seq_len]
             position_ids = torch.arange(seq_len, device=x.device)
         
-        cos, sin = self._rope_cache(seq_len, x.device)
+        cos_full, sin_full = self._rope_cache(seq_len, x.device)
         
-        cos = cos[position_ids]  # [seq_len, head_dim//2]
-        sin = sin[position_ids]  # [seq_len, head_dim//2]
-        
-        cos = cos.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, head_dim//2]
-        sin = sin.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, head_dim//2]
+        if position_ids.dim() == 1:
+            cos = cos_full[position_ids]  # [seq_len, head_dim//2]
+            sin = sin_full[position_ids]
+            cos = cos.unsqueeze(0).unsqueeze(0)  # [1,1,L,D/2]
+            sin = sin.unsqueeze(0).unsqueeze(0)
+        else:
+            # position_ids: [B, L]
+            cos = cos_full[position_ids]  # [B, L, D/2]
+            sin = sin_full[position_ids]
+            cos = cos.unsqueeze(1)  # [B,1,L,D/2]
+            sin = sin.unsqueeze(1)
         
         x1 = x[..., :head_dim//2]  # [batch_size, n_heads, seq_len, head_dim//2]
         x2 = x[..., head_dim//2:]  # [batch_size, n_heads, seq_len, head_dim//2]
@@ -77,15 +84,8 @@ class MultiHeadAttention(nn.Module):
         K = self.w_k(key).reshape(B, key_len, self.n_heads, self.d_k).transpose(1, 2)
         V = self.w_v(value).reshape(B, key_len, self.n_heads, self.d_k).transpose(1, 2)
         
-        if position_ids is None:
-            q_position_ids = torch.arange(L, device=query.device)
-            k_position_ids = torch.arange(key_len, device=key.device)
-        else:
-            q_position_ids = position_ids[:L]
-            k_position_ids = position_ids[:key_len]
-        
-        Q = self.rope.apply_rope(Q, q_position_ids)
-        K = self.rope.apply_rope(K, k_position_ids)
+        Q = self.rope.apply_rope(Q, position_ids)
+        K = self.rope.apply_rope(K, position_ids)
         
         scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
         if mask is not None:

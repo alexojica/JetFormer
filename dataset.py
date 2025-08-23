@@ -17,6 +17,7 @@ import requests
 from io import BytesIO
 import hashlib
 from datasets import load_dataset
+from huggingface_hub import login as hf_login
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import warnings
@@ -95,6 +96,13 @@ class LAIONPOPTextImageDataset(Dataset): # tokenizer: gs://t5-data/vocabs/cc_en.
         ])
         
         print("Loading LAION-POP dataset...")
+        # Attempt auto-auth from env/token file for gated datasets
+        try:
+            hf_token = os.environ.get('HF_TOKEN') or os.environ.get('HUGGINGFACE_TOKEN')
+            if hf_token:
+                hf_login(token=hf_token, add_to_git_credential=False)
+        except Exception:
+            pass
         self.data = self._load_laion_pop_dataset()
         print(f"Loaded {len(self.data)} samples from LAION-POP dataset")
         
@@ -274,9 +282,11 @@ class LAIONPOPTextImageDataset(Dataset): # tokenizer: gs://t5-data/vocabs/cc_en.
         tokens = tokens + [self.eos_id]
         
     
+        # True for real tokens, False for pads
         text_mask = [1] * len(tokens)
         text_loss = [1] * len(tokens)
-        pad_value = 1
+        # Use 0 as pad id
+        pad_value = 0
         
         # Truncate if too long
         if len(tokens) > self.max_text_len:
@@ -287,8 +297,9 @@ class LAIONPOPTextImageDataset(Dataset): # tokenizer: gs://t5-data/vocabs/cc_en.
             # Pad to max_text_len
             padding_len = self.max_text_len - len(tokens)
             tokens.extend([pad_value] * padding_len)
-            text_mask.extend([pad_value] * padding_len)
-            text_loss.extend([pad_value] * padding_len)
+            # Pads are masked out
+            text_mask.extend([0] * padding_len)
+            text_loss.extend([0] * padding_len)
         
         return {
             'tokens': torch.tensor(tokens, dtype=torch.long),
@@ -476,9 +487,10 @@ class TinyStoriesDataset(Dataset):
         # Add EOS token manually
         tokens = tokens + [self.eos_id]
         
+        # True for real tokens, False for pads
         text_mask = [1] * len(tokens)
         text_loss = [1] * len(tokens)
-        pad_value = 1
+        pad_value = 0
         
         # Truncate if too long
         if len(tokens) > self.max_text_len:
@@ -489,8 +501,8 @@ class TinyStoriesDataset(Dataset):
             # Pad to max_text_len
             padding_len = self.max_text_len - len(tokens)
             tokens.extend([pad_value] * padding_len)
-            text_mask.extend([pad_value] * padding_len)
-            text_loss.extend([pad_value] * padding_len)
+            text_mask.extend([0] * padding_len)
+            text_loss.extend([0] * padding_len)
         
         return {
             'tokens': torch.tensor(tokens, dtype=torch.long),

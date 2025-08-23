@@ -53,9 +53,14 @@ class MultiQueryAttention(nn.Module):
                 q_position_ids = torch.arange(L, device=query.device)
                 k_position_ids = torch.arange(key_len, device=key.device)
             else:
-                q_position_ids = position_ids[:L]
-                k_position_ids = position_ids[:key_len]
-            
+                # Support per-sample [B,L] or global [L]
+                if position_ids.dim() == 2:
+                    q_position_ids = position_ids[:, :L]
+                    k_position_ids = position_ids[:, :key_len]
+                else:
+                    q_position_ids = position_ids[:L]
+                    k_position_ids = position_ids[:key_len]
+
             Q = self.pos_encoding.apply_rope(Q, q_position_ids)
             K = self.pos_encoding.apply_rope(K, k_position_ids)
         
