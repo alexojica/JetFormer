@@ -574,26 +574,40 @@ def train_from_config(config_dict: dict):
                 'epoch': 0,
                 'global_step': 0,
             })
-            # Sampling at initial validation
+            # Sampling at initial validation (dataset-aware)
             try:
                 base = accelerator.unwrap_model(model) if hasattr(accelerator, 'unwrap_model') else (model.module if hasattr(model, 'module') else model)
-                text_to_image_samples = generate_text_to_image_samples_cfg(
-                    base,
-                    dataset,
-                    device_obj,
-                    num_samples=3,
-                    cfg_strength=float(config.get('cfg_strength', 4.0)),
-                    cfg_mode=str(config.get('cfg_mode', 'reject'))
-                )
-                generation_table = wandb.Table(columns=["Stage", "Sample ID", "Text Prompt", "Image"])
-                for i, sample in enumerate(text_to_image_samples):
-                    generation_table.add_data(
-                        "init_val",
-                        i+1,
-                        sample['prompt'],
-                        wandb.Image(sample['image'])
+                samples = []
+                if str(dataset_choice).lower() in ('imagenet64_kaggle','imagenet21k_folder'):
+                    class_ids = [0, 250, 500, 750]
+                    for cls in class_ids:
+                        try:
+                            text_tokens = torch.zeros(1, base.class_token_length, dtype=torch.long, device=device_obj)
+                            text_mask = torch.ones(1, base.class_token_length, dtype=torch.bool, device=device_obj)
+                            text_first_mask = torch.tensor([True], device=device_obj)
+                            img_tokens = torch.zeros(1, base.image_seq_len, base.image_ar_dim, device=device_obj)
+                            for pos in range(base.image_seq_len):
+                                _ , _ = base(text_tokens, img_tokens, text_first_mask, text_mask, drop_text_cond_mask=None, class_ids=torch.tensor([cls], device=device_obj))
+                                hidden_pos = base.compute_image_hidden(text_tokens, img_tokens, text_first_mask, text_mask, drop_text_cond_mask=None, class_ids=torch.tensor([cls], device=device_obj))[:, pos:pos+1]
+                                sampled = base.sample_from_hidden_mixture_first(hidden_pos)
+                                img_tokens[:, pos:pos+1] = sampled
+                            res_dim = max(0, base.image_token_dim - base.image_ar_dim)
+                            tokens_full = torch.cat([img_tokens, torch.randn(1, base.image_seq_len, res_dim, device=device_obj)], dim=-1) if res_dim > 0 else img_tokens
+                            image01_bchw = base.decode_tokens_to_image01(tokens_full)
+                            img = image01_bchw[0].permute(1,2,0).cpu().numpy()
+                            samples.append({'prompt': f'class_{cls}', 'image': Image.fromarray((img*255).clip(0,255).astype('uint8'))})
+                        except Exception:
+                            continue
+                else:
+                    samples = generate_text_to_image_samples_cfg(
+                        base, dataset, device_obj, num_samples=4,
+                        cfg_strength=float(config.get('cfg_strength', 4.0)),
+                        cfg_mode=str(config.get('cfg_mode', 'reject'))
                     )
-                image_dict = {f"generation/init_val_image_{i+1}_{s['prompt']}": wandb.Image(s['image']) for i, s in enumerate(text_to_image_samples)}
+                generation_table = wandb.Table(columns=["Stage", "Sample ID", "Prompt/Class", "Image"])
+                for i, sample in enumerate(samples[:4]):
+                    generation_table.add_data("init_val", i+1, sample['prompt'], wandb.Image(sample['image']))
+                image_dict = {f"generation/init_val_image_{i+1}_{s['prompt']}": wandb.Image(s['image']) for i, s in enumerate(samples[:4])}
                 wandb.log({"generation/samples_table": generation_table, **image_dict, "generation/step": 0})
             except Exception as e:
                 print(f"Sampling at initial validation failed: {e}")
