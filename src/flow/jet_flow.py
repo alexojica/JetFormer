@@ -574,8 +574,12 @@ class Coupling(nn.Module):
         # and the FORWARD log-determinant.
         return x_final, fwd_logdet
 
-class JetModel(nn.Module):
-    """A complete normalizing flow model composed of a sequence of coupling layers."""
+class FlowCore(nn.Module):
+    """A complete normalizing flow model composed of a sequence of coupling layers.
+
+    Exposes a one-shot data-dependent initializer to avoid parameter mutations
+    during the first training forward under DDP.
+    """
     def __init__(self,
                  input_img_shape_hwc: Tuple[int, int, int],
                  depth: int = 32,
@@ -743,6 +747,16 @@ class JetModel(nn.Module):
             total_inv_logdet = total_inv_logdet + inv_logdet
         return x, total_inv_logdet
 
+    @torch.no_grad()
+    def initialize_with_batch(self, x_nhwc: torch.Tensor, context: torch.Tensor = None):
+        """Run a single forward pass to trigger data-dependent initializations (e.g., ActNorm).
+
+        Should be called on rank 0 before wrapping with DDP. After this, broadcast
+        the parameters to other ranks.
+        """
+        _ = self.forward(x_nhwc, context=context)
+        return None
+
 
 def load_params_from_flax_checkpoint(pytorch_model, flax_params_dict):
     """Placeholder function for loading model parameters from a Flax checkpoint."""
@@ -827,6 +841,8 @@ class CNNPredictor(nn.Module):
         return bias, scale, logdet
 
 
+JetModel = FlowCore
+
 if __name__ == '__main__':
     dummy_x = torch.randn(2, 32, 32, 3)
     
@@ -845,7 +861,7 @@ if __name__ == '__main__':
         "spatial_coupling_projs": ("checkerboard", "checkerboard-inv")
     }
 
-    model = JetModel(**jet_config)
+    model = FlowCore(**jet_config)
     print("JetModel instantiated.")
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

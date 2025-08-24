@@ -3,6 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from typing import Tuple
+from src.models.tokenizer import patchify as tk_patchify, unpatchify as tk_unpatchify
+from src.models.mixture import gmm_params as mix_gmm_params, gmm_distribution as mix_gmm_distribution, sample_gmm as mix_sample_gmm
+from src.losses.text import cross_entropy_second_only
 from src.transformer import Transformer
 from src.flow.jet_flow import JetModel
 from src.gemma_transformer import GemmaBlock
@@ -217,19 +220,11 @@ class JetFormer(nn.Module):
 
     def _patchify(self, images_nhwc: torch.Tensor) -> torch.Tensor:
         """Convert NHWC images to [B, N_patches, 3*ps*ps] tokens."""
-        B, H, W, C = images_nhwc.shape
-        x = images_nhwc.permute(0, 3, 1, 2).contiguous()  # B,C,H,W
-        patches = F.unfold(x, kernel_size=self.patch_size, stride=self.patch_size)  # B, C*ps*ps, N
-        tokens = patches.transpose(1, 2).contiguous()  # B, N, C*ps*ps
-        return tokens
+        return tk_patchify(images_nhwc, self.patch_size)
 
     def _unpatchify(self, tokens: torch.Tensor, H: int, W: int) -> torch.Tensor:
         """Convert [B, N_patches, 3*ps*ps] tokens back to NHWC images of size HxW."""
-        B, N, D = tokens.shape
-        x = tokens.transpose(1, 2).contiguous()  # B, D, N
-        ps = self.patch_size
-        x = F.fold(x, output_size=(H, W), kernel_size=ps, stride=ps)  # B, C, H, W
-        return x.permute(0, 2, 3, 1).contiguous()  # B,H,W,C
+        return tk_unpatchify(tokens, H, W, self.patch_size)
 
     def factor_tokens(self, full_tokens: torch.Tensor):
         """Split full flow tokens [B,N,Cps^2] into autoregressive dims and Gaussian residual dims."""
@@ -417,68 +412,18 @@ class JetFormer(nn.Module):
         return sampled
     
     def gmm(self, image_logits, target_tokens):
-        """Compute NLL for image tokens using mixture of Gaussians"""
-        batch_size, seq_len, _ = image_logits.shape
-        
-        mixture_logits = image_logits[..., :self.num_mixtures]
-        other_logits = image_logits[..., self.num_mixtures:].reshape(
-            batch_size, seq_len, self.num_mixtures, 2, self.image_ar_dim
-        )
-
-        def _square_plus(x):
-            return (x + torch.sqrt(torch.square(x) + 4)) / 2 
-        
-        means = other_logits[..., 0, :]
-        log_scales = other_logits[..., 1, :]
-
-        #mixture_logits = torch.softmax(mixture_logits, dim=-1)
-        scales = _square_plus(log_scales)
-        scales = torch.max(scales, torch.tensor(1e-6)) # threshold scale
-        
-        batch_seq_size = batch_size * seq_len
-        
-        mixture_logits_flat = mixture_logits.reshape(batch_seq_size, self.num_mixtures)
-        means_flat = means.reshape(batch_seq_size, self.num_mixtures, self.image_ar_dim)
-        scales_flat = scales.reshape(batch_seq_size, self.num_mixtures, self.image_ar_dim)
-        
-        mix = torch.distributions.Categorical(logits=mixture_logits_flat)
-        comp = torch.distributions.Independent(
-            torch.distributions.Normal(means_flat, scales_flat), 1
-        )
-        comps = torch.distributions.MixtureSameFamily(mix, comp)
-
-        target_flat = target_tokens.reshape(batch_seq_size, self.image_ar_dim)
-
+        """Compute NLL for image tokens using mixture of Gaussians (delegates to utils)."""
+        mix_logits, means, scales = mix_gmm_params(image_logits, self.num_mixtures, self.image_ar_dim)
+        comps, target_flat = mix_gmm_distribution(mix_logits, means, scales, target_tokens)
         return comps, target_flat
 
     def gmm_params(self, image_logits):
-        """Return mixture logits, means, scales from image head output.
-        image_logits: [B, L, k + 2*k*D]
-        Returns: mix_logits [B,L,k], means [B,L,k,D], scales [B,L,k,D]
-        """
-        B, L, _ = image_logits.shape
-        k = self.num_mixtures
-        D = self.image_ar_dim
-        mix_logits = image_logits[..., :k]
-        other = image_logits[..., k:].reshape(B, L, k, 2, D)
-        means = other[..., 0, :]
-        raw_scales = other[..., 1, :]
-        scales = (raw_scales + torch.sqrt(raw_scales * raw_scales + 4.0)) / 2.0
-        scales = torch.clamp(scales, min=1e-6)
-        return mix_logits, means, scales
+        """Delegates to utils to extract mixture parameters."""
+        return mix_gmm_params(image_logits, self.num_mixtures, self.image_ar_dim)
 
     def sample_gmm_fast(self, mix_logits_pos, means_pos, scales_pos):
-        """Sample from GMM at a single position.
-        Inputs are [B,k], [B,k,D], [B,k,D]
-        Returns [B,D]
-        """
-        mix = torch.distributions.Categorical(logits=mix_logits_pos)
-        comp_idx = mix.sample()
-        b = torch.arange(comp_idx.shape[0], device=mix_logits_pos.device)
-        sel_means = means_pos[b, comp_idx, :]
-        sel_scales = scales_pos[b, comp_idx, :]
-        normal = torch.distributions.Normal(sel_means, sel_scales)
-        return normal.sample()
+        """Sample from GMM at a single position via utility function."""
+        return mix_sample_gmm(mix_logits_pos, means_pos, scales_pos)
     
     def flow(self, images):
         # images expected as B,C,H,W in [-1,1]; map to [0,1]
@@ -536,3 +481,113 @@ class JetFormer(nn.Module):
             x_nhwc = self._unpatchify(tokens_orig, H, W)
         x_chw = torch.clamp(x_nhwc.permute(0, 3, 1, 2), 0.0, 1.0)
         return x_chw
+
+
+class JetFormerTrain(JetFormer):
+    def __init__(self,
+                 text_loss_weight: float = 0.0025,
+                 image_loss_weight: float = 1.0,
+                 rgb_sigma0: float = 64.0,
+                 rgb_sigma_final: float = 3.0,
+                 latent_noise_std: float = 0.3,
+                 cfg_drop_prob: float = 0.1,
+                 total_steps: int = 1,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.text_loss_weight = float(text_loss_weight)
+        self.image_loss_weight = float(image_loss_weight)
+        self.rgb_sigma0 = float(rgb_sigma0)
+        self.rgb_sigma_final = float(rgb_sigma_final)
+        self.latent_noise_std = float(latent_noise_std)
+        self.cfg_drop_prob = float(cfg_drop_prob)
+        self.total_steps = int(max(1, total_steps))
+        self.register_buffer("_step", torch.zeros((), dtype=torch.long), persistent=False)
+
+    def forward(self, *args, **kwargs):
+        # Dual-mode forward:
+        # - Training step when called with a single dict-like batch
+        # - AR core forward passthrough when called with (text_tokens, image_tokens, ...)
+        if len(args) == 1 and isinstance(args[0], dict) and len(kwargs) == 0:
+            batch = args[0]
+        else:
+            return super().forward(*args, **kwargs)
+
+        batch = batch
+        device = next(self.parameters()).device
+        images = batch['image'].to(device)
+        class_ids = batch.get('label', None)
+        if class_ids is not None:
+            class_ids = class_ids.to(device)
+        # Build text tokens/masks
+        if class_ids is not None:
+            B = images.size(0)
+            text_tokens = torch.zeros(B, self.class_token_length, dtype=torch.long, device=device)
+            text_mask = torch.ones(B, self.class_token_length, dtype=torch.bool, device=device)
+            text_loss_mask = torch.zeros(B, self.class_token_length, dtype=torch.bool, device=device)
+        else:
+            text_tokens = batch['text'].to(device)
+            text_mask = batch['text_mask'].to(device)
+            text_loss_mask = batch['text_loss'].to(device)
+
+        batch_size = images.shape[0]
+        # Modality order
+        if class_ids is not None:
+            text_first_mask = torch.ones(batch_size, dtype=torch.bool, device=device)
+        else:
+            text_first_mask = torch.bernoulli(torch.ones(batch_size, device=device) * 0.5).bool()
+        text_second_mask = ~text_first_mask
+
+        # Uniform dequant + RGB noise schedule to [0,1]
+        images01 = (images + 1.0) * 0.5
+        u = torch.rand_like(images01) / 256.0
+        step_val = int(self._step.item())
+        t_prog = min(1.0, max(0.0, step_val / max(1, self.total_steps)))
+        sigma_t = self.rgb_sigma0 * (1.0 + math.cos(math.pi * t_prog)) * 0.5
+        sigma_t = self.rgb_sigma_final + (sigma_t - self.rgb_sigma_final) * (1.0 - t_prog)
+        gaussian = torch.randn_like(images01) * (sigma_t / 255.0)
+        images01_noisy = torch.clamp(images01 + u + gaussian, 0.0, 1.0)
+
+        # Flow encode
+        x_nhwc = images01_noisy.permute(0, 2, 3, 1).contiguous()
+        log_det, tokens_full = self.flow_from_x01(images01_noisy)
+        hat_tokens, residual_tokens = self.factor_tokens(tokens_full)
+        hat_tokens_noisy = hat_tokens + torch.randn_like(hat_tokens) * self.latent_noise_std
+        # Stop-grad at flow output when image is prefix (text_second_mask True)
+        hat_tokens_in = torch.where(
+            text_second_mask.view(-1, 1, 1),
+            hat_tokens_noisy.detach(),
+            hat_tokens_noisy
+        )
+
+        # AR forward with CFG drop when text-first
+        drop_mask = (torch.rand(batch_size, device=device) < self.cfg_drop_prob)
+        text_logits, image_logits = super().forward(text_tokens, hat_tokens_in, text_first_mask, text_mask, drop_text_cond_mask=drop_mask, class_ids=class_ids)
+
+        # Text loss
+        if class_ids is not None:
+            text_loss = torch.tensor(0.0, device=device)
+        else:
+            text_loss = cross_entropy_second_only(text_logits, text_tokens, text_loss_mask, text_second_mask)
+
+        # Image loss (bpd)
+        mix_logits, means, scales = self.gmm_params(image_logits)
+        comps, targets_flat = mix_gmm_distribution(mix_logits, means, scales, hat_tokens)
+        gmm_nll_flat = -comps.log_prob(targets_flat)
+        N = gmm_nll_flat.shape[0] // batch_size
+        gmm_nll = gmm_nll_flat.view(batch_size, N).sum(dim=1)
+        residual_nll = self.gaussian_residual_nll(residual_tokens)
+        C, H, W = 3, self.input_size[0], self.input_size[1]
+        denom = (H * W * C) * math.log(2.0)
+        total_nll = gmm_nll + residual_nll - log_det
+        image_bpd_per_sample = total_nll / denom
+        image_loss = (image_bpd_per_sample * text_first_mask.float()).mean()
+
+        total_loss = (self.text_loss_weight * text_loss) + (self.image_loss_weight * image_loss)
+        # step++
+        self._step += 1
+        return {
+            "loss": total_loss,
+            "text_loss": text_loss.detach(),
+            "image_loss": image_loss.detach(),
+            "flow_bpd_component": (log_det / (H * W * C) / math.log(2.0)).mean().detach(),
+        }

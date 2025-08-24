@@ -10,9 +10,10 @@ import os
 from pathlib import Path
 import numpy as np
 from torch.utils.data import DataLoader, Dataset
+import torch.distributed as dist
 from src.dataset import LAIONPOPTextImageDataset
 from src.flow.dataset import KaggleImageFolderImagenet
-from src.jetformer import JetFormer
+from src.jetformer import JetFormerTrain
 from PIL import Image
 import torchvision.transforms as transforms
 from types import SimpleNamespace
@@ -345,7 +346,10 @@ def train_from_config(config_dict: dict):
     setattr(config, 'get', lambda key, default=None: getattr(config, key, default))
     print(f"Using device: {device_obj}")
     
-    model = JetFormer(
+    # total_steps estimate for schedules
+    total_steps = None
+    # set later after dataloader creation; pass a placeholder
+    model = JetFormerTrain(
         vocab_size=config.vocab_size,
         d_model=config.d_model,
         n_heads=config.n_heads,
@@ -369,6 +373,13 @@ def train_from_config(config_dict: dict):
         pre_latent_proj_matrix_path=config.get('pre_latent_proj_matrix_path', None),
         flow_actnorm=bool(config.get('flow_actnorm', False)),
         flow_invertible_dense=bool(config.get('flow_invertible_dense', False)),
+        text_loss_weight=float(getattr(config, 'text_loss_weight', 0.0025)),
+        image_loss_weight=float(getattr(config, 'image_loss_weight', 1.0)),
+        rgb_sigma0=float(getattr(config, 'rgb_sigma0', 64.0)),
+        rgb_sigma_final=float(getattr(config, 'rgb_sigma_final', 3.0)),
+        latent_noise_std=float(getattr(config, 'latent_noise_std', 0.3)),
+        cfg_drop_prob=float(getattr(config, 'cfg_drop_prob', 0.1)),
+        total_steps=int(max(1, len(train_loader) * config.num_epochs)) if False else 1,
     ).to(device_obj)
     
     total_params = sum(p.numel() for p in model.parameters())
@@ -392,8 +403,7 @@ def train_from_config(config_dict: dict):
         print("Model compiled with torch.compile")
     else:
         print("Model not compiled with torch.compile")
-    # Wrap with accelerator (adds DDP where applicable)
-    model = accelerator.wrap_model(model)
+    # Defer wrapping until after ActNorm init
     
     dataset_choice = getattr(config, 'dataset', 'laion_pop')
     if str(dataset_choice).lower() == 'imagenet64_kaggle':
@@ -437,7 +447,44 @@ def train_from_config(config_dict: dict):
     
     print(f"Dataset size: {len(dataset)}")
     print(f"Batches per epoch: {len(dataloader)}")
+
+    # --- One-shot ActNorm initialization on rank 0, then broadcast ---
+    if accelerator.is_main_process:
+        try:
+            init_batch = next(iter(dataloader))
+            images = init_batch['image'].to(device_obj)
+            images01 = (images + 1.0) * 0.5
+            u = torch.rand_like(images01) / 256.0
+            x01 = torch.clamp(images01 + u, 0.0, 1.0)
+            x_nhwc = x01.permute(0, 2, 3, 1).contiguous()
+            base = model
+            if hasattr(base, 'module'):
+                base = base.module
+            base.jet.initialize_with_batch(x_nhwc)
+            print("ActNorm initialized for JetFormer flow core.")
+        except Exception as e:
+            print(f"Warning: ActNorm initialize_with_batch failed: {e}")
+
+    if accelerator.ddp_enabled and dist.is_initialized():
+        base = model
+        if hasattr(base, 'module'):
+            base = base.module
+        for p in base.jet.parameters():
+            dist.broadcast(p.data, src=0)
+
+    # Wrap with accelerator (adds DDP where applicable) AFTER init
+    model = accelerator.wrap_model(model)
     
+    # Now that dataloader is ready, update total_steps in the model for schedules
+    try:
+        base_model = model
+        if hasattr(model, 'module'):
+            base_model = model.module
+        if hasattr(base_model, 'total_steps'):
+            base_model.total_steps = len(dataloader) * config.num_epochs
+    except Exception:
+        pass
+
     optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=0.0001, betas=(0.9, 0.95))
     
     total_steps = len(dataloader) * config.num_epochs
@@ -472,75 +519,13 @@ def train_from_config(config_dict: dict):
         iterable = accelerator.wrap_dataloader(dataloader, is_train=True) if hasattr(accelerator, 'wrap_dataloader') else dataloader
         for batch_idx, batch in enumerate(iterable):
             start_time = time.time()
-            
-            images = batch['image'].to(device_obj)
-            class_ids = batch['label'].to(device_obj) if isinstance(batch, dict) and ('label' in batch) else None
-            # For class-conditional ImageNet: use learned class tokens in place of text tokens
-            if class_ids is not None:
-                B = images.size(0)
-                text_tokens = torch.zeros(B, model.class_token_length, dtype=torch.long, device=device_obj)
-                text_mask = torch.ones(B, model.class_token_length, dtype=torch.bool, device=device_obj)
-                text_loss_mask = torch.zeros(B, model.class_token_length, dtype=torch.bool, device=device_obj)
-            else:
-                text_tokens = batch['text'].to(device_obj)
-                text_mask = batch['text_mask'].to(device_obj)
-                text_loss_mask = batch['text_loss'].to(device_obj)
-            batch_size = images.shape[0]
 
-            # Decide modality order
-            if class_ids is not None:
-                text_first_mask = torch.ones(batch_size, dtype=torch.bool, device=device_obj)
-            else:
-                text_first_mask = torch.bernoulli(torch.ones(batch_size, device=device_obj) * 0.5).bool()
-            text_second_mask = ~text_first_mask
-
-            # Uniform dequantization and RGB noise curriculum on input images in [0,1]
-            images01 = (images + 1.0) * 0.5
-            u = torch.rand_like(images01) / 256.0
-            total_steps = len(dataloader) * config.num_epochs
-            t_prog = min(1.0, max(0.0, step / max(1, total_steps)))
-            sigma0 = float(config.get('rgb_sigma0', 64.0))
-            sigma_final = float(config.get('rgb_sigma_final', 0.0))
-            sigma_t = sigma0 * (1.0 + math.cos(math.pi * t_prog)) * 0.5
-            if config.get('rgb_sigma_final', None) is not None:
-                sigma_t = sigma_final + (sigma_t - sigma_final) * (1.0 - t_prog)
-            gaussian = torch.randn_like(images01) * (sigma_t / 255.0)
-            images01_noisy = torch.clamp(images01 + u + gaussian, 0.0, 1.0)
-
-            # Flow forward (with autocast)
+            optimizer.zero_grad(set_to_none=True)
             autocast_ctx = accelerator.autocast(enabled=True) if hasattr(accelerator, 'autocast') else torch.amp.autocast(device_obj.type, enabled=False)
             with autocast_ctx:
-                log_det, tokens_full = model.flow_from_x01(images01_noisy)
-            hat_tokens, residual_tokens = model.factor_tokens(tokens_full)
-            latent_noise_std = float(config.get('latent_noise_std', 0.3))
-            hat_tokens_noisy = hat_tokens + torch.randn_like(hat_tokens) * latent_noise_std
+                out = model(batch)
+                loss = out["loss"]
 
-            # Stop-grad at flow output when image is prefix (I2T pretraining case)
-            hat_tokens_in = torch.where(
-                text_second_mask.view(-1, 1, 1),
-                hat_tokens_noisy.detach(),
-                hat_tokens_noisy
-            )
-            # AR transformer
-            # CFG: randomly drop text conditioning 10% when text is first
-            drop_prob = float(config.get('cfg_drop_prob', 0.1))
-            drop_mask = (torch.rand(batch_size, device=device_obj) < drop_prob)
-            with autocast_ctx:
-                text_logits, image_logits = model(text_tokens, hat_tokens_in, text_first_mask, text_mask, drop_text_cond_mask=drop_mask, class_ids=class_ids)
-            if class_ids is not None:
-                text_loss = torch.tensor(0.0, device=device_obj)
-            else:
-                text_loss = compute_text_loss_second_only(text_logits, text_tokens, text_loss_mask, config.vocab_size, text_second_mask)
-
-            # Image NLL → bits/dim
-            gmm_dist, hat_targets_flat = model.gmm(image_logits, hat_tokens)
-            residual_nll = model.gaussian_residual_nll(residual_tokens)
-            image_bpd_per_sample = image_bits_per_dim(gmm_dist, hat_targets_flat, log_det, residual_nll, image_shape=(3, images.shape[2], images.shape[3]))
-            image_loss = (image_bpd_per_sample * text_first_mask.float()).mean()
-
-            loss = (config.get('text_loss_weight', 0.0025) * text_loss) + (config.get('image_loss_weight', 1.0) * image_loss)
-            
-            optimizer.zero_grad()
             scaler.scale(loss).backward()
             if hasattr(scaler, 'unscale_'):
                 scaler.unscale_(optimizer)
@@ -551,20 +536,19 @@ def train_from_config(config_dict: dict):
                 scaler.step(optimizer)
                 scaler.update()
                 scheduler.step()
-            
+
             epoch_losses['total'] += loss.item()
-            epoch_losses['text'] += text_loss.item()
-            epoch_losses['image_gen'] += image_loss.item()
-            epoch_losses['flow'] += (log_det / (images.shape[2] * images.shape[3] * images.shape[1]) / math.log(2.0)).mean().item()
+            epoch_losses['text'] += float(out.get('text_loss', 0.0))
+            epoch_losses['image_gen'] += float(out.get('image_loss', 0.0))
+            epoch_losses['flow'] += float(out.get('flow_bpd_component', 0.0))
             num_batches += 1
             
             if is_main_process and wb_run is not None and (step % int(getattr(config, 'log_every_batches', 10)) == 0):
                 wandb.log({
                     "train/total_loss": loss.item(),
-                    "train/text_loss": text_loss.item(),
-                    "train/image_gen_loss": image_loss.item(),
-                    "train/flow_bpd_component": (log_det / (images.shape[2] * images.shape[3] * images.shape[1]) / math.log(2.0)).mean().item(),
-                    "train/sigma_t": sigma_t,
+                    "train/text_loss": float(out.get('text_loss', 0.0)),
+                    "train/image_gen_loss": float(out.get('image_loss', 0.0)),
+                    "train/flow_bpd_component": float(out.get('flow_bpd_component', 0.0)),
                     "train/learning_rate": scheduler.get_last_lr()[0],
                     "train/step": step,
                     "train/epoch": epoch,
@@ -576,13 +560,15 @@ def train_from_config(config_dict: dict):
                 print(f"Epoch {epoch+1}/{config.num_epochs}, "
                         f"Batch {batch_idx}/{len(dataloader)}, "
                         f"Total Loss: {loss.item():.4f}, "
-                        f"Text: {text_loss.item():.4f}, "
-                        f"Image Gen: {image_loss.item():.4f}")
+                        f"Text: {float(out.get('text_loss', 0.0)):.4f}, "
+                        f"Image Gen: {float(out.get('image_loss', 0.0)):.4f}")
                 
                 print("Generating samples for wandb logging...")
                 try:
+                    # Unwrap and use base model for sampling
+                    base = accelerator.unwrap_model(model) if hasattr(accelerator, 'unwrap_model') else (model.module if hasattr(model, 'module') else model)
                     text_to_image_samples = generate_text_to_image_samples_cfg(
-                        model,
+                        base,
                         dataset,
                         device_obj,
                         num_samples=3,
