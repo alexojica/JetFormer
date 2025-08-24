@@ -514,10 +514,10 @@ class JetFormerTrain(JetFormer):
 
         batch = batch
         device = next(self.parameters()).device
-        images = batch['image'].to(device)
+        images = batch['image'].to(device, non_blocking=True)
         class_ids = batch.get('label', None)
         if class_ids is not None:
-            class_ids = class_ids.to(device)
+            class_ids = class_ids.to(device, non_blocking=True)
         # Build text tokens/masks
         if class_ids is not None:
             B = images.size(0)
@@ -525,9 +525,9 @@ class JetFormerTrain(JetFormer):
             text_mask = torch.ones(B, self.class_token_length, dtype=torch.bool, device=device)
             text_loss_mask = torch.zeros(B, self.class_token_length, dtype=torch.bool, device=device)
         else:
-            text_tokens = batch['text'].to(device)
-            text_mask = batch['text_mask'].to(device)
-            text_loss_mask = batch['text_loss'].to(device)
+            text_tokens = batch['text'].to(device, non_blocking=True)
+            text_mask = batch['text_mask'].to(device, non_blocking=True)
+            text_loss_mask = batch['text_loss'].to(device, non_blocking=True)
 
         batch_size = images.shape[0]
         # Modality order
