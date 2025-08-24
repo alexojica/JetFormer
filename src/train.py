@@ -572,6 +572,29 @@ def train_from_config(config_dict: dict):
                 'epoch': 0,
                 'global_step': 0,
             })
+            # Sampling at initial validation
+            try:
+                base = accelerator.unwrap_model(model) if hasattr(accelerator, 'unwrap_model') else (model.module if hasattr(model, 'module') else model)
+                text_to_image_samples = generate_text_to_image_samples_cfg(
+                    base,
+                    dataset,
+                    device_obj,
+                    num_samples=3,
+                    cfg_strength=float(config.get('cfg_strength', 4.0)),
+                    cfg_mode=str(config.get('cfg_mode', 'reject'))
+                )
+                generation_table = wandb.Table(columns=["Stage", "Sample ID", "Text Prompt", "Image"])
+                for i, sample in enumerate(text_to_image_samples):
+                    generation_table.add_data(
+                        "init_val",
+                        i+1,
+                        sample['prompt'],
+                        wandb.Image(sample['image'])
+                    )
+                image_dict = {f"generation/init_val_image_{i+1}_{s['prompt']}": wandb.Image(s['image']) for i, s in enumerate(text_to_image_samples)}
+                wandb.log({"generation/samples_table": generation_table, **image_dict, "generation/step": 0})
+            except Exception as e:
+                print(f"Sampling at initial validation failed: {e}")
         best_val_loss = v_total
 
     for epoch in range(config.num_epochs):
@@ -721,6 +744,29 @@ def train_from_config(config_dict: dict):
                     'epoch': epoch+1,
                     'global_step': step,
                 })
+                # Sampling at validation
+                try:
+                    base = accelerator.unwrap_model(model) if hasattr(accelerator, 'unwrap_model') else (model.module if hasattr(model, 'module') else model)
+                    text_to_image_samples = generate_text_to_image_samples_cfg(
+                        base,
+                        dataset,
+                        device_obj,
+                        num_samples=3,
+                        cfg_strength=float(config.get('cfg_strength', 4.0)),
+                        cfg_mode=str(config.get('cfg_mode', 'reject'))
+                    )
+                    generation_table = wandb.Table(columns=["Stage", "Sample ID", "Text Prompt", "Image"])
+                    for i, sample in enumerate(text_to_image_samples):
+                        generation_table.add_data(
+                            f"val_epoch_{epoch+1}",
+                            i+1,
+                            sample['prompt'],
+                            wandb.Image(sample['image'])
+                        )
+                    image_dict = {f"generation/val_epoch{epoch+1}_image_{i+1}_{s['prompt']}": wandb.Image(s['image']) for i, s in enumerate(text_to_image_samples)}
+                    wandb.log({"generation/samples_table": generation_table, **image_dict, "generation/step": step})
+                except Exception as e:
+                    print(f"Sampling at validation failed: {e}")
             # Save checkpoint every 5 epochs if validation improves
             improved = v_total < best_val_loss
             if improved:
