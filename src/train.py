@@ -630,7 +630,8 @@ def train_from_config(config_dict: dict):
                     'epoch': epoch,
                     'config': (dict(wandb.config) if wb_run is not None else config_dict),
                 }
-                torch.save(checkpoint, f'jetformer_laion_pop_epoch_{epoch+1}_batch_{batch_idx}.pt')
+                ckpt_path = f'jetformer_laion_pop_epoch_{epoch+1}_batch_{batch_idx}.pt'
+                torch.save(checkpoint, ckpt_path)
                 print(f"✓ Saved checkpoint for epoch {epoch+1} at batch {batch_idx}")
                 if is_main_process and wb_run is not None:
                     try:
