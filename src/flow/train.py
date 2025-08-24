@@ -12,7 +12,8 @@ import numpy as np
 import math
 import time # For timing steps/epochs
 import random
-from .jet_flow import JetModel
+from .jet_flow import FlowCore
+from .train_module import FlowTrain
 from .dataset import TFDSImagenet64, KaggleImageFolderImagenet64, TFDSImagenet32, KaggleImageFolderImagenet, TorchvisionCIFAR10, ImageNet21kFolder
 from tqdm import tqdm
 import wandb
@@ -490,7 +491,7 @@ def main():
         model_cfg["ps"] = 2 if res == 32 else 4
     print(f"Patch size set to {model_cfg['ps']} for {res}x{res} resolution (K={(res//model_cfg['ps'])**2}).")
 
-    model = JetModel(
+    core = FlowCore(
         input_img_shape_hwc=input_shape_hwc,
         depth=model_cfg["N"],
         block_depth=(model_cfg["vit_depth"] if model_cfg["backbone"] == "vit" else (model_cfg.get("cnn_depth") or model_cfg["vit_depth"])),
@@ -509,7 +510,27 @@ def main():
         use_grad_checkpoint=model_cfg["grad_checkpoint"],
     ).to(device)
 
-    # Wrap with accelerator
+    # Data-dependent init before wrapping
+    if is_main_process:
+        try:
+            # Take a small batch from train_loader for ActNorm init
+            init_batch = next(iter(train_loader))
+            images_uint8 = init_batch["image"].to(device, non_blocking=True)
+            images_float = images_uint8.float()
+            noise = torch.rand_like(images_float)
+            images01 = (images_float + noise) / 256.0
+            x_nhwc = images01.permute(0, 2, 3, 1).contiguous()
+            core.initialize_with_batch(x_nhwc)
+        except Exception as e:
+            if is_main_process:
+                print(f"Warning: FlowCore initialize_with_batch failed: {e}")
+
+    # Broadcast initialized params to other ranks if distributed
+    if ddp_enabled and dist.is_initialized():
+        for p in core.parameters():
+            dist.broadcast(p.data, src=0)
+
+    model = FlowTrain(core, image_shape_hwc=input_shape_hwc).to(device)
     model = accelerator.wrap_model(model)
     
     # --- Safety checks and summary logging ---
@@ -713,29 +734,38 @@ def main():
         if ddp_enabled and train_loader.sampler is not None and hasattr(train_loader.sampler, 'set_epoch'):
             train_loader.sampler.set_epoch(epoch)
 
-        current_step = train_one_epoch(
-            model=model,
-            dataloader=train_loader,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            device=device,
-            epoch=epoch,
-            total_epochs=total_epochs,
-            grad_clip_norm=config["grad_clip_norm"],
-            image_shape_hwc=image_shape_hwc_for_loss,
-            current_step=current_step,
-            scaler=scaler,
-            show_progress=is_main_process,
-            log_to_wandb=wandb_enabled and is_main_process,
-            accelerator=accelerator
-        )
+        # Simplified forward-only training step
+        model.train()
+        iterable = accelerator.wrap_dataloader(train_loader, is_train=True) if accelerator is not None and hasattr(accelerator, 'wrap_dataloader') else train_loader
+        progress_bar = tqdm(iterable, desc=f"Train Epoch {epoch+1}/{total_epochs}", leave=True) if is_main_process else iterable
+        for i, batch in enumerate(progress_bar):
+            images_uint8 = batch["image"] if getattr(device, 'type', getattr(device, 'device_type', 'cpu')) == 'xla' else batch["image"].to(device, non_blocking=True)
+            optimizer.zero_grad(set_to_none=True)
+            autocast_ctx = accelerator.autocast(enabled=True) if accelerator is not None else torch.amp.autocast(device.type, enabled=False)
+            with autocast_ctx:
+                out = model(images_uint8)
+                loss = out["loss"]
+            scaler.scale(loss).backward()
+            if hasattr(scaler, 'unscale_'):
+                scaler.unscale_(optimizer)
+            nn.utils.clip_grad_norm_(model.parameters(), config["grad_clip_norm"]) if config["grad_clip_norm"] > 0 else None
+            if accelerator is not None and hasattr(accelerator, 'step'):
+                accelerator.step(optimizer, scaler, scheduler)
+            else:
+                scaler.step(optimizer)
+                scaler.update()
+                if scheduler is not None:
+                    scheduler.step()
+            current_step += 1
+            if is_main_process and hasattr(progress_bar, 'set_postfix'):
+                progress_bar.set_postfix({"loss_bpd": float(out["bpd"])})
         
         # Perform validation every val_interval epochs and on the final epoch
         perform_val = ((epoch + 1) % val_interval == 0) or ((epoch + 1) == total_epochs)
 
         if perform_val:
             sum_val_loss, sum_val_nll, sum_val_logdet, num_val_samples = evaluate_one_epoch(
-                model=model,
+                model=core,
                 dataloader=val_loader,
                 device=device,
                 image_shape_hwc=image_shape_hwc_for_loss,
