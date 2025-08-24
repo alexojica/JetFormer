@@ -118,10 +118,36 @@ class GPUAccelerator:
         return train_sampler, val_sampler
 
     def wrap_model(self, model: nn.Module) -> nn.Module:
+        def _attach_passthroughs(wrapper: nn.Module, inner: nn.Module) -> nn.Module:
+            # Expose selected custom APIs on the wrapper to avoid attribute errors under DDP/DP.
+            passthrough_methods = [
+                'flow_from_x01',
+                'factor_tokens',
+                'gaussian_residual_nll',
+                'gmm',
+                'decode_tokens_to_image01',
+                'compute_image_hidden',
+                'sample_from_hidden_mixture_first',
+            ]
+            passthrough_attrs = [
+                'image_ar_dim', 'image_token_dim', 'image_seq_len', 'num_mixtures', 'class_token_length'
+            ]
+            for name in passthrough_methods + passthrough_attrs:
+                if hasattr(inner, name) and not hasattr(wrapper, name):
+                    try:
+                        setattr(wrapper, name, getattr(inner, name))
+                    except Exception:
+                        pass
+            return wrapper
+
         if self.ddp_enabled and self.device.type == 'cuda':
-            return DDP(model.to(self.device), device_ids=[self.device.index], output_device=self.device.index, find_unused_parameters=False)
+            wrapped = DDP(model.to(self.device), device_ids=[self.device.index], output_device=self.device.index, find_unused_parameters=False)
+            return _attach_passthroughs(wrapped, model)
         elif self.device.type == 'cuda' and torch.cuda.device_count() > 1:
-            return nn.DataParallel(model.to(self.device))
+            wrapped = nn.DataParallel(model.to(self.device))
+            # DataParallel keeps the original in .module
+            inner = wrapped.module if hasattr(wrapped, 'module') else model
+            return _attach_passthroughs(wrapped, inner)
         else:
             return model.to(self.device)
 
