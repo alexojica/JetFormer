@@ -9,8 +9,9 @@ import math
 import os
 from pathlib import Path
 import numpy as np
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from src.dataset import LAIONPOPTextImageDataset
+from src.flow.dataset import KaggleImageFolderImagenet
 from src.jetformer import JetFormer
 from PIL import Image
 import torchvision.transforms as transforms
@@ -118,7 +119,7 @@ def generate_text_to_image_samples(model, dataset, device, num_samples=3, temper
     return samples
 
 @torch.no_grad()
-def generate_text_to_image_samples_cfg(model, dataset, device, num_samples=3, cfg_strength=4.0):
+def generate_text_to_image_samples_cfg(model, dataset, device, num_samples=3, cfg_strength=4.0, cfg_mode: str = "reject", fast_mixture_first: bool = False):
     model.eval()
     samples = []
 
@@ -133,6 +134,39 @@ def generate_text_to_image_samples_cfg(model, dataset, device, num_samples=3, cf
         scales = (raw_scales + torch.sqrt(raw_scales * raw_scales + 4.0)) / 2.0
         scales = torch.clamp(scales, min=1e-6)
         return mix_logits, means, scales
+
+    def _mixture_log_prob(mix_logits, means, scales, x):
+        """Compute log prob of x under mixture with logits, means, scales.
+        mix_logits: [B, k]; means/scales: [B, k, D]; x: [B, D]
+        Returns [B]
+        """
+        B, k = mix_logits.shape
+        D = x.shape[-1]
+        # logZ for mixture weights normalization
+        logZ = torch.logsumexp(mix_logits, dim=-1)  # [B]
+        # Expand x for broadcasting to [B, k, D]
+        x_exp = x.unsqueeze(1).expand(-1, k, -1)
+        # Log N(x | mean, scale) per component
+        var = (scales * scales).clamp_min(1e-12)
+        log_two_pi = torch.log(torch.tensor(2.0 * math.pi, device=x.device, dtype=x.dtype))
+        log_norm_const = -0.5 * (log_two_pi + torch.log(var))  # [B,k,D]
+        log_exp_term = -0.5 * ((x_exp - means) * (x_exp - means) / var)  # [B,k,D]
+        log_normal = (log_norm_const + log_exp_term).sum(dim=-1)  # [B,k]
+        # Mixture log prob: logsumexp(logits + logN) - logZ
+        numer = torch.logsumexp(mix_logits + log_normal, dim=-1)  # [B]
+        return numer - logZ
+
+    def _sample_from_mixture(mix_logits, means, scales):
+        """Sample x ~ mixture defined by logits, means, scales. Returns [B,D]."""
+        B, k = mix_logits.shape
+        D = means.shape[-1]
+        mix = torch.distributions.Categorical(logits=mix_logits)
+        comp_idx = mix.sample()  # [B]
+        b = torch.arange(B, device=mix_logits.device)
+        sel_means = means[b, comp_idx, :]  # [B,D]
+        sel_scales = scales[b, comp_idx, :]
+        normal = torch.distributions.Normal(sel_means, sel_scales)
+        return normal.sample()  # [B,D]
 
     prompt_texts = [
         "a car",
@@ -152,24 +186,76 @@ def generate_text_to_image_samples_cfg(model, dataset, device, num_samples=3, cf
             full_mask = torch.ones(1, text_tokens.shape[1], device=device, dtype=torch.bool)
 
             for pos in range(model.image_seq_len):
-                # Forward conditional
+                # Forward conditional and unconditional
                 text_logits_c, image_logits_c = model(text_tokens, image_tokens, text_first_mask, full_mask, drop_text_cond_mask=None)
-                # Forward unconditional (drop text cond)
                 text_logits_u, image_logits_u = model(text_tokens, image_tokens, text_first_mask, full_mask, drop_text_cond_mask=torch.tensor([True], device=device))
 
                 if pos < image_logits_c.shape[1]:
-                    # Combine via CFG in parameter space
-                    guided_logits = image_logits_u + cfg_strength * (image_logits_c - image_logits_u)
-                    mix_logits, means, scales = parse_gmm_logits(guided_logits[:, pos:pos+1])
-                    # Sample mixture index then Gaussian
-                    mix = torch.distributions.Categorical(logits=mix_logits.squeeze(1))  # [B,k]
-                    comp_idx = mix.sample()  # [B]
-                    bidx = torch.arange(comp_idx.shape[0], device=device)
-                    sel_means = means[:, 0, comp_idx, :]  # [B, d]
-                    sel_scales = scales[:, 0, comp_idx, :]  # [B, d]
-                    normal = torch.distributions.Normal(sel_means, sel_scales)
-                    sampled = normal.sample()
-                    image_tokens[0, pos] = sampled[0]
+                    if cfg_mode == "interp" and fast_mixture_first:
+                        # Fast path: interpolate hidden states and sample mixture first
+                        hid_c = model.compute_image_hidden(text_tokens, image_tokens, text_first_mask, full_mask, drop_text_cond_mask=None)
+                        hid_u = model.compute_image_hidden(text_tokens, image_tokens, text_first_mask, full_mask, drop_text_cond_mask=torch.tensor([True], device=device))
+                        guided_hid = hid_u + cfg_strength * (hid_c - hid_u)
+                        pos_hidden = guided_hid[:, pos:pos+1]
+                        sampled = model.sample_from_hidden_mixture_first(pos_hidden)
+                        image_tokens[0, pos] = sampled[0, 0]
+                    elif cfg_mode == "interp":
+                        # Parameter interpolation (baseline)
+                        guided_logits = image_logits_u + cfg_strength * (image_logits_c - image_logits_u)
+                        mix_logits, means, scales = parse_gmm_logits(guided_logits[:, pos:pos+1])
+                        mix = torch.distributions.Categorical(logits=mix_logits.squeeze(1))
+                        comp_idx = mix.sample()
+                        bidx = torch.arange(comp_idx.shape[0], device=device)
+                        sel_means = means[:, 0, comp_idx, :]
+                        sel_scales = scales[:, 0, comp_idx, :]
+                        normal = torch.distributions.Normal(sel_means, sel_scales)
+                        sampled = normal.sample()
+                        image_tokens[0, pos] = sampled[0]
+                    else:
+                        # Rejection sampling in distribution space (GIVT-style)
+                        # Map cfg_strength s to gamma in (0,1): gamma = s/(1+s)
+                        gamma = float(cfg_strength) / (float(cfg_strength) + 1.0)
+                        gamma = max(0.0, min(0.999, gamma))
+
+                        # Extract per-position parameters
+                        mix_c, means_c, scales_c = parse_gmm_logits(image_logits_c[:, pos:pos+1])
+                        mix_u, means_u, scales_u = parse_gmm_logits(image_logits_u[:, pos:pos+1])
+                        mix_c = mix_c.squeeze(1)
+                        means_c = means_c.squeeze(1)
+                        scales_c = scales_c.squeeze(1)
+                        mix_u = mix_u.squeeze(1)
+                        means_u = means_u.squeeze(1)
+                        scales_u = scales_u.squeeze(1)
+
+                        # Proposal: conditional mixture p_c
+                        max_tries = 64
+                        accepted = False
+                        for _ in range(max_tries):
+                            x = _sample_from_mixture(mix_c, means_c, scales_c)  # [B,D]
+                            log_pc = _mixture_log_prob(mix_c, means_c, scales_c, x)
+                            log_pu = _mixture_log_prob(mix_u, means_u, scales_u, x)
+                            # Acceptance prob ~ exp((1-gamma)*(log_pu - log_pc)) clipped to [0,1]
+                            log_r = (1.0 - gamma) * (log_pu - log_pc)
+                            # To avoid overflow/underflow
+                            log_r = torch.clamp(log_r, min=-20.0, max=0.0)
+                            r = torch.exp(log_r)  # in (0,1]
+                            u = torch.rand_like(r)
+                            if (u <= r).item():
+                                image_tokens[0, pos] = x[0]
+                                accepted = True
+                                break
+                        if not accepted:
+                            # Fallback to interpolation if RS fails to accept
+                            guided_logits = image_logits_u + cfg_strength * (image_logits_c - image_logits_u)
+                            mix_logits, means, scales = parse_gmm_logits(guided_logits[:, pos:pos+1])
+                            mix = torch.distributions.Categorical(logits=mix_logits.squeeze(1))
+                            comp_idx = mix.sample()
+                            bidx = torch.arange(comp_idx.shape[0], device=device)
+                            sel_means = means[:, 0, comp_idx, :]
+                            sel_scales = scales[:, 0, comp_idx, :]
+                            normal = torch.distributions.Normal(sel_means, sel_scales)
+                            sampled = normal.sample()
+                            image_tokens[0, pos] = sampled[0]
 
             # Reconstruct full latent tokens and decode
             if res_dim > 0:
@@ -254,6 +340,10 @@ def train_from_config(config_dict: dict):
         class_token_length=config.get('class_token_length', 16),
         latent_projection=config.get('latent_projection', None),
         latent_proj_matrix_path=config.get('latent_proj_matrix_path', None),
+        pre_latent_projection=config.get('pre_latent_projection', None),
+        pre_latent_proj_matrix_path=config.get('pre_latent_proj_matrix_path', None),
+        flow_actnorm=bool(config.get('flow_actnorm', False)),
+        flow_invertible_dense=bool(config.get('flow_invertible_dense', False)),
     ).to(device)
     
     total_params = sum(p.numel() for p in model.parameters())
@@ -278,19 +368,31 @@ def train_from_config(config_dict: dict):
     else:
         print("Model not compiled with torch.compile")
     
-    print("Creating LAION-POP dataset...")
-    dataset = LAIONPOPTextImageDataset(
-        vocab_size=getattr(config, 'vocab_size', 32000),
-        tokenizer_path=getattr(config, 'tokenizer_path', "gs://t5-data/vocabs/cc_en.32000/sentencepiece.model"),
-        max_text_len=getattr(config, 'max_seq_len', 64),
-        image_size=tuple(getattr(config, 'input_size', (256, 256))),
-        cache_dir=getattr(config, 'cache_dir', "./laion_pop_cache"),
-        max_samples=getattr(config, 'max_samples', None),
-        use_cogvlm_captions=getattr(config, 'use_cogvlm_captions', True),
-        min_resolution=getattr(config, 'min_resolution', 512),
-        num_workers=getattr(config, 'num_workers', 4),
-        ignore_pad=getattr(config, 'ignore_pad', False)
-    )
+    dataset_choice = getattr(config, 'dataset', 'laion_pop')
+    if str(dataset_choice).lower() == 'imagenet64_kaggle':
+        print("Creating ImageNet64 Kaggle dataset (class-conditional)...")
+        H, W = tuple(getattr(config, 'input_size', (256, 256)))
+        res = int(H)
+        dataset = KaggleImageFolderImagenet(
+            split='train',
+            resolution=res,
+            kaggle_dataset_id=getattr(config, 'kaggle_dataset_id', 'ayaroshevskiy/downsampled-imagenet-64x64'),
+            max_samples=getattr(config, 'max_samples', None)
+        )
+    else:
+        print("Creating LAION-POP dataset...")
+        dataset = LAIONPOPTextImageDataset(
+            vocab_size=getattr(config, 'vocab_size', 32000),
+            tokenizer_path=getattr(config, 'tokenizer_path', "gs://t5-data/vocabs/cc_en.32000/sentencepiece.model"),
+            max_text_len=getattr(config, 'max_seq_len', 64),
+            image_size=tuple(getattr(config, 'input_size', (256, 256))),
+            cache_dir=getattr(config, 'cache_dir', "./laion_pop_cache"),
+            max_samples=getattr(config, 'max_samples', None),
+            use_cogvlm_captions=getattr(config, 'use_cogvlm_captions', True),
+            min_resolution=getattr(config, 'min_resolution', 512),
+            num_workers=getattr(config, 'num_workers', 4),
+            ignore_pad=getattr(config, 'ignore_pad', False)
+        )
     
     dataloader = DataLoader(
         dataset, 
@@ -332,15 +434,25 @@ def train_from_config(config_dict: dict):
         for batch_idx, batch in enumerate(dataloader):
             start_time = time.time()
             
-            text_tokens = batch['text'].to(device)
-            text_mask = batch['text_mask'].to(device)
-            text_loss_mask = batch['text_loss'].to(device)
-            class_ids = batch['label'].to(device) if isinstance(batch, dict) and ('label' in batch) else None
             images = batch['image'].to(device)
-            batch_size = text_tokens.shape[0]
+            class_ids = batch['label'].to(device) if isinstance(batch, dict) and ('label' in batch) else None
+            # For class-conditional ImageNet: use learned class tokens in place of text tokens
+            if class_ids is not None:
+                B = images.size(0)
+                text_tokens = torch.zeros(B, model.class_token_length, dtype=torch.long, device=device)
+                text_mask = torch.ones(B, model.class_token_length, dtype=torch.bool, device=device)
+                text_loss_mask = torch.zeros(B, model.class_token_length, dtype=torch.bool, device=device)
+            else:
+                text_tokens = batch['text'].to(device)
+                text_mask = batch['text_mask'].to(device)
+                text_loss_mask = batch['text_loss'].to(device)
+            batch_size = images.shape[0]
 
             # Decide modality order
-            text_first_mask = torch.bernoulli(torch.ones(batch_size, device=device) * 0.5).bool()
+            if class_ids is not None:
+                text_first_mask = torch.ones(batch_size, dtype=torch.bool, device=device)
+            else:
+                text_first_mask = torch.bernoulli(torch.ones(batch_size, device=device) * 0.5).bool()
             text_second_mask = ~text_first_mask
 
             # Uniform dequantization and RGB noise curriculum on input images in [0,1]
@@ -421,7 +533,14 @@ def train_from_config(config_dict: dict):
                 
                 print("Generating samples for wandb logging...")
                 try:
-                    text_to_image_samples = generate_text_to_image_samples_cfg(model, dataset, device, num_samples=3, cfg_strength=float(config.get('cfg_strength', 4.0)))
+                    text_to_image_samples = generate_text_to_image_samples_cfg(
+                        model,
+                        dataset,
+                        device,
+                        num_samples=3,
+                        cfg_strength=float(config.get('cfg_strength', 4.0)),
+                        cfg_mode=str(config.get('cfg_mode', 'reject'))
+                    )
                     
                     # Create a new table each time instead of reusing the same one
                     generation_table = wandb.Table(
@@ -487,6 +606,9 @@ if __name__ == "__main__":
     parser.add_argument('--class_token_length', type=int, default=None)
     parser.add_argument('--latent_projection', type=str, default=None, choices=['learned','pca_frozen','none'])
     parser.add_argument('--latent_proj_matrix_path', type=str, default=None)
+    # Flow ablations
+    parser.add_argument('--flow_actnorm', type=str, default=None, choices=['true','false'])
+    parser.add_argument('--flow_invertible_dense', type=str, default=None, choices=['true','false'])
     # Training
     parser.add_argument('--batch_size', type=int, default=None)
     parser.add_argument('--learning_rate', type=float, default=None)
@@ -494,6 +616,8 @@ if __name__ == "__main__":
     parser.add_argument('--torch_compile', type=str, default=None, choices=['true','false'])
     parser.add_argument('--device', type=str, default=None, choices=['auto','cpu','cuda','mps'])
     # Dataset
+    parser.add_argument('--dataset', type=str, default=None, choices=['laion_pop','imagenet64_kaggle'])
+    parser.add_argument('--kaggle_dataset_id', type=str, default=None)
     parser.add_argument('--max_samples', type=int, default=None)
     parser.add_argument('--use_cogvlm_captions', type=str, default=None, choices=['true','false'])
     parser.add_argument('--min_resolution', type=int, default=None)
@@ -507,6 +631,7 @@ if __name__ == "__main__":
     parser.add_argument('--latent_noise_std', type=float, default=None)
     parser.add_argument('--cfg_drop_prob', type=float, default=None)
     parser.add_argument('--cfg_strength', type=float, default=None)
+    parser.add_argument('--cfg_mode', type=str, default=None, choices=['reject','interp'])
     parser.add_argument('--log_every_batches', type=int, default=None)
     parser.add_argument('--sample_every_batches', type=int, default=None)
     # W&B

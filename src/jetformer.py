@@ -31,6 +31,12 @@ class JetFormer(nn.Module):
         class_token_length: int = 16,
         latent_projection: str = None,  # None|"learned"|"pca_frozen"
         latent_proj_matrix_path: str = None,
+        # Pre-flow projection options
+        pre_latent_projection: str = None,  # None|"learned"|"pca_frozen"
+        pre_latent_proj_matrix_path: str = None,
+        # Flow ablation toggles
+        flow_actnorm: bool = False,
+        flow_invertible_dense: bool = False,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -64,6 +70,8 @@ class JetFormer(nn.Module):
             emb_dim=jet_emb_dim,
             num_heads=jet_num_heads,
             ps=patch_size,
+            actnorm=flow_actnorm,
+            invertible_dense=flow_invertible_dense,
         )
         
         self.text_emb = nn.Embedding(vocab_size, d_model)
@@ -121,6 +129,58 @@ class JetFormer(nn.Module):
                         self.proj.set_weight(W_np, frozen=True)
                 except Exception:
                     pass
+
+        # Pre-flow projection W on patch tokens
+        self.pre_latent_projection = None if (pre_latent_projection is None or str(pre_latent_projection).lower() in {"none", "false"}) else str(pre_latent_projection).lower()
+        self.pre_proj = None
+        self._preproj_logdet_per_patch = None
+        if self.pre_latent_projection is not None:
+            D_full_px = 3 * patch_size * patch_size
+            class InvertibleLinearPre(nn.Module):
+                def __init__(self, dim: int):
+                    super().__init__()
+                    W, _ = torch.linalg.qr(torch.randn(dim, dim))
+                    P, L, U = torch.linalg.lu(W)
+                    self.register_buffer('P', P)
+                    self.L = nn.Parameter(L)
+                    self.U = nn.Parameter(U)
+                    self.L_mask = torch.tril(torch.ones_like(self.L), diagonal=-1)
+                    self.U_mask = torch.triu(torch.ones_like(self.U), diagonal=0)
+                def _weight(self):
+                    L = self.L * self.L_mask + torch.eye(self.L.shape[0], device=self.L.device, dtype=self.L.dtype)
+                    U = self.U * self.U_mask
+                    W = self.P @ L @ U
+                    return W
+                def forward(self, x: torch.Tensor):
+                    W = self._weight()
+                    y = x @ W.t()
+                    logdet = torch.sum(torch.log(torch.abs(torch.diag(self.U))))
+                    return y, logdet
+                def inverse(self, y: torch.Tensor):
+                    W = self._weight()
+                    WinvT = torch.inverse(W).t()
+                    x = y @ WinvT
+                    logdet = -torch.sum(torch.log(torch.abs(torch.diag(self.U))))
+                    return x, logdet
+                def set_weight(self, W_new: torch.Tensor, frozen: bool = True):
+                    with torch.no_grad():
+                        P, L, U = torch.linalg.lu(W_new)
+                        self.P.copy_(P)
+                        self.L.copy_(L)
+                        self.U.copy_(U)
+                    if frozen:
+                        for p in self.parameters():
+                            p.requires_grad = False
+            self.pre_proj = InvertibleLinearPre(D_full_px)
+            if self.pre_latent_projection == "pca_frozen" and pre_latent_proj_matrix_path:
+                try:
+                    W_px = torch.from_numpy(__import__('numpy').load(pre_latent_proj_matrix_path)).float()
+                    if W_px.shape[0] == W_px.shape[1] == D_full_px:
+                        self.pre_proj.set_weight(W_px, frozen=True)
+                except Exception:
+                    pass
+            with torch.no_grad():
+                self._preproj_logdet_per_patch = torch.sum(torch.log(torch.abs(torch.diag(self.pre_proj.U))))
         
         max_total_len = max_seq_len + self.image_seq_len + 1
         # Gemma-style backbone with Multi-Query Attention
@@ -436,6 +496,12 @@ class JetFormer(nn.Module):
         if images01.dim() != 4 or images01.size(1) != 3:
             raise ValueError("images01 must be [B,3,H,W]")
         x_nhwc = images01.permute(0, 2, 3, 1).contiguous()
+        # Apply pre-flow projection on patches if configured
+        if self.pre_latent_projection is not None and self.pre_proj is not None:
+            H, W = self.input_size
+            tokens_px = self._patchify(x_nhwc)
+            tokens_px, pre_logdet = self.pre_proj(tokens_px)
+            x_nhwc = self._unpatchify(tokens_px, H, W)
         z_nhwc, log_det = self.jet(x_nhwc)
         tokens = self._patchify(z_nhwc)
         # Optional latent projection before factoring
@@ -445,6 +511,11 @@ class JetFormer(nn.Module):
             B = tokens.shape[0]
             N_patches = tokens.shape[1]
             log_det = log_det + proj_logdet.expand(B) * N_patches
+        # Account for pre-projection logdet per patch
+        if self.pre_latent_projection is not None and self._preproj_logdet_per_patch is not None:
+            B = tokens.shape[0]
+            N_patches = tokens.shape[1]
+            log_det = log_det + self._preproj_logdet_per_patch.expand(B) * N_patches
         return log_det, tokens
 
     @torch.no_grad()
@@ -458,5 +529,10 @@ class JetFormer(nn.Module):
             tokens, _ = self.proj.inverse(tokens)
         z_nhwc = self._unpatchify(tokens, H, W)
         x_nhwc, _ = self.jet.inverse(z_nhwc)
+        # Undo pre-flow projection if applied
+        if self.pre_latent_projection is not None and self.pre_proj is not None:
+            tokens_px = self._patchify(x_nhwc)
+            tokens_orig, _ = self.pre_proj.inverse(tokens_px)
+            x_nhwc = self._unpatchify(tokens_orig, H, W)
         x_chw = torch.clamp(x_nhwc.permute(0, 3, 1, 2), 0.0, 1.0)
         return x_chw

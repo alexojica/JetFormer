@@ -585,7 +585,7 @@ class JetModel(nn.Module):
                  scale_factor: float = 2.0,
                  ps: int = 4,
                  backbone: str = 'vit',
-                 channel_repeat: int = 4,
+                 channel_repeat: int = 0,
                  spatial_mode: str = 'mix',
                  channels_coupling_projs: Sequence[str] = ('random',),
                  masking_mode: str = 'pairing',
