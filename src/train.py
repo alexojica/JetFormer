@@ -444,8 +444,22 @@ def train_from_config(config_dict: dict):
             ignore_pad=getattr(config, 'ignore_pad', False)
         )
     
-    # Build samplers and dataloader
-    train_sampler, _ = accelerator.build_samplers(dataset, dataset)
+    # Build train/val datasets and loaders
+    # For imagenet64_kaggle / imagenet21k_folder create an explicit val split
+    if str(dataset_choice).lower() == 'imagenet64_kaggle':
+        H, W = tuple(getattr(config, 'input_size', (256, 256)))
+        res = int(H)
+        val_dataset = KaggleImageFolderImagenet(split='val', resolution=res, kaggle_dataset_id=getattr(config, 'kaggle_dataset_id', 'ayaroshevskiy/downsampled-imagenet-64x64'))
+    elif str(dataset_choice).lower() == 'imagenet21k_folder':
+        root = getattr(config, 'imagenet21k_root', None)
+        H, W = tuple(getattr(config, 'input_size', (256, 256)))
+        res = int(H)
+        val_dataset = ImageNet21kFolder(root_dir=root, split='val', resolution=res)
+    else:
+        # No explicit val set; reuse train dataset for a quick sanity val (not ideal)
+        val_dataset = dataset
+
+    train_sampler, val_sampler = accelerator.build_samplers(dataset, val_dataset)
     dataloader = DataLoader(
         dataset,
         batch_size=config.batch_size,
@@ -458,8 +472,20 @@ def train_from_config(config_dict: dict):
         pin_memory=True if device_obj.type == 'cuda' else False
     )
     
-    print(f"Dataset size: {len(dataset)}")
-    print(f"Batches per epoch: {len(dataloader)}")
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config.batch_size,
+        shuffle=False,
+        sampler=val_sampler,
+        num_workers=int(getattr(config, 'num_workers', 1) or 1),
+        prefetch_factor=1,
+        persistent_workers=False,
+        drop_last=False,
+        pin_memory=True if device_obj.type == 'cuda' else False
+    )
+
+    print(f"Train size: {len(dataset)}; Val size: {len(val_dataset)}")
+    print(f"Batches per epoch: {len(dataloader)}; Val batches: {len(val_loader)}")
 
     # --- One-shot ActNorm initialization on rank 0, then broadcast ---
     if accelerator.is_main_process:
@@ -511,6 +537,43 @@ def train_from_config(config_dict: dict):
     model.train()
     step = 0
     
+    @torch.no_grad()
+    def _evaluate_one_epoch(model_obj, loader):
+        model_obj.eval()
+        sum_total = 0.0
+        sum_text = 0.0
+        sum_img = 0.0
+        sum_flow = 0.0
+        count = 0
+        iterable = accelerator.wrap_dataloader(loader, is_train=False) if hasattr(accelerator, 'wrap_dataloader') else loader
+        for batch in iterable:
+            out = model_obj(batch)
+            bsz = batch['image'].size(0)
+            sum_total += float(out.get('loss', 0.0)) * bsz
+            sum_text += float(out.get('text_loss', 0.0)) * bsz
+            sum_img += float(out.get('image_loss', 0.0)) * bsz
+            sum_flow += float(out.get('flow_bpd_component', 0.0)) * bsz
+            count += bsz
+        model_obj.train()
+        denom = max(1, count)
+        return (sum_total/denom, sum_text/denom, sum_img/denom, sum_flow/denom)
+
+    # Initial validation before training starts
+    best_val_loss = float('inf')
+    if is_main_process:
+        v_total, v_text, v_img, v_flow = _evaluate_one_epoch(model, val_loader)
+        print(f"Initial Val — total: {v_total:.4f} | text: {v_text:.4f} | img: {v_img:.4f}")
+        if wb_run is not None:
+            wandb.log({
+                'val/total_loss': v_total,
+                'val/text_loss': v_text,
+                'val/image_gen_loss': v_img,
+                'val/flow_bpd_component': v_flow,
+                'epoch': 0,
+                'global_step': 0,
+            })
+        best_val_loss = v_total
+
     for epoch in range(config.num_epochs):
         epoch_losses = {
             'total': 0.0,
@@ -645,7 +708,42 @@ def train_from_config(config_dict: dict):
                         pass
                 
             step += 1
-                
+        # End of epoch: run validation
+        if is_main_process:
+            v_total, v_text, v_img, v_flow = _evaluate_one_epoch(model, val_loader)
+            print(f"Val Epoch {epoch+1} — total: {v_total:.4f} | text: {v_text:.4f} | img: {v_img:.4f}")
+            if wb_run is not None:
+                wandb.log({
+                    'val/total_loss': v_total,
+                    'val/text_loss': v_text,
+                    'val/image_gen_loss': v_img,
+                    'val/flow_bpd_component': v_flow,
+                    'epoch': epoch+1,
+                    'global_step': step,
+                })
+            # Save checkpoint every 5 epochs if validation improves
+            improved = v_total < best_val_loss
+            if improved:
+                best_val_loss = v_total
+            if improved and ((epoch + 1) % 5 == 0):
+                os.makedirs('checkpoints', exist_ok=True)
+                model_to_save = accelerator.unwrap_model(model) if hasattr(accelerator, 'unwrap_model') else (model.module if hasattr(model, 'module') else model)
+                ckpt_path = os.path.join('checkpoints', f'jetformer_best_epoch{epoch+1}.pt')
+                torch.save({
+                    'model_state_dict': model_to_save.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': (scheduler.state_dict() if scheduler is not None else {}),
+                    'epoch': epoch,
+                    'best_val_loss': best_val_loss,
+                    'config': (dict(wandb.config) if wb_run is not None else config_dict),
+                }, ckpt_path)
+                print(f"✓ Saved improved checkpoint at {ckpt_path}")
+                if wb_run is not None:
+                    try:
+                        wandb.save(ckpt_path)
+                    except Exception:
+                        pass
+
     print("Training completed!")
     # Save final checkpoint at end of training
     try:
