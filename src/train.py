@@ -12,7 +12,7 @@ import numpy as np
 from torch.utils.data import DataLoader, Dataset
 import torch.distributed as dist
 from src.dataset import LAIONPOPTextImageDataset
-from src.flow.dataset import KaggleImageFolderImagenet
+from src.flow.dataset import KaggleImageFolderImagenet, ImageNet21kFolder
 from src.jetformer import JetFormerTrain
 from PIL import Image
 import torchvision.transforms as transforms
@@ -421,6 +421,14 @@ def train_from_config(config_dict: dict):
             kaggle_dataset_id=getattr(config, 'kaggle_dataset_id', 'ayaroshevskiy/downsampled-imagenet-64x64'),
             max_samples=getattr(config, 'max_samples', None)
         )
+    elif str(dataset_choice).lower() == 'imagenet21k_folder':
+        root = getattr(config, 'imagenet21k_root', None)
+        if not root:
+            raise ValueError("--imagenet21k_root must be provided for imagenet21k_folder dataset")
+        H, W = tuple(getattr(config, 'input_size', (256, 256)))
+        res = int(H)
+        print("Creating ImageNet-21k folder dataset (class-conditional)...")
+        dataset = ImageNet21kFolder(root_dir=root, split='train', resolution=res, max_samples=getattr(config, 'max_samples', None))
     else:
         print("Creating LAION-POP dataset...")
         dataset = LAIONPOPTextImageDataset(
@@ -691,9 +699,11 @@ if __name__ == "__main__":
     parser.add_argument('--accelerator', type=str, default=None, choices=['auto','gpu','tpu'])
     parser.add_argument('--distributed', type=str, default=None, choices=['true','false'])
     parser.add_argument('--precision', type=str, default=None, choices=['auto','fp32','fp16','bf16','tf32'])
+    parser.add_argument('--grad_accum_steps', type=int, default=None)
     # Dataset
-    parser.add_argument('--dataset', type=str, default=None, choices=['laion_pop','imagenet64_kaggle'])
+    parser.add_argument('--dataset', type=str, default=None, choices=['laion_pop','imagenet64_kaggle','imagenet21k_folder'])
     parser.add_argument('--kaggle_dataset_id', type=str, default=None)
+    parser.add_argument('--imagenet21k_root', type=str, default=None)
     parser.add_argument('--max_samples', type=int, default=None)
     parser.add_argument('--use_cogvlm_captions', type=str, default=None, choices=['true','false'])
     parser.add_argument('--min_resolution', type=int, default=None)
