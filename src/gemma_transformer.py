@@ -64,18 +64,30 @@ class MultiQueryAttention(nn.Module):
             Q = self.pos_encoding.apply_rope(Q, q_position_ids)
             K = self.pos_encoding.apply_rope(K, k_position_ids)
         
-        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+        # Use PyTorch SDPA for fast fused attention (FlashAttention/MemEff kernels on CUDA)
+        # Q, K, V are [B, H, L, Dk] and [B, H, S, Dk]; SDPA expects (..., L, E) etc.,
+        # so reshape to (B*H, L, Dk) forms and call SDPA per head via batch dims.
+        q = Q.transpose(1, 2)  # [B, L, H, Dk]
+        k = K.transpose(1, 2)  # [B, S, H, Dk]
+        v = V.transpose(1, 2)  # [B, S, H, Dk]
+        q = q.reshape(B, L, self.n_heads, self.d_k).permute(0, 2, 1, 3).reshape(B * self.n_heads, L, self.d_k)
+        k = k.reshape(B, key_len, self.n_heads, self.d_k).permute(0, 2, 1, 3).reshape(B * self.n_heads, key_len, self.d_k)
+        v = v.reshape(B, key_len, self.n_heads, self.d_k).permute(0, 2, 1, 3).reshape(B * self.n_heads, key_len, self.d_k)
+
+        attn_mask = None
         if mask is not None:
-            # Use dtype-safe minimum to avoid fp16 overflow from large negative constants
-            mask_value = torch.finfo(scores.dtype).min
-            scores = scores.masked_fill(mask == 0, mask_value)
-        
-        attn_weights = F.softmax(scores, dim=-1)
-        attn_weights = self.dropout(attn_weights)
-        
-        out = torch.matmul(attn_weights, V)
-        out = out.transpose(1, 2).contiguous().reshape(B, L, D)
-        
+            # mask is [B, 1, L, S] boolean; expand to [B*H, L, S]
+            attn_mask = mask.expand(B, self.n_heads, L, key_len).reshape(B * self.n_heads, L, key_len)
+
+        out = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=attn_mask,
+            dropout_p=(self.dropout.p if self.training else 0.0),
+            is_causal=False,
+        )  # [B*H, L, Dk]
+
+        out = out.reshape(B, self.n_heads, L, self.d_k).permute(0, 2, 1, 3).contiguous().reshape(B, L, D)
+
         return self.w_o(out)
     
 class GemmaBlock(nn.Module):

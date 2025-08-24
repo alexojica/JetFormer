@@ -56,42 +56,60 @@ def compute_text_loss_second_only(text_logits, text_tokens, text_loss_mask, voca
 def generate_text_to_image_samples(model, dataset, device, num_samples=3, temperature=1.0):
     model.eval()
     samples = []
-    
+
     prompt_texts = [
         "a car",
-        "a cat", 
+        "a cat",
         "a dog"
     ]
+    is_class_conditional = bool(getattr(model, 'num_classes', None)) and getattr(model, 'num_classes') > 0
+
     with torch.no_grad():
         for i, prompt_text in enumerate(prompt_texts[:num_samples]):
             try:
-                tokenized = dataset.tokenize_text(prompt_text)
-                text_tokens = tokenized['tokens'].unsqueeze(0).to(device)  # [1, seq_len]
-                text_mask = tokenized['text_mask'].unsqueeze(0).to(device)
-                
+                class_id = None
+                if is_class_conditional and not hasattr(dataset, 'tokenize_text'):
+                    # Class-conditional path (e.g., ImageNet datasets)
+                    class_id = int(i % int(getattr(model, 'num_classes', 1000)))
+                    text_tokens = torch.zeros(1, getattr(model, 'class_token_length', 16), dtype=torch.long, device=device)
+                    text_mask = torch.ones(1, getattr(model, 'class_token_length', 16), dtype=torch.bool, device=device)
+                    prompt_label = None
+                    if hasattr(dataset, 'classes') and class_id < len(getattr(dataset, 'classes', [])):
+                        prompt_label = dataset.classes[class_id]
+                    prompt_value = prompt_label if prompt_label is not None else f'class_{class_id}'
+                else:
+                    # Text-conditional path
+                    tokenized = dataset.tokenize_text(prompt_text)
+                    text_tokens = tokenized['tokens'].unsqueeze(0).to(device)  # [1, seq_len]
+                    text_mask = tokenized['text_mask'].unsqueeze(0).to(device)
+                    prompt_value = prompt_text
+
                 # Autoregressive dims only
                 ar_dim = getattr(model, 'image_ar_dim', model.image_token_dim)
                 full_dim = model.image_token_dim
                 res_dim = max(0, full_dim - ar_dim)
                 image_tokens = torch.zeros(1, model.image_seq_len, ar_dim, device=device)
-                
+
                 text_first_mask = torch.tensor([True], device=device)
-                
+
                 total_len = text_tokens.shape[1] + model.image_seq_len + 1  # +1 for BOI token
                 full_mask = torch.ones(1, text_tokens.shape[1], device=device, dtype=torch.bool)
-                
+
                 for pos in range(model.image_seq_len):
-                    _, image_logits = model(text_tokens, image_tokens, text_first_mask, full_mask)
-                    
+                    if class_id is not None:
+                        _, image_logits = model(text_tokens, image_tokens, text_first_mask, full_mask, class_ids=torch.tensor([class_id], device=device))
+                    else:
+                        _, image_logits = model(text_tokens, image_tokens, text_first_mask, full_mask)
+
                     if pos < image_logits.shape[1]:
                         gmm_dist, _ = model.gmm(image_logits[:, pos:pos+1], image_tokens[:, pos:pos+1])
-                        
+
                         if temperature != 1.0:
                             sampled_token = gmm_dist.sample()
                             sampled_token = sampled_token * temperature
                         else:
                             sampled_token = gmm_dist.sample()
-                        
+
                         image_tokens[0, pos] = sampled_token.squeeze()
 
                 # Reconstruct flow latents: concatenate sampled residual dims ~ N(0,1)
@@ -105,12 +123,12 @@ def generate_text_to_image_samples(model, dataset, device, num_samples=3, temper
                 image01 = image01_bchw[0]
                 image_np = image01.permute(1, 2, 0).cpu().numpy()
                 image_pil = Image.fromarray((image_np * 255).astype(np.uint8))
-                
+
                 samples.append({
-                    'prompt': prompt_text,
+                    'prompt': prompt_value,
                     'image': image_pil
                 })
-                    
+
             except Exception as e:
                 print(f"Failed to generate text-to-image sample {i}: {e}")
                 import traceback
@@ -120,7 +138,7 @@ def generate_text_to_image_samples(model, dataset, device, num_samples=3, temper
                     'prompt': prompt_text,
                     'image': placeholder
                 })
-    
+
     model.train()
     return samples
 
@@ -179,11 +197,25 @@ def generate_text_to_image_samples_cfg(model, dataset, device, num_samples=3, cf
         "a cat",
         "a dog"
     ]
+    is_class_conditional = bool(getattr(model, 'num_classes', None)) and getattr(model, 'num_classes') > 0
+
     for i, prompt_text in enumerate(prompt_texts[:num_samples]):
         try:
-            tok = dataset.tokenize_text(prompt_text)
-            text_tokens = tok['tokens'].unsqueeze(0).to(device)
-            text_mask = tok['text_mask'].unsqueeze(0).to(device)
+            class_id = None
+            if is_class_conditional and not hasattr(dataset, 'tokenize_text'):
+                # Class-conditional path (e.g., ImageNet datasets)
+                class_id = int(i % int(getattr(model, 'num_classes', 1000)))
+                text_tokens = torch.zeros(1, getattr(model, 'class_token_length', 16), dtype=torch.long, device=device)
+                text_mask = torch.ones(1, getattr(model, 'class_token_length', 16), dtype=torch.bool, device=device)
+                prompt_label = None
+                if hasattr(dataset, 'classes') and class_id < len(getattr(dataset, 'classes', [])):
+                    prompt_label = dataset.classes[class_id]
+                prompt_value = prompt_label if prompt_label is not None else f'class_{class_id}'
+            else:
+                tok = dataset.tokenize_text(prompt_text)
+                text_tokens = tok['tokens'].unsqueeze(0).to(device)
+                text_mask = tok['text_mask'].unsqueeze(0).to(device)
+                prompt_value = prompt_text
             ar_dim = getattr(model, 'image_ar_dim', model.image_token_dim)
             full_dim = model.image_token_dim
             res_dim = max(0, full_dim - ar_dim)
@@ -193,8 +225,18 @@ def generate_text_to_image_samples_cfg(model, dataset, device, num_samples=3, cf
 
             for pos in range(model.image_seq_len):
                 # Forward conditional and unconditional
-                text_logits_c, image_logits_c = model(text_tokens, image_tokens, text_first_mask, full_mask, drop_text_cond_mask=None)
-                text_logits_u, image_logits_u = model(text_tokens, image_tokens, text_first_mask, full_mask, drop_text_cond_mask=torch.tensor([True], device=device))
+                if class_id is not None:
+                    text_logits_c, image_logits_c = model(
+                        text_tokens, image_tokens, text_first_mask, full_mask, drop_text_cond_mask=None,
+                        class_ids=torch.tensor([class_id], device=device)
+                    )
+                    text_logits_u, image_logits_u = model(
+                        text_tokens, image_tokens, text_first_mask, full_mask, drop_text_cond_mask=torch.tensor([True], device=device),
+                        class_ids=torch.tensor([class_id], device=device)
+                    )
+                else:
+                    text_logits_c, image_logits_c = model(text_tokens, image_tokens, text_first_mask, full_mask, drop_text_cond_mask=None)
+                    text_logits_u, image_logits_u = model(text_tokens, image_tokens, text_first_mask, full_mask, drop_text_cond_mask=torch.tensor([True], device=device))
 
                 if pos < image_logits_c.shape[1]:
                     if cfg_mode == "interp" and fast_mixture_first:
@@ -275,7 +317,7 @@ def generate_text_to_image_samples_cfg(model, dataset, device, num_samples=3, cf
             image_pil = Image.fromarray((image_np * 255).astype(np.uint8))
 
             samples.append({
-                'prompt': prompt_text,
+                'prompt': prompt_value,
                 'image': image_pil
             })
         except Exception as e:
@@ -283,7 +325,7 @@ def generate_text_to_image_samples_cfg(model, dataset, device, num_samples=3, cf
             import traceback
             traceback.print_exc()
             placeholder = Image.new('RGB', (256, 256), color='red')
-            samples.append({'prompt': prompt_text, 'image': placeholder})
+            samples.append({'prompt': (prompt_value if 'prompt_value' in locals() else prompt_text), 'image': placeholder})
 
     model.train()
     return samples
@@ -337,6 +379,21 @@ def train_from_config(config_dict: dict):
         acc_name = accelerator.__class__.__name__.replace('Accelerator', '').upper()
         print(f"Using device: {device_obj}; accelerator={acc_name}; DDP: {ddp_enabled}; world_size={accelerator.world_size}; rank={accelerator.rank}")
 
+    # Support resuming W&B by run name if run_id not specified
+    try:
+        desired_run_name = cfg_raw.get('wandb_run_name', None)
+        provided_run_id = cfg_raw.get('wandb_run_id', None)
+        if desired_run_name and not provided_run_id:
+            safe_name = ''.join([c if (c.isalnum() or c in '-_.') else '_' for c in str(desired_run_name)])
+            id_sidecar = os.path.join('checkpoints', f'wandb_id__{safe_name}.txt')
+            if os.path.exists(id_sidecar):
+                with open(id_sidecar, 'r') as f:
+                    recovered_id = f.read().strip()
+                    if recovered_id:
+                        cfg_raw['wandb_run_id'] = recovered_id
+    except Exception:
+        pass
+
     wb_run = _init_wandb(cfg_raw, is_main_process=is_main_process)
     if os.environ.get('DEBUG') is not None:
         torch.autograd.set_detect_anomaly(True)
@@ -356,6 +413,7 @@ def train_from_config(config_dict: dict):
     # Infer num_classes for ImageNet64 if not provided
     inferred_num_classes = 1000 if str(dataset_choice).lower() == 'imagenet64_kaggle' else None
 
+    resume_from_path = cfg_raw.get('resume_from', None)
     model = JetFormerTrain(
         vocab_size=config.vocab_size,
         d_model=config.d_model,
@@ -388,6 +446,19 @@ def train_from_config(config_dict: dict):
         cfg_drop_prob=float(getattr(config, 'cfg_drop_prob', 0.1)),
         total_steps=int(max(1, len(train_loader) * config.num_epochs)) if False else 1,
     ).to(device_obj)
+    # If resuming, load model weights before optional compile/wrap
+    start_epoch = 0
+    _loaded_ckpt = None
+    if isinstance(resume_from_path, str) and os.path.exists(resume_from_path):
+        try:
+            print(f"Resuming from checkpoint: {resume_from_path}")
+            _loaded_ckpt = torch.load(resume_from_path, map_location=device_obj)
+            missing, unexpected = model.load_state_dict(_loaded_ckpt.get('model_state_dict', {}), strict=False)
+            if missing or unexpected:
+                print(f"Loaded with missing keys: {len(missing)}, unexpected keys: {len(unexpected)}")
+            start_epoch = int(_loaded_ckpt.get('epoch', -1)) + 1
+        except Exception as e:
+            print(f"Failed to load model state from {resume_from_path}: {e}")
     
     total_params = sum(p.numel() for p in model.parameters())
     jet_params = sum(p.numel() for p in model.jet.parameters())
@@ -467,9 +538,9 @@ def train_from_config(config_dict: dict):
         batch_size=config.batch_size,
         shuffle=(train_sampler is None),
         sampler=train_sampler,
-        num_workers=int(getattr(config, 'num_workers', 1) or 1),
-        prefetch_factor=1,
-        persistent_workers=False,
+        num_workers=int(getattr(config, 'num_workers', 8) or 8),
+        prefetch_factor=4,
+        persistent_workers=True,
         drop_last=True,
         pin_memory=True if device_obj.type == 'cuda' else False
     )
@@ -479,9 +550,9 @@ def train_from_config(config_dict: dict):
         batch_size=config.batch_size,
         shuffle=False,
         sampler=val_sampler,
-        num_workers=int(getattr(config, 'num_workers', 1) or 1),
-        prefetch_factor=1,
-        persistent_workers=False,
+        num_workers=int(getattr(config, 'num_workers', 8) or 8),
+        prefetch_factor=4,
+        persistent_workers=True,
         drop_last=False,
         pin_memory=True if device_obj.type == 'cuda' else False
     )
@@ -490,10 +561,10 @@ def train_from_config(config_dict: dict):
     print(f"Batches per epoch: {len(dataloader)}; Val batches: {len(val_loader)}")
 
     # --- One-shot ActNorm initialization on rank 0, then broadcast ---
-    if accelerator.is_main_process:
+    if accelerator.is_main_process and not (_loaded_ckpt is not None):
         try:
             init_batch = next(iter(dataloader))
-            images = init_batch['image'].to(device_obj)
+            images = init_batch['image'].to(device_obj, non_blocking=True)
             images01 = (images + 1.0) * 0.5
             u = torch.rand_like(images01) / 256.0
             x01 = torch.clamp(images01 + u, 0.0, 1.0)
@@ -526,9 +597,32 @@ def train_from_config(config_dict: dict):
     except Exception:
         pass
 
-    optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=0.0001, betas=(0.9, 0.95))
+    try:
+        optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=0.0001, betas=(0.9, 0.95), fused=True)
+    except TypeError:
+        optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=0.0001, betas=(0.9, 0.95))
+    # If resuming, load optimizer/scheduler state after optimizer is created
+    if _loaded_ckpt is not None:
+        try:
+            if 'optimizer_state_dict' in _loaded_ckpt:
+                optimizer.load_state_dict(_loaded_ckpt['optimizer_state_dict'])
+        except Exception as e:
+            print(f"Warning: failed to load optimizer state: {e}")
     
     total_steps = len(dataloader) * config.num_epochs
+    # Initialize training step and model's internal step counter when resuming
+    step = 0
+    if _loaded_ckpt is not None:
+        try:
+            steps_per_epoch = len(dataloader)
+            step = max(0, start_epoch) * steps_per_epoch
+            base_model = model
+            if hasattr(base_model, 'module'):
+                base_model = base_model.module
+            if hasattr(base_model, '_step'):
+                base_model._step = torch.tensor(step, dtype=torch.long, device=device_obj)
+        except Exception:
+            pass
     
     # Remove OneCycle to align closer with paper defaults; keep constant LR unless configured
     scheduler = None
@@ -537,7 +631,21 @@ def train_from_config(config_dict: dict):
     scaler = accelerator.create_grad_scaler(enabled=True)
 
     model.train()
-    step = 0
+    # Persist W&B run id by name for future resume-by-name if applicable
+    if wb_run is not None:
+        try:
+            rn = cfg_raw.get('wandb_run_name', None)
+            rid = getattr(wb_run, 'id', None)
+            if rn and rid:
+                safe_name = ''.join([c if (c.isalnum() or c in '-_.') else '_' for c in str(rn)])
+                os.makedirs('checkpoints', exist_ok=True)
+                sidecar = os.path.join('checkpoints', f'wandb_id__{safe_name}.txt')
+                with open(sidecar, 'w') as f:
+                    f.write(str(rid))
+        except Exception:
+            pass
+    
+    # step is set above when resuming
     
     @torch.no_grad()
     def _evaluate_one_epoch(model_obj, loader):
@@ -613,7 +721,7 @@ def train_from_config(config_dict: dict):
                 print(f"Sampling at initial validation failed: {e}")
         best_val_loss = v_total
 
-    for epoch in range(config.num_epochs):
+    for epoch in range(int(start_epoch), int(config.num_epochs)):
         epoch_losses = {
             'total': 0.0,
             'text': 0.0,
@@ -736,6 +844,8 @@ def train_from_config(config_dict: dict):
                     'scheduler_state_dict': (scheduler.state_dict() if scheduler is not None else {}),
                     'epoch': epoch,
                     'config': (dict(wandb.config) if wb_run is not None else config_dict),
+                    'wandb_run_id': (getattr(wb_run, 'id', None) if wb_run is not None else None),
+                    'wandb_run_name': cfg_raw.get('wandb_run_name', None),
                 }
                 ckpt_path = f'jetformer_laion_pop_epoch_{epoch+1}_batch_{batch_idx}.pt'
                 torch.save(checkpoint, ckpt_path)
@@ -798,6 +908,8 @@ def train_from_config(config_dict: dict):
                     'epoch': epoch,
                     'best_val_loss': best_val_loss,
                     'config': (dict(wandb.config) if wb_run is not None else config_dict),
+                    'wandb_run_id': (getattr(wb_run, 'id', None) if wb_run is not None else None),
+                    'wandb_run_name': cfg_raw.get('wandb_run_name', None),
                 }, ckpt_path)
                 print(f"✓ Saved improved checkpoint at {ckpt_path}")
                 if wb_run is not None:
@@ -816,6 +928,8 @@ def train_from_config(config_dict: dict):
             'scheduler_state_dict': (scheduler.state_dict() if scheduler is not None else {}),
             'epoch': config.num_epochs - 1 if hasattr(config, 'num_epochs') else None,
             'config': (dict(wandb.config) if wb_run is not None else config_dict),
+            'wandb_run_id': (getattr(wb_run, 'id', None) if wb_run is not None else None),
+            'wandb_run_name': cfg_raw.get('wandb_run_name', None),
         }
         if is_main_process:
             final_ckpt_path = 'jetformer_final.pt'
@@ -887,6 +1001,8 @@ if __name__ == "__main__":
     parser.add_argument('--wandb_run_name', type=str, default=None)
     parser.add_argument('--wandb_run_id', type=str, default=None)
     parser.add_argument('--wandb_tags', type=str, nargs='*', default=None)
+    # Resume / checkpoint
+    parser.add_argument('--resume_from', type=str, default=None, help='Path to checkpoint .pt to resume from')
 
     args = parser.parse_args()
     # Load YAML
