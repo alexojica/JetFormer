@@ -57,8 +57,8 @@ def get_optimizer_and_scheduler(model: nn.Module,
                                 config: dict,
                                 total_steps: int):
     """Creates an AdamW optimizer and a cosine learning rate scheduler with optional warmup."""
-    lr = config.get("lr", 3e-4)
-    wd = config.get("wd", 1e-5)
+    lr = config.get("lr", 1e-3)
+    wd = config.get("wd", 1e-4)
     adam_b2 = config.get("opt_b2", 0.95)
 
     optimizer = optim.AdamW(
@@ -530,7 +530,10 @@ def main():
         for p in core.parameters():
             dist.broadcast(p.data, src=0)
 
-    model = FlowTrain(core, image_shape_hwc=input_shape_hwc).to(device)
+    # total_steps for curriculum; choose sigma_final 0 for ImageNet64 (class-conditional)
+    total_steps = len(train_loader) * total_epochs
+    sigma_final = 0.0
+    model = FlowTrain(core, image_shape_hwc=input_shape_hwc, total_steps=total_steps, sigma0=float(config.get("rgb_sigma0", 64.0)), sigma_final=sigma_final).to(device)
     model = accelerator.wrap_model(model)
     
     # --- Safety checks and summary logging ---

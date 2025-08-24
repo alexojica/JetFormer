@@ -543,7 +543,8 @@ class JetFormerTrain(JetFormer):
         step_val = int(self._step.item())
         t_prog = min(1.0, max(0.0, step_val / max(1, self.total_steps)))
         sigma_t = self.rgb_sigma0 * (1.0 + math.cos(math.pi * t_prog)) * 0.5
-        sigma_t = self.rgb_sigma_final + (sigma_t - self.rgb_sigma_final) * (1.0 - t_prog)
+        # Clamp to a minimum final noise level as per paper (0 for ImageNet, 3 for multimodal)
+        sigma_t = max(self.rgb_sigma_final, sigma_t)
         gaussian = torch.randn_like(images01) * (sigma_t / 255.0)
         images01_noisy = torch.clamp(images01 + u + gaussian, 0.0, 1.0)
 

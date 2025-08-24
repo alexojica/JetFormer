@@ -349,6 +349,10 @@ def train_from_config(config_dict: dict):
     # total_steps estimate for schedules
     total_steps = None
     # set later after dataloader creation; pass a placeholder
+    # Decide default rgb_sigma_final based on dataset (paper: 0 for ImageNet, 3 for multimodal)
+    dataset_choice = getattr(config, 'dataset', 'laion_pop')
+    default_sigma_final = 0.0 if str(dataset_choice).lower() == 'imagenet64_kaggle' else 3.0
+
     model = JetFormerTrain(
         vocab_size=config.vocab_size,
         d_model=config.d_model,
@@ -376,7 +380,7 @@ def train_from_config(config_dict: dict):
         text_loss_weight=float(getattr(config, 'text_loss_weight', 0.0025)),
         image_loss_weight=float(getattr(config, 'image_loss_weight', 1.0)),
         rgb_sigma0=float(getattr(config, 'rgb_sigma0', 64.0)),
-        rgb_sigma_final=float(getattr(config, 'rgb_sigma_final', 3.0)),
+        rgb_sigma_final=float(getattr(config, 'rgb_sigma_final', default_sigma_final)),
         latent_noise_std=float(getattr(config, 'latent_noise_std', 0.3)),
         cfg_drop_prob=float(getattr(config, 'cfg_drop_prob', 0.1)),
         total_steps=int(max(1, len(train_loader) * config.num_epochs)) if False else 1,
@@ -489,13 +493,8 @@ def train_from_config(config_dict: dict):
     
     total_steps = len(dataloader) * config.num_epochs
     
-    scheduler = optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr=config.learning_rate,
-        total_steps=total_steps,
-        pct_start=0.1, # warmup
-        anneal_strategy='cos'
-    )
+    # Remove OneCycle to align closer with paper defaults; keep constant LR unless configured
+    scheduler = None
     
     # AMP scaler (enabled for fp16 on CUDA, no-op otherwise)
     scaler = accelerator.create_grad_scaler(enabled=True)
@@ -549,7 +548,7 @@ def train_from_config(config_dict: dict):
                     "train/text_loss": float(out.get('text_loss', 0.0)),
                     "train/image_gen_loss": float(out.get('image_loss', 0.0)),
                     "train/flow_bpd_component": float(out.get('flow_bpd_component', 0.0)),
-                    "train/learning_rate": scheduler.get_last_lr()[0],
+                    "train/learning_rate": optimizer.param_groups[0]['lr'],
                     "train/step": step,
                     "train/epoch": epoch,
                     "train/batch_time": time.time() - start_time,
@@ -612,7 +611,7 @@ def train_from_config(config_dict: dict):
                 checkpoint = {
                     'model_state_dict': model_to_save.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': scheduler.state_dict(),
+                    'scheduler_state_dict': (scheduler.state_dict() if scheduler is not None else {}),
                     'epoch': epoch,
                     'config': (dict(wandb.config) if wb_run is not None else config_dict),
                 }
@@ -634,7 +633,7 @@ def train_from_config(config_dict: dict):
         final_ckpt = {
             'model_state_dict': model_to_save.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
+            'scheduler_state_dict': (scheduler.state_dict() if scheduler is not None else {}),
             'epoch': config.num_epochs - 1 if hasattr(config, 'num_epochs') else None,
             'config': (dict(wandb.config) if wb_run is not None else config_dict),
         }
