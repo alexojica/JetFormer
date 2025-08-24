@@ -141,7 +141,12 @@ class GPUAccelerator:
             return wrapper
 
         if self.ddp_enabled and self.device.type == 'cuda':
-            wrapped = DDP(model.to(self.device), device_ids=[self.device.index], output_device=self.device.index, find_unused_parameters=False)
+            wrapped = DDP(
+                model.to(self.device),
+                device_ids=[self.device.index],
+                output_device=self.device.index,
+                find_unused_parameters=True,
+            )
             return _attach_passthroughs(wrapped, model)
         elif self.device.type == 'cuda' and torch.cuda.device_count() > 1:
             wrapped = nn.DataParallel(model.to(self.device))
