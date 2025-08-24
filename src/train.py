@@ -353,6 +353,8 @@ def train_from_config(config_dict: dict):
     # Decide default rgb_sigma_final based on dataset (paper: 0 for ImageNet, 3 for multimodal)
     dataset_choice = getattr(config, 'dataset', 'laion_pop')
     default_sigma_final = 0.0 if str(dataset_choice).lower() == 'imagenet64_kaggle' else 3.0
+    # Infer num_classes for ImageNet64 if not provided
+    inferred_num_classes = 1000 if str(dataset_choice).lower() == 'imagenet64_kaggle' else None
 
     model = JetFormerTrain(
         vocab_size=config.vocab_size,
@@ -370,7 +372,7 @@ def train_from_config(config_dict: dict):
         jet_num_heads=config.jet_num_heads,
         patch_size=config.patch_size,
         image_ar_dim=config.get('image_ar_dim', 128),
-        num_classes=config.get('num_classes', None),
+        num_classes=(config.get('num_classes', None) if getattr(config, 'num_classes', None) is not None else inferred_num_classes),
         class_token_length=config.get('class_token_length', 16),
         latent_projection=config.get('latent_projection', None),
         latent_proj_matrix_path=config.get('latent_proj_matrix_path', None),
