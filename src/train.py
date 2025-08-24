@@ -17,6 +17,7 @@ from src.jetformer import JetFormerTrain
 from PIL import Image
 import torchvision.transforms as transforms
 from types import SimpleNamespace
+from tqdm import tqdm
 
 # Use shared accelerators from src/accelerators.py
 from src.accelerators import GPUAccelerator, TPUAccelerator, HAS_TPU as _HAS_TPU
@@ -516,7 +517,8 @@ def train_from_config(config_dict: dict):
             dataloader.sampler.set_epoch(epoch)
 
         iterable = accelerator.wrap_dataloader(dataloader, is_train=True) if hasattr(accelerator, 'wrap_dataloader') else dataloader
-        for batch_idx, batch in enumerate(iterable):
+        progress_bar = tqdm(iterable, desc=f"Train Epoch {epoch+1}/{config.num_epochs}", total=len(dataloader), leave=True) if is_main_process else iterable
+        for batch_idx, batch in enumerate(progress_bar):
             start_time = time.time()
 
             optimizer.zero_grad(set_to_none=True)
@@ -541,6 +543,16 @@ def train_from_config(config_dict: dict):
             epoch_losses['image_gen'] += float(out.get('image_loss', 0.0))
             epoch_losses['flow'] += float(out.get('flow_bpd_component', 0.0))
             num_batches += 1
+
+            if is_main_process and hasattr(progress_bar, 'set_postfix'):
+                try:
+                    progress_bar.set_postfix({
+                        "loss": f"{loss.item():.4f}",
+                        "text": f"{float(out.get('text_loss', 0.0)):.4f}",
+                        "img": f"{float(out.get('image_loss', 0.0)):.4f}",
+                    })
+                except Exception:
+                    pass
             
             if is_main_process and wb_run is not None and (step % int(getattr(config, 'log_every_batches', 10)) == 0):
                 wandb.log({
