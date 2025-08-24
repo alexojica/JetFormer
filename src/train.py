@@ -424,6 +424,7 @@ def train_from_config(config_dict: dict):
         max_seq_len=config.max_seq_len,
         num_mixtures=config.num_mixtures,
         dropout=config.dropout,
+        input_size=tuple(getattr(config, 'input_size', (256, 256))),
         jet_depth=config.jet_depth,
         jet_block_depth=config.jet_block_depth,
         jet_emb_dim=config.jet_emb_dim,
@@ -716,7 +717,9 @@ def train_from_config(config_dict: dict):
                 for i, sample in enumerate(samples[:4]):
                     generation_table.add_data("init_val", i+1, sample['prompt'], wandb.Image(sample['image']))
                 image_dict = {f"generation/init_val_image_{i+1}_{s['prompt']}": wandb.Image(s['image']) for i, s in enumerate(samples[:4])}
-                wandb.log({"generation/samples_table": generation_table, **image_dict, "generation/step": 0})
+                # Also log a list of images like the flow trainer for easier analysis
+                wandb_images = [wandb.Image(s['image'], caption=s['prompt']) for s in samples[:4]]
+                wandb.log({"generation/samples_table": generation_table, **image_dict, "samples": wandb_images, "generation/step": 0})
             except Exception as e:
                 print(f"Sampling at initial validation failed: {e}")
         best_val_loss = v_total
@@ -823,9 +826,12 @@ def train_from_config(config_dict: dict):
                     for i, sample in enumerate(text_to_image_samples):
                         image_dict[f"generation/image_{i+1}_{sample['prompt']}"] = wandb.Image(sample['image'])
                     
+                    # Also log a consolidated list of images (as in flow trainer)
+                    wandb_images = [wandb.Image(s['image'], caption=s['prompt']) for s in text_to_image_samples]
                     wandb.log({
                         "generation/samples_table": generation_table,
                         **image_dict,
+                        "samples": wandb_images,
                         "generation/step": step
                     })
                     
@@ -890,7 +896,9 @@ def train_from_config(config_dict: dict):
                             wandb.Image(sample['image'])
                         )
                     image_dict = {f"generation/val_epoch{epoch+1}_image_{i+1}_{s['prompt']}": wandb.Image(s['image']) for i, s in enumerate(text_to_image_samples)}
-                    wandb.log({"generation/samples_table": generation_table, **image_dict, "generation/step": step})
+                    # Also log a consolidated list of images (as in flow trainer)
+                    wandb_images = [wandb.Image(s['image'], caption=s['prompt']) for s in text_to_image_samples]
+                    wandb.log({"generation/samples_table": generation_table, **image_dict, "samples": wandb_images, "generation/step": step})
                 except Exception as e:
                     print(f"Sampling at validation failed: {e}")
             # Save checkpoint every 5 epochs if validation improves
