@@ -15,6 +15,10 @@ from src.flow.dataset import KaggleImageFolderImagenet
 from src.jetformer import JetFormer
 from PIL import Image
 import torchvision.transforms as transforms
+from types import SimpleNamespace
+
+# Use shared accelerators from src/accelerators.py
+from src.accelerators import GPUAccelerator, TPUAccelerator, HAS_TPU as _HAS_TPU
 
 IMAGE_SIZE = (256, 256, 3)
 
@@ -309,16 +313,37 @@ def _init_wandb(cfg: dict, is_main_process: bool = True):
 
 
 def train_from_config(config_dict: dict):
-    wb_run = _init_wandb(config_dict, is_main_process=True)
+    # Accelerator + process setup
+    cfg_raw = dict(config_dict or {})
+    cfg_raw.setdefault('accelerator', 'auto')
+    cfg_raw.setdefault('device', 'auto')
+    cfg_raw.setdefault('precision', 'tf32')
+    cfg_raw.setdefault('distributed', False)
+
+    accelerator_choice = str(cfg_raw.get('accelerator', 'auto')).lower()
+    if accelerator_choice == 'tpu' or (accelerator_choice == 'auto' and _HAS_TPU):
+        if TPUAccelerator is None:
+            raise RuntimeError("TPU accelerator requested but torch_xla is not available.")
+        accelerator = TPUAccelerator(cfg_raw)
+    else:
+        accelerator = GPUAccelerator(cfg_raw)
+
+    device_obj = accelerator.device
+    is_main_process = accelerator.is_main_process
+    ddp_enabled = accelerator.ddp_enabled
+    if is_main_process:
+        acc_name = accelerator.__class__.__name__.replace('Accelerator', '').upper()
+        print(f"Using device: {device_obj}; accelerator={acc_name}; DDP: {ddp_enabled}; world_size={accelerator.world_size}; rank={accelerator.rank}")
+
+    wb_run = _init_wandb(cfg_raw, is_main_process=is_main_process)
     if os.environ.get('DEBUG') is not None:
         torch.autograd.set_detect_anomaly(True)
 
-    # Access config through wandb if available; else use the raw dict
-    config = wandb.config if wb_run is not None else type("Cfg", (), {**config_dict})()
-    device = 'mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu'
-    if hasattr(config, 'device') and getattr(config, 'device') in ('cpu', 'cuda', 'mps'):
-        device = getattr(config, 'device')
-    print(f"Using device: {device}")
+    # Config wrapper supporting attribute and dict-style get()
+    cfg_map = dict(wandb.config) if wb_run is not None else cfg_raw
+    config = SimpleNamespace(**cfg_map)
+    setattr(config, 'get', lambda key, default=None: getattr(config, key, default))
+    print(f"Using device: {device_obj}")
     
     model = JetFormer(
         vocab_size=config.vocab_size,
@@ -344,7 +369,7 @@ def train_from_config(config_dict: dict):
         pre_latent_proj_matrix_path=config.get('pre_latent_proj_matrix_path', None),
         flow_actnorm=bool(config.get('flow_actnorm', False)),
         flow_invertible_dense=bool(config.get('flow_invertible_dense', False)),
-    ).to(device)
+    ).to(device_obj)
     
     total_params = sum(p.numel() for p in model.parameters())
     jet_params = sum(p.numel() for p in model.jet.parameters())
@@ -367,6 +392,8 @@ def train_from_config(config_dict: dict):
         print("Model compiled with torch.compile")
     else:
         print("Model not compiled with torch.compile")
+    # Wrap with accelerator (adds DDP where applicable)
+    model = accelerator.wrap_model(model)
     
     dataset_choice = getattr(config, 'dataset', 'laion_pop')
     if str(dataset_choice).lower() == 'imagenet64_kaggle':
@@ -394,14 +421,18 @@ def train_from_config(config_dict: dict):
             ignore_pad=getattr(config, 'ignore_pad', False)
         )
     
+    # Build samplers and dataloader
+    train_sampler, _ = accelerator.build_samplers(dataset, dataset)
     dataloader = DataLoader(
-        dataset, 
-        batch_size=config.batch_size, 
-        shuffle=True,
-        num_workers=1,
+        dataset,
+        batch_size=config.batch_size,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
+        num_workers=int(getattr(config, 'num_workers', 1) or 1),
         prefetch_factor=1,
         persistent_workers=False,
-        drop_last=True
+        drop_last=True,
+        pin_memory=True if device_obj.type == 'cuda' else False
     )
     
     print(f"Dataset size: {len(dataset)}")
@@ -419,6 +450,9 @@ def train_from_config(config_dict: dict):
         anneal_strategy='cos'
     )
     
+    # AMP scaler (enabled for fp16 on CUDA, no-op otherwise)
+    scaler = accelerator.create_grad_scaler(enabled=True)
+
     model.train()
     step = 0
     
@@ -431,28 +465,33 @@ def train_from_config(config_dict: dict):
         }
         num_batches = 0
         
-        for batch_idx, batch in enumerate(dataloader):
+        # Ensure unique shuffling each epoch for distributed training
+        if ddp_enabled and dataloader.sampler is not None and hasattr(dataloader.sampler, 'set_epoch'):
+            dataloader.sampler.set_epoch(epoch)
+
+        iterable = accelerator.wrap_dataloader(dataloader, is_train=True) if hasattr(accelerator, 'wrap_dataloader') else dataloader
+        for batch_idx, batch in enumerate(iterable):
             start_time = time.time()
             
-            images = batch['image'].to(device)
-            class_ids = batch['label'].to(device) if isinstance(batch, dict) and ('label' in batch) else None
+            images = batch['image'].to(device_obj)
+            class_ids = batch['label'].to(device_obj) if isinstance(batch, dict) and ('label' in batch) else None
             # For class-conditional ImageNet: use learned class tokens in place of text tokens
             if class_ids is not None:
                 B = images.size(0)
-                text_tokens = torch.zeros(B, model.class_token_length, dtype=torch.long, device=device)
-                text_mask = torch.ones(B, model.class_token_length, dtype=torch.bool, device=device)
-                text_loss_mask = torch.zeros(B, model.class_token_length, dtype=torch.bool, device=device)
+                text_tokens = torch.zeros(B, model.class_token_length, dtype=torch.long, device=device_obj)
+                text_mask = torch.ones(B, model.class_token_length, dtype=torch.bool, device=device_obj)
+                text_loss_mask = torch.zeros(B, model.class_token_length, dtype=torch.bool, device=device_obj)
             else:
-                text_tokens = batch['text'].to(device)
-                text_mask = batch['text_mask'].to(device)
-                text_loss_mask = batch['text_loss'].to(device)
+                text_tokens = batch['text'].to(device_obj)
+                text_mask = batch['text_mask'].to(device_obj)
+                text_loss_mask = batch['text_loss'].to(device_obj)
             batch_size = images.shape[0]
 
             # Decide modality order
             if class_ids is not None:
-                text_first_mask = torch.ones(batch_size, dtype=torch.bool, device=device)
+                text_first_mask = torch.ones(batch_size, dtype=torch.bool, device=device_obj)
             else:
-                text_first_mask = torch.bernoulli(torch.ones(batch_size, device=device) * 0.5).bool()
+                text_first_mask = torch.bernoulli(torch.ones(batch_size, device=device_obj) * 0.5).bool()
             text_second_mask = ~text_first_mask
 
             # Uniform dequantization and RGB noise curriculum on input images in [0,1]
@@ -468,8 +507,10 @@ def train_from_config(config_dict: dict):
             gaussian = torch.randn_like(images01) * (sigma_t / 255.0)
             images01_noisy = torch.clamp(images01 + u + gaussian, 0.0, 1.0)
 
-            # Flow forward
-            log_det, tokens_full = model.flow_from_x01(images01_noisy)
+            # Flow forward (with autocast)
+            autocast_ctx = accelerator.autocast(enabled=True) if hasattr(accelerator, 'autocast') else torch.amp.autocast(device_obj.type, enabled=False)
+            with autocast_ctx:
+                log_det, tokens_full = model.flow_from_x01(images01_noisy)
             hat_tokens, residual_tokens = model.factor_tokens(tokens_full)
             latent_noise_std = float(config.get('latent_noise_std', 0.3))
             hat_tokens_noisy = hat_tokens + torch.randn_like(hat_tokens) * latent_noise_std
@@ -483,10 +524,11 @@ def train_from_config(config_dict: dict):
             # AR transformer
             # CFG: randomly drop text conditioning 10% when text is first
             drop_prob = float(config.get('cfg_drop_prob', 0.1))
-            drop_mask = (torch.rand(batch_size, device=device) < drop_prob)
-            text_logits, image_logits = model(text_tokens, hat_tokens_in, text_first_mask, text_mask, drop_text_cond_mask=drop_mask, class_ids=class_ids)
+            drop_mask = (torch.rand(batch_size, device=device_obj) < drop_prob)
+            with autocast_ctx:
+                text_logits, image_logits = model(text_tokens, hat_tokens_in, text_first_mask, text_mask, drop_text_cond_mask=drop_mask, class_ids=class_ids)
             if class_ids is not None:
-                text_loss = torch.tensor(0.0, device=device)
+                text_loss = torch.tensor(0.0, device=device_obj)
             else:
                 text_loss = compute_text_loss_second_only(text_logits, text_tokens, text_loss_mask, config.vocab_size, text_second_mask)
 
@@ -499,10 +541,16 @@ def train_from_config(config_dict: dict):
             loss = (config.get('text_loss_weight', 0.0025) * text_loss) + (config.get('image_loss_weight', 1.0) * image_loss)
             
             optimizer.zero_grad()
-            loss.backward()
+            scaler.scale(loss).backward()
+            if hasattr(scaler, 'unscale_'):
+                scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            scheduler.step()
+            if hasattr(accelerator, 'step'):
+                accelerator.step(optimizer, scaler, scheduler)
+            else:
+                scaler.step(optimizer)
+                scaler.update()
+                scheduler.step()
             
             epoch_losses['total'] += loss.item()
             epoch_losses['text'] += text_loss.item()
@@ -510,7 +558,7 @@ def train_from_config(config_dict: dict):
             epoch_losses['flow'] += (log_det / (images.shape[2] * images.shape[3] * images.shape[1]) / math.log(2.0)).mean().item()
             num_batches += 1
             
-            if wb_run is not None and (step % int(getattr(config, 'log_every_batches', 10)) == 0):
+            if is_main_process and wb_run is not None and (step % int(getattr(config, 'log_every_batches', 10)) == 0):
                 wandb.log({
                     "train/total_loss": loss.item(),
                     "train/text_loss": text_loss.item(),
@@ -524,7 +572,7 @@ def train_from_config(config_dict: dict):
                 })
             
             sample_every = int(getattr(config, 'sample_every_batches', 100))
-            if wb_run is not None and sample_every > 0 and (batch_idx % sample_every == 0):
+            if is_main_process and wb_run is not None and sample_every > 0 and (batch_idx % sample_every == 0):
                 print(f"Epoch {epoch+1}/{config.num_epochs}, "
                         f"Batch {batch_idx}/{len(dataloader)}, "
                         f"Total Loss: {loss.item():.4f}, "
@@ -536,7 +584,7 @@ def train_from_config(config_dict: dict):
                     text_to_image_samples = generate_text_to_image_samples_cfg(
                         model,
                         dataset,
-                        device,
+                        device_obj,
                         num_samples=3,
                         cfg_strength=float(config.get('cfg_strength', 4.0)),
                         cfg_mode=str(config.get('cfg_mode', 'reject'))
@@ -572,10 +620,11 @@ def train_from_config(config_dict: dict):
                     import traceback
                     traceback.print_exc()
 
-            if batch_idx % 2000 == 0:
+            if is_main_process and (batch_idx % 2000 == 0):
                 print(f"Saving checkpoint for epoch {epoch+1} at batch {batch_idx}")
+                model_to_save = accelerator.unwrap_model(model) if hasattr(accelerator, 'unwrap_model') else (model.module if hasattr(model, 'module') else model)
                 checkpoint = {
-                    'model_state_dict': model.state_dict(),
+                    'model_state_dict': model_to_save.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'scheduler_state_dict': scheduler.state_dict(),
                     'epoch': epoch,
@@ -583,12 +632,38 @@ def train_from_config(config_dict: dict):
                 }
                 torch.save(checkpoint, f'jetformer_laion_pop_epoch_{epoch+1}_batch_{batch_idx}.pt')
                 print(f"✓ Saved checkpoint for epoch {epoch+1} at batch {batch_idx}")
+                if is_main_process and wb_run is not None:
+                    try:
+                        wandb.save(ckpt_path)
+                    except Exception:
+                        pass
                 
             step += 1
                 
     print("Training completed!")
-    if wb_run is not None:
+    # Save final checkpoint at end of training
+    try:
+        model_to_save = accelerator.unwrap_model(model) if hasattr(accelerator, 'unwrap_model') else (model.module if hasattr(model, 'module') else model)
+        final_ckpt = {
+            'model_state_dict': model_to_save.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'epoch': config.num_epochs - 1 if hasattr(config, 'num_epochs') else None,
+            'config': (dict(wandb.config) if wb_run is not None else config_dict),
+        }
+        if is_main_process:
+            final_ckpt_path = 'jetformer_final.pt'
+            torch.save(final_ckpt, final_ckpt_path)
+            if wb_run is not None:
+                try:
+                    wandb.save(final_ckpt_path)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    if is_main_process and wb_run is not None:
         wandb.finish()
+    accelerator.cleanup()
     return model
 
 
@@ -615,6 +690,9 @@ if __name__ == "__main__":
     parser.add_argument('--num_epochs', type=int, default=None)
     parser.add_argument('--torch_compile', type=str, default=None, choices=['true','false'])
     parser.add_argument('--device', type=str, default=None, choices=['auto','cpu','cuda','mps'])
+    parser.add_argument('--accelerator', type=str, default=None, choices=['auto','gpu','tpu'])
+    parser.add_argument('--distributed', type=str, default=None, choices=['true','false'])
+    parser.add_argument('--precision', type=str, default=None, choices=['auto','fp32','fp16','bf16','tf32'])
     # Dataset
     parser.add_argument('--dataset', type=str, default=None, choices=['laion_pop','imagenet64_kaggle'])
     parser.add_argument('--kaggle_dataset_id', type=str, default=None)
