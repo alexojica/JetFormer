@@ -28,4 +28,5 @@ jobs:
 
       - name: Run tests
         run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE"
           pytest -q src/tests/test_e2e_roundtrip.py
