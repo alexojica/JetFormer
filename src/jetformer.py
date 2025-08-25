@@ -10,6 +10,7 @@ from src.transformer import Transformer
 from src.flow.jet_flow import JetModel
 from src.transformer import GemmaBlock
 from src.flow.projections import InvertibleLinear, InvertibleLinearPre
+import torch.utils.checkpoint as checkpoint
 
 class JetFormer(nn.Module):
     def __init__(
@@ -43,6 +44,9 @@ class JetFormer(nn.Module):
         # Flow ablation toggles
         flow_actnorm: bool = False,
         flow_invertible_dense: bool = False,
+        # Gradient checkpointing toggles
+        grad_checkpoint_transformer: bool = False,
+        flow_grad_checkpoint: bool = False,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -50,6 +54,9 @@ class JetFormer(nn.Module):
         self.max_seq_len = max_seq_len
         self.num_mixtures = num_mixtures
         self.use_bfloat16_img_head = use_bfloat16_img_head
+        # Checkpointing controls
+        self.grad_checkpoint_transformer = bool(grad_checkpoint_transformer)
+        self.flow_grad_checkpoint = bool(flow_grad_checkpoint)
         
         self.input_size = input_size
         n_patches_h = input_size[0] // patch_size
@@ -85,6 +92,7 @@ class JetFormer(nn.Module):
                 ps=patch_size,
                 actnorm=flow_actnorm,
                 invertible_dense=flow_invertible_dense,
+                use_grad_checkpoint=self.flow_grad_checkpoint,
             )
         else:
             # Flow over patch-grid tokens (ps=1)
@@ -97,6 +105,7 @@ class JetFormer(nn.Module):
                 ps=1,
                 actnorm=flow_actnorm,
                 invertible_dense=flow_invertible_dense,
+                use_grad_checkpoint=self.flow_grad_checkpoint,
             )
         
         self.text_emb = nn.Embedding(vocab_size, d_model)
@@ -257,7 +266,10 @@ class JetFormer(nn.Module):
         
         if isinstance(self.transformer, nn.ModuleList):
             for layer in self.transformer:
-                x = layer(x, attn_mask, position_ids)
+                if self.grad_checkpoint_transformer and self.training:
+                    x = checkpoint.checkpoint(layer, x, attn_mask, position_ids)
+                else:
+                    x = layer(x, attn_mask, position_ids)
             x = self.final_norm(x)
         else:
             x = self.transformer(x, attn_mask, position_ids)
@@ -301,7 +313,10 @@ class JetFormer(nn.Module):
         x, attn_mask, position_ids = self.embed_sequence(text_tokens, image_tokens, text_first_mask, input_mask, drop_text_cond_mask, class_ids)
         if isinstance(self.transformer, nn.ModuleList):
             for layer in self.transformer:
-                x = layer(x, attn_mask, position_ids)
+                if self.grad_checkpoint_transformer and self.training:
+                    x = checkpoint.checkpoint(layer, x, attn_mask, position_ids)
+                else:
+                    x = layer(x, attn_mask, position_ids)
             x = self.final_norm(x)
         else:
             x = self.transformer(x, attn_mask, position_ids)
