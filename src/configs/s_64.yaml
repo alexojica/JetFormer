@@ -8,10 +8,10 @@ num_mixtures: 256          # k = 256
 use_bfloat16_img_head: true
 
 # Flow (Jet) — post-flow factoring, channel-wise only
-jet_depth: 12              # coupling blocks
+jet_depth: 16              # coupling blocks
 jet_block_depth: 3
-jet_emb_dim: 192           # block width
-jet_num_heads: 6
+jet_emb_dim: 512           # block width
+jet_num_heads: 8
 flow_actnorm: true
 flow_invertible_dense: false
 pre_factor_dim: null
