@@ -10,25 +10,18 @@ class RoPE(nn.Module):
         self.max_seq_len = max_seq_len
         inv_freq = 1.0 / (10000 ** (torch.arange(0, d_model, 2).float() / d_model))
         self.register_buffer('inv_freq', inv_freq)
-        
-        self._cached_cos = None
-        self._cached_sin = None
-        self._cached_seq_len = 0
+        # Precompute full-length RoPE caches on CPU to avoid per-call graph-captured state
+        t_full = torch.arange(max_seq_len, dtype=self.inv_freq.dtype)
+        freqs_full = torch.outer(t_full, self.inv_freq)
+        cos_full = torch.cos(freqs_full)
+        sin_full = torch.sin(freqs_full)
+        self.register_buffer('cos_cached', cos_full, persistent=False)
+        self.register_buffer('sin_cached', sin_full, persistent=False)
     
-    def _rope_cache(self, seq_len, device):
-        if seq_len <= self._cached_seq_len and self._cached_cos is not None:
-            return self._cached_cos[:seq_len], self._cached_sin[:seq_len]
-        
-        t = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
-        freqs = torch.outer(t, self.inv_freq)
-        
-        cos = torch.cos(freqs)
-        sin = torch.sin(freqs)
-        
-        self._cached_cos = cos
-        self._cached_sin = sin
-        self._cached_seq_len = seq_len
-        
+    def _get_cos_sin(self, seq_len, device, dtype):
+        # Slice from precomputed CPU caches and move to the target device/dtype per call
+        cos = self.cos_cached[:seq_len].to(device=device, dtype=dtype)
+        sin = self.sin_cached[:seq_len].to(device=device, dtype=dtype)
         return cos, sin
     
     def apply_rope(self, x, position_ids=None): # [batch_size, n_heads, seq_len, head_dim]
@@ -38,7 +31,7 @@ class RoPE(nn.Module):
             # [seq_len]
             position_ids = torch.arange(seq_len, device=x.device)
         
-        cos_full, sin_full = self._rope_cache(seq_len, x.device)
+        cos_full, sin_full = self._get_cos_sin(seq_len, x.device, x.dtype)
         
         if position_ids.dim() == 1:
             cos = cos_full[position_ids]  # [seq_len, head_dim//2]
