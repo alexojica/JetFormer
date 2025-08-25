@@ -252,7 +252,32 @@ def initialize_actnorm_if_needed(model: torch.nn.Module, dataloader: DataLoader,
             base = model
             if hasattr(base, 'module'):
                 base = base.module
-            base.jet.initialize_with_batch(x_nhwc)
+            
+            # If pre-flow factoring is enabled, the flow (`jet`) operates on a different
+            # data distribution and shape. We must initialize ActNorm with data of the
+            # correct shape and distribution.
+            if getattr(base, 'pre_factor_dim', None) is not None:
+                H, W = base.input_size
+                ps = base.patch_size
+                d = int(base.pre_factor_dim)
+                N = (H // ps) * (W // ps)
+                
+                # Replicate the pre-flow path to get the correct input for the jet
+                tokens_px = base._patchify(x_nhwc)
+                if base.pre_latent_projection is not None and base.pre_proj is not None:
+                    tokens_px, _ = base.pre_proj(tokens_px)
+                
+                tokens_hat_in = tokens_px[..., :d]
+                
+                H_patch = H // ps
+                W_patch = W // ps
+                tokens_hat_grid = tokens_hat_in.transpose(1, 2).contiguous().view(x_nhwc.shape[0], d, H_patch, W_patch).permute(0, 2, 3, 1).contiguous()
+                
+                base.jet.initialize_with_batch(tokens_hat_grid)
+
+            else:
+                base.jet.initialize_with_batch(x_nhwc)
+
             print("ActNorm initialized for JetFormer flow core.")
         except Exception as e:
             print(f"Warning: ActNorm initialize_with_batch failed: {e}")

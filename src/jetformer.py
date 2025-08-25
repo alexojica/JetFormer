@@ -120,7 +120,6 @@ class JetFormer(nn.Module):
         # Pre-flow projection W on patch tokens
         self.pre_latent_projection = None if (pre_latent_projection is None or str(pre_latent_projection).lower() in {"none", "false"}) else str(pre_latent_projection).lower()
         self.pre_proj = None
-        self._preproj_logdet_per_patch = None
         if self.pre_latent_projection is not None:
             D_full_px = 3 * patch_size * patch_size
             self.pre_proj = InvertibleLinearPre(D_full_px)
@@ -131,8 +130,6 @@ class JetFormer(nn.Module):
                         self.pre_proj.set_weight(W_px, frozen=True)
                 except Exception:
                     pass
-            with torch.no_grad():
-                self._preproj_logdet_per_patch = torch.sum(torch.log(torch.abs(torch.diag(self.pre_proj.U))))
         
         max_total_len = max_seq_len + self.image_seq_len + 1
         # Gemma-style backbone with Multi-Query Attention
@@ -400,9 +397,10 @@ class JetFormer(nn.Module):
 
         if self.pre_factor_dim is None:
             # Default path: flow on pixel grid, then factor post-flow
+            pre_logdet = 0.0
             if self.pre_latent_projection is not None and self.pre_proj is not None:
                 tokens_px = self._patchify(x_nhwc)
-                tokens_px, _ = self.pre_proj(tokens_px)
+                tokens_px, pre_logdet = self.pre_proj(tokens_px)
                 x_nhwc = self._unpatchify(tokens_px, H, W)
             z_nhwc, log_det = self.jet(x_nhwc)
             tokens = self._patchify(z_nhwc)
@@ -410,16 +408,17 @@ class JetFormer(nn.Module):
                 tokens, proj_logdet = self.proj(tokens)
                 N_patches = tokens.shape[1]
                 log_det = log_det + proj_logdet.expand(B) * N_patches
-            if self.pre_latent_projection is not None and self._preproj_logdet_per_patch is not None:
+            if self.pre_latent_projection is not None:
                 N_patches = tokens.shape[1]
-                log_det = log_det + self._preproj_logdet_per_patch.expand(B) * N_patches
+                log_det = log_det + pre_logdet.expand(B) * N_patches
             return log_det, tokens
 
         # Pre-flow factoring path
         # 1) Patchify and (optionally) apply invertible linear W
         tokens_px = self._patchify(x_nhwc)  # [B, N, 3*ps*ps]
+        pre_logdet = 0.0
         if self.pre_latent_projection is not None and self.pre_proj is not None:
-            tokens_px, _ = self.pre_proj(tokens_px)
+            tokens_px, pre_logdet = self.pre_proj(tokens_px)
         d = int(self.pre_factor_dim)
         N = tokens_px.shape[1]
         # 2) Split into kept (hat) and residual (tilde)
@@ -441,8 +440,8 @@ class JetFormer(nn.Module):
             log_det = log_det + proj_logdet.expand(B) * N
 
         # 6) Account for pre-projection logdet per patch if applicable
-        if self.pre_latent_projection is not None and self._preproj_logdet_per_patch is not None:
-            log_det = log_det + self._preproj_logdet_per_patch.expand(B) * N
+        if self.pre_latent_projection is not None:
+            log_det = log_det + pre_logdet.expand(B) * N
 
         return log_det, tokens_full
 
