@@ -1,6 +1,6 @@
 import torch
 
-from src.models.mixture import gmm_params, gmm_distribution
+from src.losses.image import gmm_params, gmm_distribution
 
 
 def test_gmm_fp32_math_stability():

@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.gemma_transformer import MultiQueryAttention
+from src.transformer import MultiQueryAttention
 from src.transformer import MultiHeadAttention
 
 
