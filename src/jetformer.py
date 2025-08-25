@@ -622,8 +622,6 @@ class JetFormerTrain(JetFormer):
         image_loss = (image_bpd_per_sample * text_first_mask.float()).mean()
 
         total_loss = (self.text_loss_weight * text_loss) + (self.image_loss_weight * image_loss)
-        # step++
-        self._step = self._step + 1
         # Diagnostics
         with torch.no_grad():
             image_loglik_nats = (-gmm_nll).mean()

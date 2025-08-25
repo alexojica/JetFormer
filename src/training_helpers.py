@@ -370,6 +370,10 @@ def evaluate_one_epoch(model_obj: torch.nn.Module, loader: DataLoader, accelerat
             batch['no_rgb_noise'] = True
         except Exception:
             pass
+        try:
+            torch.compiler.cudagraph_mark_step_begin()
+        except Exception:
+            pass
         out = model_obj(batch)
         bsz = batch['image'].size(0)
         sum_total += float(out.get('loss', 0.0)) * bsz

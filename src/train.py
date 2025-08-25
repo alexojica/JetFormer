@@ -204,6 +204,11 @@ def train_from_config(config_dict: dict):
             optimizer.zero_grad(set_to_none=True)
             autocast_ctx = accelerator.autocast(enabled=True) if hasattr(accelerator, 'autocast') else torch.amp.autocast(device_obj.type, enabled=False)
             with autocast_ctx:
+                # Mark beginning of a new cudagraph step to avoid overwriting captured outputs
+                try:
+                    torch.compiler.cudagraph_mark_step_begin()
+                except Exception:
+                    pass
                 out = model(batch)
                 loss = out["loss"]
 
@@ -281,6 +286,13 @@ def train_from_config(config_dict: dict):
                 )
                 
             step += 1
+            # Maintain model's internal step counter outside compiled regions
+            try:
+                base_model = unwrap_base_model(model)
+                if hasattr(base_model, '_step'):
+                    base_model._step = base_model._step + 1
+            except Exception:
+                pass
         # End of epoch: run validation and optional sampling per-epoch schedule
         run_val_this_epoch = True
         if hasattr(config, 'val_every_epochs') and isinstance(getattr(config, 'val_every_epochs'), (int, float)):
