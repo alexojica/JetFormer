@@ -36,6 +36,8 @@ num_epochs: 50
 precision: tf32
 distributed: false
 torch_compile: false
+grad_checkpoint_transformer: true
+flow_grad_checkpoint: true
 
 rgb_sigma0: 64.0
 rgb_sigma_final: 0.0

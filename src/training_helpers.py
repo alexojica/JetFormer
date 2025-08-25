@@ -125,6 +125,8 @@ def build_model_from_config(config: SimpleNamespace, device: torch.device) -> Je
         latent_noise_std=float(getattr(config, 'latent_noise_std', 0.3)),
         cfg_drop_prob=float(getattr(config, 'cfg_drop_prob', 0.1)),
         total_steps=1,
+        grad_checkpoint_transformer=bool(getattr(config, 'grad_checkpoint_transformer', False)),
+        flow_grad_checkpoint=bool(getattr(config, 'flow_grad_checkpoint', False)),
     ).to(device)
     return model
 

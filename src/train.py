@@ -365,6 +365,8 @@ if __name__ == "__main__":
     parser.add_argument('--learning_rate', type=float, default=None)
     parser.add_argument('--num_epochs', type=int, default=None)
     parser.add_argument('--torch_compile', type=str, default=None, choices=['true','false'])
+    parser.add_argument('--grad_checkpoint_transformer', type=str, default=None, choices=['true','false'])
+    parser.add_argument('--flow_grad_checkpoint', type=str, default=None, choices=['true','false'])
     parser.add_argument('--device', type=str, default=None, choices=['auto','cpu','cuda','mps'])
     parser.add_argument('--accelerator', type=str, default=None, choices=['auto','gpu','tpu'])
     parser.add_argument('--distributed', type=str, default=None, choices=['true','false'])
