@@ -256,21 +256,20 @@ class KaggleImageFolderImagenet(Dataset):
             label_tensor = torch.tensor(-1, dtype=torch.long)
             return {"image": img_tensor, "label": label_tensor}
 
+        # Geometric preprocessing: resize shorter side -> resolution (keep aspect), then center-crop to square
+        w, h = img.size
+        if min(w, h) != self.resolution:
+            scale = float(self.resolution) / float(min(w, h))
+            new_w = max(1, int(round(w * scale)))
+            new_h = max(1, int(round(h * scale)))
+            img = img.resize((new_w, new_h), Image.Resampling.BICUBIC)
+            w, h = img.size
+        # Center crop to (resolution, resolution)
+        if (w, h) != (self.resolution, self.resolution):
+            left = max(0, (w - self.resolution) // 2)
+            top = max(0, (h - self.resolution) // 2)
+            img = img.crop((left, top, left + self.resolution, top + self.resolution))
         img_np = np.array(img, dtype=np.uint8)
-        # Resize if necessary
-        if img_np.shape[:2] != (self.resolution, self.resolution):
-            pil_img = Image.fromarray(img_np)
-            pil_img_resized = pil_img.resize((self.resolution, self.resolution), Image.Resampling.BOX)
-            img_np = np.array(pil_img_resized, dtype=np.uint8)
-        
-        # Handle grayscale or RGBA images
-        if img_np.ndim == 2:
-            img_np = np.stack((img_np,) * 3, axis=-1)
-        elif img_np.shape[2] == 1:
-            img_np = np.concatenate([img_np] * 3, axis=2)
-        elif img_np.shape[2] == 4:
-            img_np = img_np[:, :, :3]
-
         img_tensor = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()
         label_tensor = torch.tensor(target_class_idx, dtype=torch.long)
         return {"image": img_tensor, "label": label_tensor}
@@ -382,19 +381,19 @@ class ImageNet21kFolder(Dataset):
             label_tensor = torch.tensor(-1, dtype=torch.long)
             return {"image": img_tensor, "label": label_tensor}
 
+        # Aspect-preserving resize (shorter side -> resolution) + center-crop
+        w, h = img.size
+        if min(w, h) != self.resolution:
+            scale = float(self.resolution) / float(min(w, h))
+            new_w = max(1, int(round(w * scale)))
+            new_h = max(1, int(round(h * scale)))
+            img = img.resize((new_w, new_h), Image.Resampling.BICUBIC)
+            w, h = img.size
+        if (w, h) != (self.resolution, self.resolution):
+            left = max(0, (w - self.resolution) // 2)
+            top = max(0, (h - self.resolution) // 2)
+            img = img.crop((left, top, left + self.resolution, top + self.resolution))
         img_np = np.array(img, dtype=np.uint8)
-        if img_np.shape[:2] != (self.resolution, self.resolution):
-            pil_img = Image.fromarray(img_np)
-            pil_img_resized = pil_img.resize((self.resolution, self.resolution), Image.Resampling.BOX)
-            img_np = np.array(pil_img_resized, dtype=np.uint8)
-
-        if img_np.ndim == 2:
-            img_np = np.stack((img_np,) * 3, axis=-1)
-        elif img_np.shape[2] == 1:
-            img_np = np.concatenate([img_np] * 3, axis=2)
-        elif img_np.shape[2] == 4:
-            img_np = img_np[:, :, :3]
-
         img_tensor = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()
         label_tensor = torch.tensor(target_class_idx, dtype=torch.long)
         return {"image": img_tensor, "label": label_tensor}

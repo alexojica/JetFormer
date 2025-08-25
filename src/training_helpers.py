@@ -245,7 +245,12 @@ def initialize_actnorm_if_needed(model: torch.nn.Module, dataloader: DataLoader,
         try:
             init_batch = next(iter(dataloader))
             images = init_batch['image'].to(device, non_blocking=True)
-            images01 = (images + 1.0) * 0.5
+            images_f = images.float()
+            # Normalize to [0,1]: uint8-like if values exceed 1.0, else assume [-1,1]
+            if (images_f.min() >= 0.0) and (images_f.max() > 1.0):
+                images01 = images_f / 255.0
+            else:
+                images01 = (images_f + 1.0) * 0.5
             u = torch.rand_like(images01) / 256.0
             x01 = torch.clamp(images01 + u, 0.0, 1.0)
             x_nhwc = x01.permute(0, 2, 3, 1).contiguous()

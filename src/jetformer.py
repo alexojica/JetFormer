@@ -546,7 +546,13 @@ class JetFormerTrain(JetFormer):
         text_second_mask = ~text_first_mask
 
         # Uniform dequant + RGB noise schedule to [0,1]
-        images01 = (images + 1.0) * 0.5
+        # Robustly normalize: support either uint8 [0,255] (ImageNet64) or float [-1,1] (LAION)
+        images_float = images.float()
+        # Heuristic: if values exceed 1.0, assume uint8-like range and map to [0,1]
+        if (images_float.min() >= 0.0) and (images_float.max() > 1.0):
+            images01 = images_float / 255.0
+        else:
+            images01 = (images_float + 1.0) * 0.5
         u = torch.rand_like(images01) / 256.0
         step_val = int(self._step.item())
         t_prog = min(1.0, max(0.0, step_val / max(1, self.total_steps)))
