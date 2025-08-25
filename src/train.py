@@ -40,6 +40,14 @@ from src.training_helpers import (
     save_checkpoint,
 )
 
+# Prefer CUDA graphs when using torch.compile reduce-overhead
+try:
+    from torch._inductor import config as _inductor_cfg
+    _inductor_cfg.cudagraphs = True
+    _inductor_cfg.triton.cudagraphs = True
+except Exception:
+    pass
+
 # Use shared accelerators from src/accelerators.py
 from src.accelerators import GPUAccelerator, TPUAccelerator, HAS_TPU as _HAS_TPU
 

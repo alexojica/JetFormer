@@ -572,14 +572,15 @@ class JetFormerTrain(JetFormer):
         # Allow callers (e.g., validation) to disable RGB noise while keeping dequantization
         no_rgb_noise = bool(batch.get('no_rgb_noise', False))
         if no_rgb_noise:
-            sigma_t = 0.0
+            sigma_t = torch.tensor(0.0, device=device)
         else:
-            step_val = int(self._step.item())
-            t_prog = min(1.0, max(0.0, step_val / max(1, self.total_steps)))
-            sigma_t = self.rgb_sigma0 * (1.0 + math.cos(math.pi * t_prog)) * 0.5
+            # Keep in graph: avoid .item()/int() and use tensor math
+            step_val = self._step.to(dtype=torch.float32)
+            t_prog = torch.clamp(step_val / max(1, self.total_steps), min=0.0, max=1.0)
+            sigma_t = torch.tensor(self.rgb_sigma0, device=device) * (1.0 + torch.cos(math.pi * t_prog)) * 0.5
             # Clamp to a minimum final noise level as per paper (0 for ImageNet, 3 for multimodal)
-            sigma_t = max(self.rgb_sigma_final, sigma_t)
-        gaussian = (torch.randn_like(images01) * (sigma_t / 255.0)) if (sigma_t > 0.0) else torch.zeros_like(images01)
+            sigma_t = torch.clamp_min(sigma_t, self.rgb_sigma_final)
+        gaussian = torch.randn_like(images01) * (sigma_t / 255.0)
         images01_noisy = torch.clamp(images01 + u + gaussian, 0.0, 1.0)
 
         # Flow encode
@@ -636,5 +637,5 @@ class JetFormerTrain(JetFormer):
             "image_bpd_total": image_bpd_per_sample.mean().detach(),
             "image_loglik_nats": image_loglik_nats.detach(),
             "gmm_small_scales_rate": small_scales_rate.detach(),
-            "sigma_rgb": float(sigma_t),
+            "sigma_rgb": sigma_t.detach(),
         }
