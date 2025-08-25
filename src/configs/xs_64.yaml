@@ -47,6 +47,10 @@ cfg_drop_prob: 0.0
 cfg_strength: 4.0
 cfg_mode: "reject"
 
+# Epoch-level schedules
+sample_every_epochs: 5
+val_every_epochs: 5
+
 # Dataloader
 num_workers: 8
 max_samples: null
@@ -59,7 +63,7 @@ device: auto
 # W&B (optional)
 wandb: true
 wandb_offline: false
-wandb_project: "jetformer-laion-pop"
+wandb_project: "jetformer-imagenet-64"
 wandb_run_name: "XS-64"
 wandb_tags: ["imagenet64", "xs"]
 
