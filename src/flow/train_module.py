@@ -3,7 +3,7 @@ import torch.nn as nn
 import math
 
 from .jet_flow import FlowCore
-from src.losses.image import bits_per_dim
+from src.losses import bits_per_dim
 
 
 class FlowTrain(nn.Module):
