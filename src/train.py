@@ -229,7 +229,9 @@ def train_from_config(config_dict: dict):
             if is_main_process and wb_run is not None and (step % int(getattr(config, 'log_every_batches', 10)) == 0):
                 wb_logger.log_train_step(model, optimizer, out, step, epoch, time.time() - start_time)
             
-            sample_every = int(getattr(config, 'sample_every_batches', 100))
+            # If an epoch-level sampling schedule is configured, it overrides per-batch sampling
+            sample_every_epochs = int(getattr(config, 'sample_every_epochs', 0) or 0)
+            sample_every = int(getattr(config, 'sample_every_batches', 100)) if sample_every_epochs <= 0 else 0
             if is_main_process and wb_run is not None and sample_every > 0 and (batch_idx % sample_every == 0):
                 print(f"Epoch {epoch+1}/{config.num_epochs}, "
                         f"Batch {batch_idx}/{len(dataloader)}, "
