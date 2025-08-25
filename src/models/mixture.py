@@ -17,6 +17,8 @@ def gmm_params(image_logits: torch.Tensor, num_mixtures: int, ar_dim: int):
     Returns:
         mix_logits [B, L, k], means [B, L, k, D], scales [B, L, k, D]
     """
+    # Ensure mixture computations run in fp32 for stability
+    image_logits = image_logits.float()
     b, l, _ = image_logits.shape
     k = num_mixtures
     d = ar_dim

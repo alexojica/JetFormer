@@ -9,8 +9,8 @@ class ActNorm(nn.Module):
         super().__init__()
         self.num_features = num_features
         self.eps = eps
-        self.log_scale = nn.Parameter(torch.zeros(1, 1, 1, num_features), requires_grad=False)
-        self.bias = nn.Parameter(torch.zeros(1, 1, 1, num_features), requires_grad=False)
+        self.log_scale = nn.Parameter(torch.zeros(1, 1, 1, num_features), requires_grad=True)
+        self.bias = nn.Parameter(torch.zeros(1, 1, 1, num_features), requires_grad=True)
         self.initialized = False
 
     def _initialize(self, x: torch.Tensor):
@@ -25,9 +25,6 @@ class ActNorm(nn.Module):
             
             self.log_scale.data.copy_(-torch.log(std + self.eps))
             self.bias.data.copy_(-mean)
-            
-            self.log_scale.requires_grad = True
-            self.bias.requires_grad = True
             self.initialized = True
             print(f"ActNorm initialized for {self.num_features} features.")
 
@@ -78,28 +75,28 @@ class Invertible1x1Conv(nn.Module):
 
     def forward(self, x: torch.Tensor):
         """Applies the 1x1 convolution and returns the output and log-determinant."""
-        B, H, W, C = x.shape
-        W = self._get_weight()
+        B, Hs, Ws, C = x.shape
+        Wmat = self._get_weight()
         
         # permute to (B, C, H, W) for conv2d
         x_perm = x.permute(0, 3, 1, 2)
-        z_perm = F.conv2d(x_perm, W)
+        z_perm = F.conv2d(x_perm, Wmat)
         z = z_perm.permute(0, 2, 3, 1)
 
-        logdet = H * W * torch.sum(torch.log(torch.abs(self.U.diag())))
+        logdet = Hs * Ws * torch.sum(torch.log(torch.abs(self.U.diag())))
         
         return z, logdet.expand(B)
 
     def inverse(self, z: torch.Tensor):
         """Applies the inverse 1x1 convolution."""
-        B, H, W, C = z.shape
-        W = self._get_weight()
-        W_inv = torch.inverse(W.squeeze()).view(self.num_channels, self.num_channels, 1, 1)
+        B, Hs, Ws, C = z.shape
+        Wmat = self._get_weight()
+        W_inv = torch.inverse(Wmat.squeeze()).view(self.num_channels, self.num_channels, 1, 1)
         
         z_perm = z.permute(0, 3, 1, 2)
         x_perm = F.conv2d(z_perm, W_inv)
         x = x_perm.permute(0, 2, 3, 1)
         
-        inv_logdet = -H * W * torch.sum(torch.log(torch.abs(self.U.diag())))
+        inv_logdet = -Hs * Ws * torch.sum(torch.log(torch.abs(self.U.diag())))
 
-        return x, inv_logdet.expand(B) 
+        return x, inv_logdet.expand(B)
