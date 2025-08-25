@@ -350,6 +350,8 @@ if __name__ == "__main__":
     # Flow ablations
     parser.add_argument('--flow_actnorm', type=str, default=None, choices=['true','false'])
     parser.add_argument('--flow_invertible_dense', type=str, default=None, choices=['true','false'])
+    # Pre-flow factoring
+    parser.add_argument('--pre_factor_dim', type=int, default=None, help='Keep d channels per patch before flow; remaining modeled as Gaussian')
     # Training
     parser.add_argument('--batch_size', type=int, default=None)
     parser.add_argument('--learning_rate', type=float, default=None)

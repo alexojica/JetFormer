@@ -38,3 +38,5 @@ image_loss_weight: 1.0
 cfg_strength: 4.0
 cfg_drop_prob: 0.1
 
+use_bfloat16_img_head: true
+

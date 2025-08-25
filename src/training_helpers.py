@@ -115,6 +115,7 @@ def build_model_from_config(config: SimpleNamespace, device: torch.device) -> Je
         latent_proj_matrix_path=config.get('latent_proj_matrix_path', None),
         pre_latent_projection=config.get('pre_latent_projection', None),
         pre_latent_proj_matrix_path=config.get('pre_latent_proj_matrix_path', None),
+        pre_factor_dim=config.get('pre_factor_dim', None),
         flow_actnorm=bool(config.get('flow_actnorm', False)),
         flow_invertible_dense=bool(config.get('flow_invertible_dense', False)),
         text_loss_weight=float(getattr(config, 'text_loss_weight', 0.0025)),
