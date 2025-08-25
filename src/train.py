@@ -271,26 +271,32 @@ def train_from_config(config_dict: dict):
                 )
                 
             step += 1
-        # End of epoch: run validation
-        if is_main_process:
+        # End of epoch: run validation and optional sampling per-epoch schedule
+        run_val_this_epoch = True
+        if hasattr(config, 'val_every_epochs') and isinstance(getattr(config, 'val_every_epochs'), (int, float)):
+            vee = int(getattr(config, 'val_every_epochs'))
+            run_val_this_epoch = (vee <= 1) or (((epoch + 1) % max(1, vee)) == 0)
+        if is_main_process and run_val_this_epoch:
             v_total, v_text, v_img, v_flow = evaluate_one_epoch(model, val_loader, accelerator)
             print(f"Val Epoch {epoch+1} — total: {v_total:.4f} | text: {v_text:.4f} | img: {v_img:.4f}")
             if wb_run is not None:
                 wb_logger.log_validation_epoch(v_total, v_text, v_img, v_flow, epoch=epoch+1, step=step)
-                # Sampling at validation
+                # Optional sampling at epoch granularity
                 try:
-                    base = unwrap_base_model(model)
-                    generate_and_log_samples(
-                        base_model=base,
-                        dataset=dataset,
-                        device=device_obj,
-                        dataset_choice=dataset_choice,
-                        cfg_strength=float(config.get('cfg_strength', 4.0)),
-                        cfg_mode=str(config.get('cfg_mode', 'reject')),
-                        step=step,
-                        stage_label=f"val_epoch_{epoch+1}",
-                        num_samples=3,
-                    )
+                    see = int(getattr(config, 'sample_every_epochs', 0) or 0)
+                    if see > 0 and ((epoch + 1) % see == 0):
+                        base = unwrap_base_model(model)
+                        generate_and_log_samples(
+                            base_model=base,
+                            dataset=dataset,
+                            device=device_obj,
+                            dataset_choice=dataset_choice,
+                            cfg_strength=float(config.get('cfg_strength', 4.0)),
+                            cfg_mode=str(config.get('cfg_mode', 'reject')),
+                            step=step,
+                            stage_label=f"val_epoch_{epoch+1}",
+                            num_samples=3,
+                        )
                 except Exception as e:
                     print(f"Sampling at validation failed: {e}")
             # Save checkpoint every 5 epochs if validation improves
