@@ -38,6 +38,8 @@ class JetFormer(nn.Module):
         # Pre-flow projection options
         pre_latent_projection: str = None,  # None|"learned"|"pca_frozen"
         pre_latent_proj_matrix_path: str = None,
+        # Pre-flow factoring: number of channels kept for AR/flow per patch (d)
+        pre_factor_dim: int = None,
         # Flow ablation toggles
         flow_actnorm: bool = False,
         flow_invertible_dense: bool = False,
@@ -56,6 +58,10 @@ class JetFormer(nn.Module):
         self.patch_size = patch_size
         self.image_token_dim = 3 * patch_size * patch_size 
         self.image_ar_dim = image_ar_dim if image_ar_dim is not None else self.image_token_dim
+        self.pre_factor_dim = pre_factor_dim if (pre_factor_dim is None or int(pre_factor_dim) > 0) else None
+        if self.pre_factor_dim is not None:
+            # Ensure AR dim does not exceed the kept pre-factor dimensions
+            self.image_ar_dim = min(int(self.image_ar_dim), int(self.pre_factor_dim))
         
         assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
         head_dim = d_model // n_heads
@@ -65,18 +71,33 @@ class JetFormer(nn.Module):
         self.bos_emb = nn.Parameter(torch.randn(1, 1, d_model) * (1.0 / math.sqrt(d_model)))
         self.boi_emb = nn.Parameter(torch.randn(1, 1, d_model) * (1.0 / math.sqrt(d_model)))
         
-        # Use full Jet normalizing flow (JetModel) operating on NHWC in [0,1]
+        # Use Jet normalizing flow (JetModel). Two modes:
+        # - Default (post-flow factoring): flow runs on pixel grid NHWC with ps=patch_size
+        # - Pre-flow factoring: flow runs on patch grid (H/ps, W/ps, d) with ps=1
         H, W = input_size
-        self.jet = JetModel(
-            input_img_shape_hwc=(H, W, 3),
-            depth=jet_depth,
-            block_depth=jet_block_depth,
-            emb_dim=jet_emb_dim,
-            num_heads=jet_num_heads,
-            ps=patch_size,
-            actnorm=flow_actnorm,
-            invertible_dense=flow_invertible_dense,
-        )
+        if self.pre_factor_dim is None:
+            self.jet = JetModel(
+                input_img_shape_hwc=(H, W, 3),
+                depth=jet_depth,
+                block_depth=jet_block_depth,
+                emb_dim=jet_emb_dim,
+                num_heads=jet_num_heads,
+                ps=patch_size,
+                actnorm=flow_actnorm,
+                invertible_dense=flow_invertible_dense,
+            )
+        else:
+            # Flow over patch-grid tokens (ps=1)
+            self.jet = JetModel(
+                input_img_shape_hwc=(H // patch_size, W // patch_size, int(self.pre_factor_dim)),
+                depth=jet_depth,
+                block_depth=jet_block_depth,
+                emb_dim=jet_emb_dim,
+                num_heads=jet_num_heads,
+                ps=1,
+                actnorm=flow_actnorm,
+                invertible_dense=flow_invertible_dense,
+            )
         
         self.text_emb = nn.Embedding(vocab_size, d_model)
         torch.nn.init.normal_(self.text_emb.weight, mean=0.0, std=1)
@@ -364,48 +385,109 @@ class JetFormer(nn.Module):
         return log_det, tokens
 
     def flow_from_x01(self, images01: torch.Tensor):
-        """Flow forward given images in [0,1], shape [B,3,H,W]. Returns (log_det, tokens_full)."""
+        """Flow forward given images in [0,1], shape [B,3,H,W]. Returns (log_det, tokens_full).
+
+        tokens_full is [B, N_patches, D_full] where D_full = 3*ps*ps. The first
+        image_ar_dim channels correspond to autoregressive latents; the remaining
+        D_full - image_ar_dim channels correspond to Gaussian residuals.
+        """
         if images01.dim() != 4 or images01.size(1) != 3:
             raise ValueError("images01 must be [B,3,H,W]")
+        H, W = self.input_size
+        ps = self.patch_size
+        B = images01.size(0)
         x_nhwc = images01.permute(0, 2, 3, 1).contiguous()
-        # Apply pre-flow projection on patches if configured
+
+        if self.pre_factor_dim is None:
+            # Default path: flow on pixel grid, then factor post-flow
+            if self.pre_latent_projection is not None and self.pre_proj is not None:
+                tokens_px = self._patchify(x_nhwc)
+                tokens_px, _ = self.pre_proj(tokens_px)
+                x_nhwc = self._unpatchify(tokens_px, H, W)
+            z_nhwc, log_det = self.jet(x_nhwc)
+            tokens = self._patchify(z_nhwc)
+            if self.latent_projection is not None:
+                tokens, proj_logdet = self.proj(tokens)
+                N_patches = tokens.shape[1]
+                log_det = log_det + proj_logdet.expand(B) * N_patches
+            if self.pre_latent_projection is not None and self._preproj_logdet_per_patch is not None:
+                N_patches = tokens.shape[1]
+                log_det = log_det + self._preproj_logdet_per_patch.expand(B) * N_patches
+            return log_det, tokens
+
+        # Pre-flow factoring path
+        # 1) Patchify and (optionally) apply invertible linear W
+        tokens_px = self._patchify(x_nhwc)  # [B, N, 3*ps*ps]
         if self.pre_latent_projection is not None and self.pre_proj is not None:
-            H, W = self.input_size
-            tokens_px = self._patchify(x_nhwc)
-            tokens_px, pre_logdet = self.pre_proj(tokens_px)
-            x_nhwc = self._unpatchify(tokens_px, H, W)
-        z_nhwc, log_det = self.jet(x_nhwc)
-        tokens = self._patchify(z_nhwc)
-        # Optional latent projection before factoring
+            tokens_px, _ = self.pre_proj(tokens_px)
+        d = int(self.pre_factor_dim)
+        N = tokens_px.shape[1]
+        # 2) Split into kept (hat) and residual (tilde)
+        tokens_hat_in = tokens_px[..., :d]              # [B, N, d]
+        tokens_tilde = tokens_px[..., d:]               # [B, N, D_full - d]
+        # 3) Reshape kept dims to patch grid and run flow (ps=1)
+        H_patch = H // ps
+        W_patch = W // ps
+        tokens_hat_grid = tokens_hat_in.transpose(1, 2).contiguous().view(B, d, H_patch, W_patch).permute(0, 2, 3, 1).contiguous()  # [B,H/ps,W/ps,d]
+        z_hat_grid, log_det_flow = self.jet(tokens_hat_grid)  # flow over patch grid
+        tokens_hat_latents = z_hat_grid.permute(0, 3, 1, 2).contiguous().view(B, d, N).transpose(1, 2).contiguous()  # [B,N,d]
+        # 4) Concatenate latents with Gaussian residual dims to form full token tensor
+        tokens_full = torch.cat([tokens_hat_latents, tokens_tilde], dim=-1)  # [B,N,D_full]
+
+        # 5) Optional latent (post-flow) projection on full tokens
+        log_det = log_det_flow
         if self.latent_projection is not None:
-            tokens, proj_logdet = self.proj(tokens)
-            # logdet is per-sample from flow; projection logdet applies per patch
-            B = tokens.shape[0]
-            N_patches = tokens.shape[1]
-            log_det = log_det + proj_logdet.expand(B) * N_patches
-        # Account for pre-projection logdet per patch
+            tokens_full, proj_logdet = self.proj(tokens_full)
+            log_det = log_det + proj_logdet.expand(B) * N
+
+        # 6) Account for pre-projection logdet per patch if applicable
         if self.pre_latent_projection is not None and self._preproj_logdet_per_patch is not None:
-            B = tokens.shape[0]
-            N_patches = tokens.shape[1]
-            log_det = log_det + self._preproj_logdet_per_patch.expand(B) * N_patches
-        return log_det, tokens
+            log_det = log_det + self._preproj_logdet_per_patch.expand(B) * N
+
+        return log_det, tokens_full
 
     @torch.no_grad()
     def decode_tokens_to_image01(self, tokens_full: torch.Tensor) -> torch.Tensor:
         """Decode full token tensor [B,N,D_full] to image in [0,1], shape [B,3,H,W]."""
         B = tokens_full.shape[0]
         H, W = self.input_size
+        ps = self.patch_size
         tokens = tokens_full
-        # Inverse latent projection if used
+        # Inverse latent projection on full tokens if used
         if self.latent_projection is not None:
             tokens, _ = self.proj.inverse(tokens)
-        z_nhwc = self._unpatchify(tokens, H, W)
-        x_nhwc, _ = self.jet.inverse(z_nhwc)
-        # Undo pre-flow projection if applied
+
+        if self.pre_factor_dim is None:
+            # Default path: inverse flow on pixel grid
+            z_nhwc = self._unpatchify(tokens, H, W)
+            x_nhwc, _ = self.jet.inverse(z_nhwc)
+            if self.pre_latent_projection is not None and self.pre_proj is not None:
+                tokens_px = self._patchify(x_nhwc)
+                tokens_orig, _ = self.pre_proj.inverse(tokens_px)
+                x_nhwc = self._unpatchify(tokens_orig, H, W)
+            x_chw = torch.clamp(x_nhwc.permute(0, 3, 1, 2), 0.0, 1.0)
+            return x_chw
+
+        # Pre-flow factoring path
+        d = int(self.pre_factor_dim)
+        N = tokens.shape[1]
+        H_patch = H // ps
+        W_patch = W // ps
+        # Split tokens into flow-latent dims and Gaussian residual dims
+        tokens_hat_latents = tokens[..., :d]      # [B,N,d]
+        tokens_tilde = tokens[..., d:]            # [B,N,D_full-d]
+        # Inverse flow over patch grid (ps=1)
+        z_hat_grid = tokens_hat_latents.transpose(1, 2).contiguous().view(B, d, H_patch, W_patch).permute(0, 2, 3, 1).contiguous()
+        x_hat_grid, _ = self.jet.inverse(z_hat_grid)   # [B,H/ps,W/ps,d]
+        tokens_hat_after_W = x_hat_grid.permute(0, 3, 1, 2).contiguous().view(B, d, N).transpose(1, 2).contiguous()  # [B,N,d]
+        # Merge with Gaussian residual dims to reconstruct pre-projection patch tokens
+        tokens_px_after_W = torch.cat([tokens_hat_after_W, tokens_tilde], dim=-1)  # [B,N,D_full]
+        # Undo pre-projection if applied, then unpatchify to image
         if self.pre_latent_projection is not None and self.pre_proj is not None:
-            tokens_px = self._patchify(x_nhwc)
-            tokens_orig, _ = self.pre_proj.inverse(tokens_px)
-            x_nhwc = self._unpatchify(tokens_orig, H, W)
+            tokens_px_orig, _ = self.pre_proj.inverse(tokens_px_after_W)
+        else:
+            tokens_px_orig = tokens_px_after_W
+        x_nhwc = self._unpatchify(tokens_px_orig, H, W)
         x_chw = torch.clamp(x_nhwc.permute(0, 3, 1, 2), 0.0, 1.0)
         return x_chw
 
