@@ -65,7 +65,7 @@ device: auto
 # W&B (optional)
 wandb: true
 wandb_offline: false
-wandb_project: "jetformer-laion-pop"
+wandb_project: "jetformer-imagenet-64"
 wandb_run_name: "S-64"
 wandb_tags: ["imagenet64", "s"]
 
