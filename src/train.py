@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, Dataset
 import torch.distributed as dist
 from src.dataset import LAIONPOPTextImageDataset
 from src.flow.dataset import KaggleImageFolderImagenet, ImageNet21kFolder
-from src.flow.wandb_utils import WBLogger
+from src.wandb_utils import WBLogger
 from src.jetformer import JetFormerTrain
 from PIL import Image
 import torchvision.transforms as transforms

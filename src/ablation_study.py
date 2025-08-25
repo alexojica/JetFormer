@@ -8,7 +8,7 @@ import wandb
 import math
 from tqdm import tqdm
 from src.dataset import TinyStoriesDataset
-from src.gemma_transformer import GemmaTransformer
+from src.transformer import GemmaTransformer
 from src.transformer import Transformer
 
 def compute_metrics(logits, targets):

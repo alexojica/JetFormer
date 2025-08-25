@@ -19,10 +19,9 @@ from tqdm import tqdm
 import wandb
 import pathlib
 import argparse
-from .accelerator_gpu import GPUAccelerator
+from src.accelerators import GPUAccelerator
 try:
-    from .accelerator_tpu import TPUAccelerator
-    _HAS_TPU = True
+    from src.accelerators import TPUAccelerator, HAS_TPU as _HAS_TPU
 except Exception:
     TPUAccelerator = None
     _HAS_TPU = False

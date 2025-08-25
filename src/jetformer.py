@@ -3,12 +3,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from typing import Tuple
-from src.models.tokenizer import patchify as tk_patchify, unpatchify as tk_unpatchify
-from src.models.mixture import gmm_params as mix_gmm_params, gmm_distribution as mix_gmm_distribution, sample_gmm as mix_sample_gmm
+from src.tokenizer import patchify as tk_patchify, unpatchify as tk_unpatchify
+from src.losses.image import gmm_params as mix_gmm_params, gmm_distribution as mix_gmm_distribution, sample_gmm as mix_sample_gmm
 from src.losses.text import cross_entropy_second_only
 from src.transformer import Transformer
 from src.flow.jet_flow import JetModel
-from src.gemma_transformer import GemmaBlock
+from src.transformer import GemmaBlock
+from src.flow.projections import InvertibleLinear, InvertibleLinearPre
 
 class JetFormer(nn.Module):
     def __init__(
@@ -86,44 +87,6 @@ class JetFormer(nn.Module):
         self._proj_logdet_per_patch = None
         if self.latent_projection is not None:
             D_full = self.image_token_dim
-            class InvertibleLinear(nn.Module):
-                def __init__(self, dim: int):
-                    super().__init__()
-                    W, _ = torch.linalg.qr(torch.randn(dim, dim))
-                    P, L, U = torch.linalg.lu(W)
-                    self.register_buffer('P', P)
-                    self.L = nn.Parameter(L)
-                    self.U = nn.Parameter(U)
-                    self.L_mask = torch.tril(torch.ones_like(self.L), diagonal=-1)
-                    self.U_mask = torch.triu(torch.ones_like(self.U), diagonal=0)
-                def _weight(self):
-                    L = self.L * self.L_mask + torch.eye(self.L.shape[0], device=self.L.device, dtype=self.L.dtype)
-                    U = self.U * self.U_mask
-                    W = self.P @ L @ U
-                    return W
-                def forward(self, x: torch.Tensor):
-                    # x: [B,N,D]
-                    W = self._weight()
-                    y = x @ W.t()
-                    logdet = torch.sum(torch.log(torch.abs(torch.diag(self.U))))
-                    return y, logdet
-                def inverse(self, y: torch.Tensor):
-                    W = self._weight()
-                    WinvT = torch.inverse(W).t()
-                    x = y @ WinvT
-                    logdet = -torch.sum(torch.log(torch.abs(torch.diag(self.U))))
-                    return x, logdet
-                def set_weight(self, W_new: torch.Tensor, frozen: bool = True):
-                    # Decompose provided W into LU to populate parameters
-                    with torch.no_grad():
-                        P, L, U = torch.linalg.lu(W_new)
-                        self.P.copy_(P)
-                        self.L.copy_(L)
-                        self.U.copy_(U)
-                    if frozen:
-                        for p in self.parameters():
-                            p.requires_grad = False
-
             self.proj = InvertibleLinear(D_full)
             if self.latent_projection == "pca_frozen" and latent_proj_matrix_path:
                 try:
@@ -139,41 +102,6 @@ class JetFormer(nn.Module):
         self._preproj_logdet_per_patch = None
         if self.pre_latent_projection is not None:
             D_full_px = 3 * patch_size * patch_size
-            class InvertibleLinearPre(nn.Module):
-                def __init__(self, dim: int):
-                    super().__init__()
-                    W, _ = torch.linalg.qr(torch.randn(dim, dim))
-                    P, L, U = torch.linalg.lu(W)
-                    self.register_buffer('P', P)
-                    self.L = nn.Parameter(L)
-                    self.U = nn.Parameter(U)
-                    self.L_mask = torch.tril(torch.ones_like(self.L), diagonal=-1)
-                    self.U_mask = torch.triu(torch.ones_like(self.U), diagonal=0)
-                def _weight(self):
-                    L = self.L * self.L_mask + torch.eye(self.L.shape[0], device=self.L.device, dtype=self.L.dtype)
-                    U = self.U * self.U_mask
-                    W = self.P @ L @ U
-                    return W
-                def forward(self, x: torch.Tensor):
-                    W = self._weight()
-                    y = x @ W.t()
-                    logdet = torch.sum(torch.log(torch.abs(torch.diag(self.U))))
-                    return y, logdet
-                def inverse(self, y: torch.Tensor):
-                    W = self._weight()
-                    WinvT = torch.inverse(W).t()
-                    x = y @ WinvT
-                    logdet = -torch.sum(torch.log(torch.abs(torch.diag(self.U))))
-                    return x, logdet
-                def set_weight(self, W_new: torch.Tensor, frozen: bool = True):
-                    with torch.no_grad():
-                        P, L, U = torch.linalg.lu(W_new)
-                        self.P.copy_(P)
-                        self.L.copy_(L)
-                        self.U.copy_(U)
-                    if frozen:
-                        for p in self.parameters():
-                            p.requires_grad = False
             self.pre_proj = InvertibleLinearPre(D_full_px)
             if self.pre_latent_projection == "pca_frozen" and pre_latent_proj_matrix_path:
                 try:
