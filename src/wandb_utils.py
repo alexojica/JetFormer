@@ -59,6 +59,8 @@ class WBLogger:
         payload = {
             # Core likelihood metrics
             "train/total_bpd": float(out.get('image_bpd_total', 0.0)),
+            # Alias matching paper terminology
+            "train/nll_bpd": float(out.get('image_bpd_total', 0.0)),
             "train/flow_bpd": float(out.get('flow_bpd_component', 0.0)),
             "train/ar_bpd": float(out.get('ar_bpd_component', 0.0)),
             # Raw AR log-likelihood (nats)
@@ -97,6 +99,8 @@ class WBLogger:
         payload = {
             # Bits/dim
             'val/total_bpd': v_img_bpd,
+            # Alias matching paper terminology
+            'val/nll_bpd': v_img_bpd,
             'val/flow_bpd': v_flow_bpd,
             'val/ar_bpd': max(0.0, v_img_bpd - v_flow_bpd),
             # Text

@@ -350,7 +350,10 @@ def initialize_step_from_ckpt(model: torch.nn.Module, steps_per_epoch: int, star
 
 @torch.no_grad()
 def evaluate_one_epoch(model_obj: torch.nn.Module, loader: DataLoader, accelerator) -> Tuple[float, float, float, float]:
-    """Evaluate the model over one epoch and return averaged (total, text, image, flow) metrics."""
+    """Evaluate the model over one epoch and return averaged (total, text, image, flow) metrics.
+
+    Also forces RGB noise off during validation by passing a flag in the batch.
+    """
     model_obj.eval()
     sum_total = 0.0
     sum_text = 0.0
@@ -359,6 +362,12 @@ def evaluate_one_epoch(model_obj: torch.nn.Module, loader: DataLoader, accelerat
     count = 0
     iterable = accelerator.wrap_dataloader(loader, is_train=False) if hasattr(accelerator, 'wrap_dataloader') else loader
     for batch in iterable:
+        # Signal to the training forward to disable RGB noise (keep dequant) for clean eval
+        try:
+            batch = dict(batch)
+            batch['no_rgb_noise'] = True
+        except Exception:
+            pass
         out = model_obj(batch)
         bsz = batch['image'].size(0)
         sum_total += float(out.get('loss', 0.0)) * bsz
