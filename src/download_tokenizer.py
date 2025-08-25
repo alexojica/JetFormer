@@ -19,7 +19,7 @@ def download_sentencepiece_model():
     
     try:
         urllib.request.urlretrieve(url, local_path)
-        print(f"✅ Successfully downloaded SentencePiece model to {local_path}")
+        print(f"Successfully downloaded SentencePiece model to {local_path}")
         
         # Verify file size
         file_size = os.path.getsize(local_path)
@@ -28,7 +28,7 @@ def download_sentencepiece_model():
         return local_path
         
     except Exception as e:
-        print(f"❌ Failed to download SentencePiece model: {e}")
+        print(f"Failed to download SentencePiece model: {e}")
         raise e
 
 if __name__ == "__main__":
