@@ -50,7 +50,7 @@ cfg_strength: 4.0
 cfg_mode: "reject"
 
 # Epoch-level schedules
-sample_every_epochs: 5
+sample_every_epochs: 1
 val_every_epochs: 5
 
 # Dataloader
