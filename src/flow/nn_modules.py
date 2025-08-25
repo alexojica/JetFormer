@@ -38,7 +38,7 @@ class ActNorm(nn.Module):
         B, H, W, C = x.shape
         logdet = H * W * torch.sum(self.log_scale)
         
-        return z, logdet.expand(B)
+        return z, logdet.expand(B).clone()
 
     def inverse(self, z: torch.Tensor):
         """Applies the inverse of activation normalization."""
@@ -47,7 +47,7 @@ class ActNorm(nn.Module):
         B, H, W, C = z.shape
         inv_logdet = -H * W * torch.sum(self.log_scale)
 
-        return x, inv_logdet.expand(B)
+        return x, inv_logdet.expand(B).clone()
 
 
 class Invertible1x1Conv(nn.Module):
@@ -85,7 +85,7 @@ class Invertible1x1Conv(nn.Module):
 
         logdet = Hs * Ws * torch.sum(torch.log(torch.abs(self.U.diag())))
         
-        return z, logdet.expand(B)
+        return z, logdet.expand(B).clone()
 
     def inverse(self, z: torch.Tensor):
         """Applies the inverse 1x1 convolution."""
@@ -99,4 +99,4 @@ class Invertible1x1Conv(nn.Module):
         
         inv_logdet = -Hs * Ws * torch.sum(torch.log(torch.abs(self.U.diag())))
 
-        return x, inv_logdet.expand(B)
+        return x, inv_logdet.expand(B).clone()

@@ -346,10 +346,10 @@ class Coupling(nn.Module):
 
         if self.use_actnorm:
             x, ld = self.actnorm(x)
-            logdet += ld
+            logdet = logdet + ld
         if self.use_invertible_dense:
             x, ld = self.invconv(x)
-            logdet += ld
+            logdet = logdet + ld
 
         # Patchify the input: (B, H, W, C) -> (B, N, C_patched)
         x_reshaped = x.permute(0, 3, 1, 2).contiguous()
@@ -368,7 +368,7 @@ class Coupling(nn.Module):
                     bias, scale, logdet_dnn = self.dnn(x1, H_patch=H//self.ps, W_patch=W//self.ps, context=context)
                 else:
                     bias, scale, logdet_dnn = self.dnn(x1, context=context)
-                logdet += logdet_dnn
+                logdet = logdet + logdet_dnn
                 # Apply affine transform to the second half of features
                 x2_prime = (x2 + bias) * scale
                 x_merged = torch.cat([x1, x2_prime], dim=-1)
@@ -381,7 +381,7 @@ class Coupling(nn.Module):
                 x1_tokens, x2_tokens = torch.chunk(x_proj, 2, dim=1)
                 # Predict on x1 tokens only; DNN is configured with full feature dim
                 bias, scale, logdet_dnn = self.dnn(x1_tokens, context=context)
-                logdet += logdet_dnn
+                logdet = logdet + logdet_dnn
                 # Transform x2 tokens
                 x2_prime_tokens = (x2_tokens + bias) * scale
                 x_merged_tokens = torch.cat([x1_tokens, x2_prime_tokens], dim=1)
@@ -398,7 +398,7 @@ class Coupling(nn.Module):
                     bias, scale, logdet_dnn = self.dnn(x1, H_patch=H//self.ps, W_patch=W//self.ps, context=context)
                 else: # vit
                     bias, scale, logdet_dnn = self.dnn(x1, context=context)
-                logdet += logdet_dnn
+                logdet = logdet + logdet_dnn
                 
                 # Apply affine transform
                 x2_prime = (x2 + bias) * scale
@@ -430,7 +430,7 @@ class Coupling(nn.Module):
                 scale_x2 = scale.index_select(1, x2_indices)
                 # Log-determinant contribution only from transformed (x2) tokens
                 logdet_local = torch.log(scale_x2).view(B, -1).sum(dim=1)
-                logdet += logdet_local
+                logdet = logdet + logdet_local
                 
                 # Select the original x1 and x2 tokens
                 x1_tokens = x_patched.index_select(1, x1_indices)
@@ -474,14 +474,14 @@ class Coupling(nn.Module):
             x, _ = self.invconv.inverse(x)
             # Accumulate the forward log-determinant
             logdet_invconv = H * W * torch.sum(torch.log(torch.abs(self.invconv.U.diag())))
-            fwd_logdet += logdet_invconv.expand(B)
+            fwd_logdet = fwd_logdet + logdet_invconv.expand(B).clone()
             
         if self.use_actnorm:
             # Apply inverse transformation
             x, _ = self.actnorm.inverse(x)
             # Accumulate the forward log-determinant
             logdet_actnorm = H * W * torch.sum(self.actnorm.log_scale)
-            fwd_logdet += logdet_actnorm.expand(B)
+            fwd_logdet = fwd_logdet + logdet_actnorm.expand(B).clone()
 
         # Patchify the input: (B, H, W, C) -> (B, N, C_patched)
         x_patched = F.unfold(x.permute(0, 3, 1, 2).contiguous(), kernel_size=self.ps, stride=self.ps)
@@ -497,7 +497,7 @@ class Coupling(nn.Module):
                     bias, scale, logdet_dnn = self.dnn(y1, H_patch=H//self.ps, W_patch=W//self.ps, context=context)
                 else:
                     bias, scale, logdet_dnn = self.dnn(y1, context=context)
-                fwd_logdet += logdet_dnn
+                fwd_logdet = fwd_logdet + logdet_dnn
                 x2 = (y2 / scale) - bias
                 x_merged = torch.cat([y1, x2], dim=-1)
                 with _NoAmpAutocast():
@@ -507,7 +507,7 @@ class Coupling(nn.Module):
                     y_proj = torch.einsum("b n c, n m -> b m c", x_patched, self.P_spatial)
                 y1_tokens, y2_tokens = torch.chunk(y_proj, 2, dim=1)
                 bias, scale, logdet_dnn = self.dnn(y1_tokens, context=context)
-                fwd_logdet += logdet_dnn
+                fwd_logdet = fwd_logdet + logdet_dnn
                 x2_tokens = (y2_tokens / scale) - bias
                 x_merged_tokens = torch.cat([y1_tokens, x2_tokens], dim=1)
                 with _NoAmpAutocast():
@@ -521,7 +521,7 @@ class Coupling(nn.Module):
                     bias, scale, logdet_dnn = self.dnn(y1, H_patch=H//self.ps, W_patch=W//self.ps, context=context)
                 else: # vit
                     bias, scale, logdet_dnn = self.dnn(y1, context=context)
-                fwd_logdet += logdet_dnn
+                fwd_logdet = fwd_logdet + logdet_dnn
                 
                 x2 = (y2 / scale) - bias
                 x_unproj = torch.cat([y1, x2], dim=-1)
@@ -549,7 +549,7 @@ class Coupling(nn.Module):
                 scale_y2 = scale.index_select(1, y2_indices)
                 # Forward log-det only from transformed (y2) tokens
                 logdet_local = torch.log(scale_y2).view(B, -1).sum(dim=1)
-                fwd_logdet += logdet_local
+                fwd_logdet = fwd_logdet + logdet_local
 
                 # Select the y2 tokens and invert their transformation to get x2_tokens
                 y2_tokens = x_patched.index_select(1, y2_indices)
