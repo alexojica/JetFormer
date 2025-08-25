@@ -289,7 +289,7 @@ class JetFormer(nn.Module):
         padding_mask = padding_mask[:, :-1]
 
         seq_len = x.shape[1]
-        causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=device))
+        causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=device, dtype=torch.bool))
         causal_mask = causal_mask.unsqueeze(0).expand(batch_size, -1, -1)
         padding_mask_2d = padding_mask.unsqueeze(1) & padding_mask.unsqueeze(2)
         
@@ -342,8 +342,7 @@ class JetFormer(nn.Module):
 
         if self.use_bfloat16_img_head:
             image_logits_bf16 = image_logits.to(torch.bfloat16)
-            image_logits = self.img_head(image_logits_bf16)
-            image_logits = image_logits.to(torch.float32)
+            image_logits = self.img_head(image_logits_bf16).float()
         else:
             image_logits = self.img_head(image_logits)
         
@@ -579,16 +578,28 @@ class JetFormerTrain(JetFormer):
         residual_nll = self.gaussian_residual_nll(residual_tokens)
         C, H, W = 3, self.input_size[0], self.input_size[1]
         denom = (H * W * C) * math.log(2.0)
+        # Bits/dim decomposition: flow term contributes -log_det
         total_nll = gmm_nll + residual_nll - log_det
+        flow_bpd_per_sample = (-log_det) / denom
+        ar_bpd_per_sample = (gmm_nll + residual_nll) / denom
         image_bpd_per_sample = total_nll / denom
         image_loss = (image_bpd_per_sample * text_first_mask.float()).mean()
 
         total_loss = (self.text_loss_weight * text_loss) + (self.image_loss_weight * image_loss)
         # step++
         self._step += 1
+        # Diagnostics
+        with torch.no_grad():
+            image_loglik_nats = (-gmm_nll).mean()
+            small_scales_rate = (scales < 1e-4).float().mean()
         return {
             "loss": total_loss,
             "text_loss": text_loss.detach(),
             "image_loss": image_loss.detach(),
-            "flow_bpd_component": (log_det / (H * W * C) / math.log(2.0)).mean().detach(),
+            "flow_bpd_component": flow_bpd_per_sample.mean().detach(),
+            "ar_bpd_component": ar_bpd_per_sample.mean().detach(),
+            "image_bpd_total": image_bpd_per_sample.mean().detach(),
+            "image_loglik_nats": image_loglik_nats.detach(),
+            "gmm_small_scales_rate": small_scales_rate.detach(),
+            "sigma_rgb": float(sigma_t),
         }

@@ -471,9 +471,27 @@ def train_from_config(config_dict: dict):
     
     if wb_run is not None:
         wandb.summary.update({
+            # Params counts
             "model/total_params": total_params,
             "model/jet_params": jet_params,
-            "model/transformer_params": transformer_params
+            "model/transformer_params": transformer_params,
+            # Config snapshot matching paper terminology
+            "config/image_size": int(getattr(config, 'input_size', (256, 256))[0]),
+            "config/patch_size": int(getattr(config, 'patch_size', 16)),
+            "config/factored_dims": int(getattr(config, 'image_ar_dim', 128)),
+            "config/mixtures_k": int(getattr(config, 'num_mixtures', 1024)),
+            "config/image_ar_dim": int(getattr(config, 'image_ar_dim', 128)),
+            "config/num_class_tokens": int(getattr(config, 'class_token_length', 16)),
+            "config/jet/num_blocks": int(getattr(config, 'jet_depth', 8)),
+            "config/jet/width": int(getattr(config, 'jet_emb_dim', 512)),
+            "config/jet/depth_per_block": int(getattr(config, 'jet_block_depth', 2)),
+            "config/jet/num_heads": int(getattr(config, 'jet_num_heads', 8)),
+            "config/ar/depth": int(getattr(config, 'n_layers', 12)),
+            "config/ar/width": int(getattr(config, 'd_model', 768)),
+            "config/ar/num_heads": int(getattr(config, 'n_heads', 12)),
+            "config/ar/n_kv_heads": int(getattr(config, 'n_kv_heads', 1)),
+            "config/rope": True,
+            "config/params_total": total_params,
         })
 
     compiled_enabled = config.get('torch_compile', False)
@@ -655,6 +673,7 @@ def train_from_config(config_dict: dict):
         sum_text = 0.0
         sum_img = 0.0
         sum_flow = 0.0
+        sum_sigma = 0.0
         count = 0
         iterable = accelerator.wrap_dataloader(loader, is_train=False) if hasattr(accelerator, 'wrap_dataloader') else loader
         for batch in iterable:
@@ -664,6 +683,7 @@ def train_from_config(config_dict: dict):
             sum_text += float(out.get('text_loss', 0.0)) * bsz
             sum_img += float(out.get('image_loss', 0.0)) * bsz
             sum_flow += float(out.get('flow_bpd_component', 0.0)) * bsz
+            sum_sigma += float(out.get('sigma_rgb', 0.0)) * bsz
             count += bsz
         model_obj.train()
         denom = max(1, count)
@@ -676,10 +696,13 @@ def train_from_config(config_dict: dict):
         print(f"Initial Val — total: {v_total:.4f} | text: {v_text:.4f} | img: {v_img:.4f}")
         if wb_run is not None:
             wandb.log({
-                'val/total_loss': v_total,
-                'val/text_loss': v_text,
-                'val/image_gen_loss': v_img,
-                'val/flow_bpd_component': v_flow,
+                # Bits/dim
+                'val/total_bpd': v_img,
+                'val/flow_bpd': v_flow,
+                'val/ar_bpd': max(0.0, v_img - v_flow),
+                # Text
+                'val/text_ce': v_text,
+                'val/text_ppl': float(math.exp(min(30.0, v_text))) if v_text > 0 else 0.0,
                 'epoch': 0,
                 'global_step': 0,
             })
@@ -776,15 +799,45 @@ def train_from_config(config_dict: dict):
                     pass
             
             if is_main_process and wb_run is not None and (step % int(getattr(config, 'log_every_batches', 10)) == 0):
+                # Gradient norm (global L2)
+                try:
+                    total_grad_norm = 0.0
+                    for p in model.parameters():
+                        if p.grad is not None:
+                            g = p.grad.data
+                            total_grad_norm += float(torch.sum(g * g))
+                    total_grad_norm = float(total_grad_norm) ** 0.5
+                except Exception:
+                    total_grad_norm = float('nan')
+
                 wandb.log({
-                    "train/total_loss": loss.item(),
-                    "train/text_loss": float(out.get('text_loss', 0.0)),
-                    "train/image_gen_loss": float(out.get('image_loss', 0.0)),
-                    "train/flow_bpd_component": float(out.get('flow_bpd_component', 0.0)),
-                    "train/learning_rate": optimizer.param_groups[0]['lr'],
+                    # Core likelihood metrics
+                    "train/total_bpd": float(out.get('image_bpd_total', 0.0)),
+                    "train/flow_bpd": float(out.get('flow_bpd_component', 0.0)),
+                    "train/ar_bpd": float(out.get('ar_bpd_component', 0.0)),
+                    # Raw AR log-likelihood (nats)
+                    "train/image_loglik": float(out.get('image_loglik_nats', 0.0)),
+                    # Text metrics
+                    "train/text_ce": float(out.get('text_loss', 0.0)),
+                    "train/text_ppl": float(math.exp(min(30.0, float(out.get('text_loss', 0.0))))) if float(out.get('text_loss', 0.0)) > 0 else 0.0,
+                    # Curriculum & noise
+                    "train/sigma_rgb": float(out.get('sigma_rgb', 0.0)),
+                    "train/sigma_rgb_final": float(getattr(config, 'rgb_sigma_final', 3.0)),
+                    "train/latent_noise_std": float(getattr(config, 'latent_noise_std', 0.3)),
+                    "train/cfg_drop_prob": float(getattr(config, 'cfg_drop_prob', 0.1)),
+                    # Optimization / dynamics
+                    "train/lr": optimizer.param_groups[0]['lr'],
+                    "train/grad_norm": total_grad_norm,
+                    "train/optimizer_beta2": optimizer.param_groups[0].get('betas', (None, 0.95))[1] if hasattr(optimizer, 'param_groups') else 0.95,
+                    "train/weight_decay": optimizer.param_groups[0].get('weight_decay', 1e-4) if hasattr(optimizer, 'param_groups') else 1e-4,
+                    "train/dropout": float(getattr(config, 'dropout', 0.1)),
+                    # Timing
+                    "train/batch_time": time.time() - start_time,
+                    # Housekeeping
                     "train/step": step,
                     "train/epoch": epoch,
-                    "train/batch_time": time.time() - start_time,
+                    # Sanity signals
+                    "sanity/gmm_small_scales_rate": float(out.get('gmm_small_scales_rate', 0.0)),
                 })
             
             sample_every = int(getattr(config, 'sample_every_batches', 100))
@@ -869,10 +922,13 @@ def train_from_config(config_dict: dict):
             print(f"Val Epoch {epoch+1} — total: {v_total:.4f} | text: {v_text:.4f} | img: {v_img:.4f}")
             if wb_run is not None:
                 wandb.log({
-                    'val/total_loss': v_total,
-                    'val/text_loss': v_text,
-                    'val/image_gen_loss': v_img,
-                    'val/flow_bpd_component': v_flow,
+                    # Bits/dim
+                    'val/total_bpd': v_img,
+                    'val/flow_bpd': v_flow,
+                    'val/ar_bpd': max(0.0, v_img - v_flow),
+                    # Text
+                    'val/text_ce': v_text,
+                    'val/text_ppl': float(math.exp(min(30.0, v_text))) if v_text > 0 else 0.0,
                     'epoch': epoch+1,
                     'global_step': step,
                 })

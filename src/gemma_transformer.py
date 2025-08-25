@@ -77,7 +77,10 @@ class MultiQueryAttention(nn.Module):
         attn_mask = None
         if mask is not None:
             # mask is [B, 1, L, S] boolean; expand to [B*H, L, S]
-            attn_mask = mask.expand(B, self.n_heads, L, key_len).reshape(B * self.n_heads, L, key_len)
+            allowed = mask.expand(B, self.n_heads, L, key_len).reshape(B * self.n_heads, L, key_len)
+            # SDPA boolean semantics are True=disallow. Build additive mask for robustness across backends.
+            disallowed = ~allowed
+            attn_mask = disallowed.to(q.dtype) * torch.finfo(q.dtype).min
 
         out = F.scaled_dot_product_attention(
             q, k, v,
@@ -188,7 +191,7 @@ class GemmaTransformer(nn.Module):
         return cls(
             d_model=2048,      # Hidden dimension
             n_heads=16,        # Number of attention heads
-            n_kv_heads=16,     # 16 KV heads for multi-query attention
+            n_kv_heads=1,      # Single KV head for multi-query attention (MQA)
             n_layers=18,       # Number of transformer layers
             d_ff=8192,        # Feed-forward hidden dimensions
             dropout=dropout,
