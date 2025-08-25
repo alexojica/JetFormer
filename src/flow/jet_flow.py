@@ -305,10 +305,12 @@ class Coupling(nn.Module):
 
         self.use_actnorm = use_actnorm
         self.use_invertible_dense = use_invertible_dense
+        # ActNorm and 1x1 invertible conv operate on channel dimension of the input x (B,H,W,C),
+        # prior to patchification. Therefore they must be parameterized by C, not C*ps*ps.
         if use_actnorm:
-            self.actnorm = ActNorm(C_patchedup)
+            self.actnorm = ActNorm(C)
         if use_invertible_dense:
-            self.invconv = Invertible1x1Conv(C_patchedup)
+            self.invconv = Invertible1x1Conv(C)
 
         if self.backbone == 'vit':
             self.dnn = DNN(
