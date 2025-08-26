@@ -87,7 +87,24 @@ def train_from_config(config_dict: dict):
     # total_steps set later after dataloader creation
     dataset_choice = getattr(config, 'dataset', 'laion_pop')
 
+    # Resolve resume path: if not provided, prefer local rolling checkpoints
     resume_from_path = cfg_raw.get('resume_from', None)
+    if not resume_from_path:
+        try:
+            default_last = os.path.join('checkpoints', 'last.pt')
+            default_best = os.path.join('checkpoints', 'best.pt')
+            if os.path.exists(default_last):
+                resume_from_path = default_last
+                cfg_raw['resume_from'] = resume_from_path
+                if is_main_process:
+                    print(f"Auto-resume: using {resume_from_path}")
+            elif os.path.exists(default_best):
+                resume_from_path = default_best
+                cfg_raw['resume_from'] = resume_from_path
+                if is_main_process:
+                    print(f"Auto-resume: using {resume_from_path}")
+        except Exception:
+            pass
     model = build_model_from_config(config, device_obj)
     # If resuming, load model weights before optional compile/wrap
     start_epoch = 0

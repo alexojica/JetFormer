@@ -56,6 +56,7 @@ class WBLogger:
             return
         text_ce = float(out.get('text_loss', 0.0))
         text_ppl = float(math.exp(min(30.0, text_ce))) if text_ce > 0 else 0.0
+        # Prefer explicit NLL (nats) if provided; otherwise derive from BPD if possible
         payload = {
             # Core likelihood metrics
             "train/total_bpd": float(out.get('image_bpd_total', 0.0)),
@@ -63,6 +64,11 @@ class WBLogger:
             "train/nll_bpd": float(out.get('image_bpd_total', 0.0)),
             "train/flow_bpd": float(out.get('flow_bpd_component', 0.0)),
             "train/ar_bpd": float(out.get('ar_bpd_component', 0.0)),
+            # NLL (nats) and its components
+            "train/total_nll_nats": float(out.get('total_nll_nats', float('nan'))),
+            "train/nll_nats": float(out.get('total_nll_nats', float('nan'))),
+            "train/ar_nll_nats": float(out.get('ar_nll_nats', float('nan'))),
+            "train/flow_neg_logdet_nats": float(out.get('flow_neg_logdet_nats', float('nan'))),
             # Raw AR log-likelihood (nats)
             "train/image_loglik": float(out.get('image_loglik_nats', 0.0)),
             # Text
@@ -96,6 +102,14 @@ class WBLogger:
         if not self.enabled:
             return
         text_ppl = float(math.exp(min(30.0, v_text))) if v_text > 0 else 0.0
+        # Recover NLL in nats from BPD when image dims are known
+        C = 3
+        H = int(getattr(self.cfg, 'input_size', (256,256))[0])
+        W = int(getattr(self.cfg, 'input_size', (256,256))[1])
+        dim_x = float(C * H * W)
+        val_total_nll = float(v_img_bpd) * math.log(2.0) * dim_x
+        val_flow_neg_logdet = float(v_flow_bpd) * math.log(2.0) * dim_x
+        val_ar_nll = val_total_nll - val_flow_neg_logdet
         payload = {
             # Bits/dim
             'val/total_bpd': v_img_bpd,
@@ -103,6 +117,11 @@ class WBLogger:
             'val/nll_bpd': v_img_bpd,
             'val/flow_bpd': v_flow_bpd,
             'val/ar_bpd': max(0.0, v_img_bpd - v_flow_bpd),
+            # NLL (nats)
+            'val/total_nll_nats': val_total_nll,
+            'val/ar_nll_nats': val_ar_nll,
+            'val/nll_nats': val_total_nll,
+            'val/flow_neg_logdet_nats': val_flow_neg_logdet,
             # Text
             'val/text_ce': v_text,
             'val/text_ppl': text_ppl,

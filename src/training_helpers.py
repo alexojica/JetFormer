@@ -374,11 +374,13 @@ def evaluate_one_epoch(model_obj: torch.nn.Module, loader: DataLoader, accelerat
             torch.compiler.cudagraph_mark_step_begin()
         except Exception:
             pass
+        # Forward pass and accumulate metrics per batch
         out = model_obj(batch)
         bsz = batch['image'].size(0)
         sum_total += float(out.get('loss', 0.0)) * bsz
         sum_text += float(out.get('text_loss', 0.0)) * bsz
-        sum_img += float(out.get('image_loss', 0.0)) * bsz
+        # Use unmasked image bits/dim for accurate NLL/BPD reporting
+        sum_img += float(out.get('image_bpd_total', out.get('image_loss', 0.0))) * bsz
         sum_flow += float(out.get('flow_bpd_component', 0.0)) * bsz
         count += bsz
     model_obj.train()

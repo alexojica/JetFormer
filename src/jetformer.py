@@ -633,6 +633,12 @@ class JetFormerTrain(JetFormer):
             "flow_bpd_component": flow_bpd_per_sample.mean().detach(),
             "ar_bpd_component": ar_bpd_per_sample.mean().detach(),
             "image_bpd_total": image_bpd_per_sample.mean().detach(),
+            # Per-definition metrics in nats
+            # NLL(x) = -(log p(f(x)) + log|det df/dx^T|) = (-log p(z)) + (-log|det|)
+            # Here: gmm_nll + residual_nll = -log p(z); -log_det = -log|det|
+            "total_nll_nats": total_nll.mean().detach(),
+            "ar_nll_nats": (gmm_nll + residual_nll).mean().detach(),
+            "flow_neg_logdet_nats": (-log_det).mean().detach(),
             "image_loglik_nats": image_loglik_nats.detach(),
             "gmm_small_scales_rate": small_scales_rate.detach(),
             "sigma_rgb": sigma_t.detach(),
