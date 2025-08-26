@@ -17,9 +17,12 @@ from .train_module import FlowTrain
 from .dataset import TFDSImagenet64, KaggleImageFolderImagenet64, TFDSImagenet32, KaggleImageFolderImagenet, TorchvisionCIFAR10, ImageNet21kFolder
 from tqdm import tqdm
 import wandb
+from src.utils.logging import get_logger
 import pathlib
 import argparse
 from src.accelerators import GPUAccelerator
+from src.utils.optim import get_optimizer_and_scheduler as get_opt_sched
+from src.losses import bits_per_dim
 try:
     from src.accelerators import TPUAccelerator, HAS_TPU as _HAS_TPU
 except Exception:
@@ -55,146 +58,8 @@ def str2bool(v):
 def get_optimizer_and_scheduler(model: nn.Module,
                                 config: dict,
                                 total_steps: int):
-    """Creates an AdamW optimizer and a cosine learning rate scheduler with optional warmup."""
-    lr = config.get("lr", 1e-3)
-    wd = config.get("wd", 1e-4)
-    adam_b2 = config.get("opt_b2", 0.95)
-
-    optimizer = optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=lr,
-        betas=(0.9, adam_b2),
-        weight_decay=wd
-    )
-
-    warmup_percent = float(config.get("warmup_percent", 0.0))
-    use_cosine = bool(config.get("use_cosine", True))
-    warmup_steps = int(max(0, warmup_percent) * total_steps)
-
-    def lr_lambda(current_step):
-        if warmup_steps > 0 and current_step < warmup_steps:
-            return float(current_step) / float(max(1, warmup_steps))
-        if use_cosine:
-            progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
-            return 0.5 * (1.0 + math.cos(math.pi * progress))
-        return 1.0
-
-    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-    return optimizer, scheduler
-
-def bits_per_dim_loss(z: torch.Tensor,
-                      logdet: torch.Tensor,
-                      image_shape_hwc: tuple,
-                      reduce: bool = True):
-    """Calculates the bits per dimension (BPD) loss for a normalizing flow."""
-    normal_dist = torch.distributions.Normal(0.0, 1.0)
-    # - log p_N(z) = 0.5*(z^2 + ln(2π)) per dimension
-    nll = -normal_dist.log_prob(z)         # shape (B, H*W*C)
-    # Add dequant constant: ln(256) per dimension
-    ln_dequant = math.log(256.0)
-    nll_plus_dequant = nll + ln_dequant
-
-    # Sum over all dims except batch
-    nll_summed = torch.sum(nll_plus_dequant, dim=list(range(1, nll.ndim)))  # (B,)
-
-    # Bits from log |det ∂g|
-    bits_logdet = -logdet  # Note: forward() returns +logdet, so in NLL we subtract (–logdet) ⇒ -logdet
-    # Actually, because in training we add (–logdet), we can combine terms:
-    total_bits = nll_summed - logdet
-
-    # Normalize by (ln2 * #dims)
-    dim_count = np.prod(image_shape_hwc)
-    normalizer = math.log(2.0) * dim_count  # ln(2) * (H*W*C)
-    loss_bpd = total_bits / normalizer
-
-    if reduce:
-        mean_loss_bpd = torch.mean(loss_bpd)
-        mean_nll = torch.mean(nll_summed / normalizer)
-        mean_logdet = torch.mean(logdet / normalizer)
-        return mean_loss_bpd, mean_nll, mean_logdet
-    else:
-        return loss_bpd, nll_summed / normalizer, logdet / normalizer
-
-
-def train_one_epoch(model: nn.Module,
-                    dataloader: DataLoader,
-                    optimizer: optim.Optimizer,
-                    scheduler,
-                    device: torch.device,
-                    epoch: int,
-                    total_epochs: int,
-                    grad_clip_norm: float,
-                    image_shape_hwc: tuple,
-                    current_step: int,
-                    # precision is handled by accelerator; remove fp16 flag
-                    scaler: torch.amp.GradScaler,
-                    show_progress: bool,
-                    log_to_wandb: bool,
-                    accelerator=None):
-    """Trains the model for one epoch, handling data preprocessing, forward/backward passes, and logging."""
-    model.train()
-    iterable = accelerator.wrap_dataloader(dataloader, is_train=True) if accelerator is not None and hasattr(accelerator, 'wrap_dataloader') else dataloader
-    progress_bar = tqdm(iterable, desc=f"Train Epoch {epoch+1}/{total_epochs}", leave=True) if show_progress else iterable
-
-    total_batches = len(dataloader)
-    log_interval = max(1, total_batches // 10)  # Log ~10 times per epoch
-
-    for i, batch in enumerate(progress_bar):
-        step_start_time = time.time()
-        # XLA MpDeviceLoader already places tensors on device; avoid redundant .to()
-        images_uint8 = batch["image"] if getattr(device, 'type', getattr(device, 'device_type', 'cpu')) == 'xla' else batch["image"].to(device, non_blocking=True)
-
-        # ==== Uniform dequantization ====
-        images_float = images_uint8.float()
-        noise = torch.rand_like(images_float)
-        images_normalized = (images_float + noise) / 256.0
-        # The paper implies inputs are in [0, 1]. The x2-1 scaling is not mentioned
-        # and its Jacobian (a constant) is not accounted for.
-        images_input = images_normalized # * 2.0 - 1.0
-
-        optimizer.zero_grad(set_to_none=True) # More performant
-
-        # --- Mixed precision forward (backend-specific) ---
-        autocast_ctx = accelerator.autocast(enabled=True) if accelerator is not None else torch.amp.autocast(device.type, enabled=False)
-        with autocast_ctx:
-            # Note: JetModel expects (B,H,W,C) ordering, so we permute.
-            z, logdet = model(images_input.permute(0, 2, 3, 1))
-        # Compute loss in float32 for numerical stability
-        loss_bpd, nll_bpd, logdet_bpd = bits_per_dim_loss(z.float(), logdet.float(), image_shape_hwc, reduce=True)
-
-        # --- Backward & optimize ---
-        scaler.scale(loss_bpd).backward()
-        if grad_clip_norm > 0:
-            if hasattr(scaler, 'unscale_'):
-                scaler.unscale_(optimizer) # Unscale gradients before clipping
-            nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
-        # Step via accelerator (handles XLA vs CUDA differences)
-        if accelerator is not None and hasattr(accelerator, 'step'):
-            accelerator.step(optimizer, scaler, scheduler)
-        else:
-            scaler.step(optimizer)
-            scaler.update()
-            if scheduler is not None:
-                scheduler.step()
-
-        current_step += 1
-        step_time_s = time.time() - step_start_time
-
-        if show_progress and hasattr(progress_bar, 'set_postfix'):
-            progress_bar.set_postfix({"loss_bpd": loss_bpd.item()})
-
-        # Log training metrics to wandb periodically
-        if log_to_wandb and (i + 1) % log_interval == 0:
-            wandb.log({
-                "train/loss_bpd": loss_bpd.item(),
-                "train/prior_nll_bpd": nll_bpd.item(),
-                "train/logdet_bpd": logdet_bpd.item(),
-                "train/lr": scheduler.get_last_lr()[0],
-                "sys/step_time_s": step_time_s,
-                "epoch_frac": epoch + (i + 1) / total_batches
-            }, step=current_step)
-
-    return current_step
+    """Backwards-compat wrapper that defers to central optimizer utils."""
+    return get_opt_sched(model, config, total_steps)
 
 
 @torch.no_grad()
@@ -229,7 +94,7 @@ def evaluate_one_epoch(model: nn.Module,
             with autocast_ctx:
                 z, logdet = model(images_input.permute(0, 2, 3, 1))
             # Compute loss in float32 for numerical stability
-            loss_bpd, nll_bpd, logdet_bpd = bits_per_dim_loss(z.float(), logdet.float(), image_shape_hwc, reduce=True)
+            loss_bpd, nll_bpd, logdet_bpd = bits_per_dim(z.float(), logdet.float(), image_shape_hwc, reduce=True)
 
             # Accumulate sample-weighted sums
             sum_loss += loss_bpd.item() * batch_size
@@ -302,6 +167,7 @@ def main():
     # Sampling parameters
     parser.add_argument("--num_sample_images", type=int, default=4, help="Number of images to sample when sampling is enabled")
     parser.add_argument("--sample_every_epochs", type=int, default=2, help="Sample images every N epochs (set 0 to disable periodic sampling)")
+    parser.add_argument("--val_every_epochs", type=int, default=0, help="Validate every N epochs (0: default cadence)")
 
     # Checkpointing / pretrain-finetune hooks
     parser.add_argument("--save_dir", type=str, default="./checkpoints", help="Directory to save checkpoints")
@@ -370,9 +236,10 @@ def main():
     is_main_process = accelerator.is_main_process
     world_size_env = accelerator.world_size
     local_rank = accelerator.rank
+    logger = get_logger(__name__)
     if is_main_process:
         acc_name = accelerator.__class__.__name__.replace('Accelerator', '').upper()
-        print(f"Using device: {device}; accelerator={acc_name}; DDP: {ddp_enabled}; world_size={world_size_env}; local_rank={local_rank}")
+        logger.info(f"Using device: {device}; accelerator={acc_name}; DDP: {ddp_enabled}; world_size={world_size_env}; local_rank={local_rank}")
     
     # -----------------------
     # SEEDING (per-rank and per-worker)
@@ -393,20 +260,20 @@ def main():
 
     if is_main_process:
         resolved_precision = getattr(accelerator, 'precision', 'n/a')
-        print(f"Precision mode: {config.get('precision', 'auto')} (resolved: {resolved_precision})")
+        logger.info(f"Precision mode: {config.get('precision', 'auto')} (resolved: {resolved_precision})")
 
     # -----------------------
     # INITIALIZE DATASETS
     # -----------------------
     if is_main_process:
-        print("Loading datasets...")
+        logger.info("Loading datasets...")
     dataset_choice = config.get("dataset", "imagenet64_kaggle")
     resolution = int(config["resolution"]) if "resolution" in config else (64 if dataset_choice != "imagenet32_tfds" else 32)
 
     def _build_datasets():
         if dataset_choice == "imagenet64_kaggle":
             kaggle_dataset_id = config.get("kaggle_dataset_id", "ayaroshevskiy/downsampled-imagenet-64x64")
-            print(f"Using KaggleImageFolder dataset loader for {resolution}x{resolution} resolution.")
+            logger.info(f"Using KaggleImageFolder dataset loader for {resolution}x{resolution} resolution.")
             tr_ds = KaggleImageFolderImagenet(
                 split='train',
                 resolution=resolution,
@@ -421,7 +288,7 @@ def main():
             )
             return tr_ds, va_ds
         elif dataset_choice == "imagenet32_tfds":
-            print(f"Using TFDSImagenet32 dataset loader for {resolution}x{resolution} resolution.")
+            logger.info(f"Using TFDSImagenet32 dataset loader for {resolution}x{resolution} resolution.")
             tr_ds = TFDSImagenet32(
                 split='train',
                 max_samples=config["dataset_subset_size"]
@@ -433,13 +300,13 @@ def main():
         elif dataset_choice == "imagenet21k_folder":
             if not config.get("imagenet21k_root"):
                 raise ValueError("--imagenet21k_root must be provided for imagenet21k_folder dataset")
-            print("Using ImageNet-21k folder loader.")
+            logger.info("Using ImageNet-21k folder loader.")
             tr_ds = ImageNet21kFolder(root_dir=config["imagenet21k_root"], split='train', resolution=resolution, max_samples=config["dataset_subset_size"], random_subset_seed=config["seed"] if config["dataset_subset_size"] is not None else None)
             va_ds = ImageNet21kFolder(root_dir=config["imagenet21k_root"], split='val', resolution=resolution)
             return tr_ds, va_ds
         elif dataset_choice == "cifar10":
             res_local = 32
-            print("Using CIFAR-10 from torchvision.")
+            logger.info("Using CIFAR-10 from torchvision.")
             tr_ds = TorchvisionCIFAR10(split='train', download=True)
             va_ds = TorchvisionCIFAR10(split='test', download=True)
             return tr_ds, va_ds
@@ -473,9 +340,9 @@ def main():
     )
     # Prepare TPU MpDeviceLoader wrappers lazily in the loops to retain length info here
     if is_main_process:
-        print(f"Train images: {len(train_dataset)}; Val images: {len(val_dataset)}")
+        logger.info(f"Train images: {len(train_dataset)}; Val images: {len(val_dataset)}")
     if len(train_dataset) == 0 or len(val_dataset) == 0:
-        print("ERROR: One or both datasets are empty. Check your dataset configuration, paths, and Kaggle ID.")
+        logger.error("One or both datasets are empty. Check your dataset configuration, paths, and Kaggle ID.")
         return
 
     # -----------------------
@@ -488,7 +355,7 @@ def main():
     # Auto-set patch size if not provided (ensure consistency with wandb_config)
     if model_cfg["ps"] is None:
         model_cfg["ps"] = 2 if res == 32 else 4
-    print(f"Patch size set to {model_cfg['ps']} for {res}x{res} resolution (K={(res//model_cfg['ps'])**2}).")
+    logger.info(f"Patch size set to {model_cfg['ps']} for {res}x{res} resolution (K={(res//model_cfg['ps'])**2}).")
 
     core = FlowCore(
         input_img_shape_hwc=input_shape_hwc,
@@ -522,7 +389,7 @@ def main():
             core.initialize_with_batch(x_nhwc)
         except Exception as e:
             if is_main_process:
-                print(f"Warning: FlowCore initialize_with_batch failed: {e}")
+                logger.warning(f"FlowCore initialize_with_batch failed: {e}")
 
     # Broadcast initialized params to other ranks if distributed
     if ddp_enabled and dist.is_initialized():
@@ -531,7 +398,7 @@ def main():
 
     # total_steps for curriculum; choose sigma_final 0 for ImageNet64 (class-conditional)
     total_steps = len(train_loader) * total_epochs
-    sigma_final = 0.0
+    from src.utils.constants import SIGMA_RGB_FINAL_IMAGENET as sigma_final
     model = FlowTrain(core, image_shape_hwc=input_shape_hwc, total_steps=total_steps, sigma0=float(config.get("rgb_sigma0", 64.0)), sigma_final=sigma_final).to(device)
     model = accelerator.wrap_model(model)
     
@@ -542,7 +409,7 @@ def main():
     
     param_count = sum(p.numel() for p in model.parameters())
     if is_main_process:
-        print(f"Model initialized with {param_count/1e6:.2f}M parameters.")
+        logger.info(f"Model initialized with {param_count/1e6:.2f}M parameters.")
 
     # -----------------------
     # OPTIMIZER & SCHEDULER
@@ -551,10 +418,10 @@ def main():
     total_epochs = config["total_epochs"]
     # Epoch presets per paper
     if config.get("dataset") == "imagenet64_kaggle" and total_epochs == 40:
-        print("Setting epochs to 200 for ImageNet-1k (paper default). Override with --total_epochs if desired.")
+        logger.info("Setting epochs to 200 for ImageNet-1k (paper default). Override with --total_epochs if desired.")
         total_epochs = 200
     if config.get("dataset") == "imagenet21k_folder" and total_epochs == 40:
-        print("Setting epochs to 50 for ImageNet-21k (paper default). Override with --total_epochs if desired.")
+        logger.info("Setting epochs to 50 for ImageNet-21k (paper default). Override with --total_epochs if desired.")
         total_epochs = 50
     total_steps = total_steps_per_epoch * total_epochs
     optimizer, scheduler = get_optimizer_and_scheduler(model, config, total_steps)
@@ -587,7 +454,7 @@ def main():
             wandb.watch(model, log="all", log_freq=max(100, total_steps_per_epoch))
             wandb_enabled = True
         except Exception as e:
-            print(f"W&B init failed ({e}). Attempting offline fallback…")
+            logger.warning(f"W&B init failed ({e}). Attempting offline fallback…")
             try:
                 os.environ["WANDB_MODE"] = "offline"
                 wandb.init(
@@ -598,16 +465,16 @@ def main():
                 )
                 wandb.watch(model, log="all", log_freq=max(100, total_steps_per_epoch))
                 wandb_enabled = True
-                print("W&B offline mode enabled. Logging locally.")
+                logger.info("W&B offline mode enabled. Logging locally.")
             except Exception as e2:
-                print(f"W&B offline init failed ({e2}). Continuing without W&B logging.")
+                logger.warning(f"W&B offline init failed ({e2}). Continuing without W&B logging.")
                 wandb_enabled = False
     else:
         if is_main_process:
             if not want_wandb:
-                print("W&B logging disabled via --wandb false.")
+                logger.info("W&B logging disabled via --wandb false.")
             else:
-                print("W&B project not provided. You can enable W&B by passing --wandb_project <name> or setting WANDB_PROJECT.")
+                logger.info("W&B project not provided. You can enable W&B by passing --wandb_project <name> or setting WANDB_PROJECT.")
         wandb_enabled = False
 
     # Disable wandb on non-main ranks to avoid duplicate logs
@@ -671,20 +538,20 @@ def main():
                 auto_ckpt_path = str(pathlib.Path(config["save_dir"]) / pathlib.Path(found).name)
                 run_obj.file(found).download(root=config["save_dir"], replace=True)
                 if is_main_process:
-                    print(f"Downloaded W&B checkpoint '{found}' to {auto_ckpt_path}")
+                    logger.info(f"Downloaded W&B checkpoint '{found}' to {auto_ckpt_path}")
                 # Use this checkpoint as resume_from
                 config["resume_from"] = auto_ckpt_path
             else:
                 if is_main_process:
-                    print("Warning: No checkpoint *.pt found in the specified W&B run. Starting fresh.")
+                    logger.warning("No checkpoint *.pt found in the specified W&B run. Starting fresh.")
         except Exception as e:
             if is_main_process:
-                print(f"Warning: Failed to auto-download checkpoint from W&B run {config.get('wandb_run_id')}: {e}")
+                logger.warning(f"Failed to auto-download checkpoint from W&B run {config.get('wandb_run_id')}: {e}")
 
     if config.get("resume_from"):
         ckpt_path = config["resume_from"]
         if is_main_process:
-            print(f"Loading checkpoint from {ckpt_path} (load_model_only={config['load_model_only']})")
+            logger.info(f"Loading checkpoint from {ckpt_path} (load_model_only={config['load_model_only']})")
         state = torch.load(ckpt_path, map_location=device)
         # Load state dict, handling DP/Non-DP key prefixes
         loaded_sd = state.get("model_state_dict", {})
@@ -701,13 +568,13 @@ def main():
                 stripped = {k[len('module.'):] if k.startswith('module.') else k: v for k, v in loaded_sd.items()}
                 ok = try_load(model, stripped)
                 if ok:
-                    print("Adjusted checkpoint keys by stripping 'module.' prefix.")
+                    logger.info("Adjusted checkpoint keys by stripping 'module.' prefix.")
             # Add 'module.' if needed
             if not ok and not (len(loaded_sd) > 0 and next(iter(loaded_sd)).startswith('module.')) and isinstance(model, nn.DataParallel):
                 prefixed = {('module.' + k): v for k, v in loaded_sd.items()}
                 ok = try_load(model, prefixed)
                 if ok:
-                    print("Adjusted checkpoint keys by adding 'module.' prefix.")
+                    logger.info("Adjusted checkpoint keys by adding 'module.' prefix.")
         if not ok:
             raise RuntimeError("Failed to load model_state_dict from checkpoint (DP/non-DP mismatch).")
         if not config["load_model_only"]:
@@ -720,7 +587,7 @@ def main():
             start_epoch = int(state.get("epoch", -1)) + 1
             best_val_loss = float(state.get("best_val_loss", best_val_loss))
         if is_main_process:
-            print(f"Resuming from epoch {start_epoch}, step {current_step}")
+            logger.info(f"Resuming from epoch {start_epoch}, step {current_step}")
 
     # -----------------------
     # TRAIN LOOP
@@ -729,7 +596,7 @@ def main():
     image_shape_hwc_for_loss = input_shape_hwc
 
     if is_main_process:
-        print(f"Starting training for {total_epochs} epochs...")
+        logger.info(f"Starting training for {total_epochs} epochs...")
     val_interval = max(1, total_epochs // 20)
 
     for epoch in range(total_epochs):
@@ -750,7 +617,7 @@ def main():
             scaler.scale(loss).backward()
             if hasattr(scaler, 'unscale_'):
                 scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(model.parameters(), config["grad_clip_norm"]) if config["grad_clip_norm"] > 0 else None
+            nn.utils.clip_grad_norm_(model.parameters(), float(config.get("grad_clip_norm", 0.0))) if float(config.get("grad_clip_norm", 0.0)) > 0 else None
             if accelerator is not None and hasattr(accelerator, 'step'):
                 accelerator.step(optimizer, scaler, scheduler)
             else:
@@ -760,10 +627,15 @@ def main():
                     scheduler.step()
             current_step += 1
             if is_main_process and hasattr(progress_bar, 'set_postfix'):
-                progress_bar.set_postfix({"loss_bpd": float(out["bpd"])})
+                progress_bar.set_postfix({"loss_bpd": float(out.get("bpd", out.get("image_bpd_total", 0.0)))})
         
-        # Perform validation every val_interval epochs and on the final epoch
-        perform_val = ((epoch + 1) % val_interval == 0) or ((epoch + 1) == total_epochs)
+        # Perform validation every standardized 'val_every_epochs' if set; otherwise default cadence
+        val_every_epochs = int(config.get("val_every_epochs", 0) or 0)
+        perform_val = (
+            (val_every_epochs > 0 and ((epoch + 1) % val_every_epochs == 0))
+            or (val_every_epochs == 0 and ((epoch + 1) % val_interval == 0))
+            or ((epoch + 1) == total_epochs)
+        )
 
         if perform_val:
             sum_val_loss, sum_val_nll, sum_val_logdet, num_val_samples = evaluate_one_epoch(
@@ -787,7 +659,7 @@ def main():
             avg_val_logdet = sum_val_logdet / max(1.0, num_val_samples)
 
             if is_main_process:
-                print(f"Epoch {epoch+1:3d}/{total_epochs} — Val Loss (bpd): {avg_val_loss:.4f} | Val NLL (bpd): {avg_val_nll:.4f} | LR: {scheduler.get_last_lr()[0]:.2e}")
+                logger.info(f"Epoch {epoch+1:3d}/{total_epochs} — Val Loss (bpd): {avg_val_loss:.4f} | Val NLL (bpd): {avg_val_nll:.4f} | LR: {scheduler.get_last_lr()[0]:.2e}")
 
             log_dict = {
                 "epoch": epoch + 1,
@@ -801,7 +673,10 @@ def main():
                 log_dict["sys/max_cuda_mem_mb"] = max_mem_mb
             
             if wandb_enabled and is_main_process:
-                wandb.log(log_dict, step=current_step)
+                try:
+                    wandb.log(log_dict, step=current_step)
+                except Exception:
+                    logger.debug("wandb.log failed", exc_info=True)
 
             if avg_val_loss < best_val_loss and is_main_process:
                 best_val_loss = avg_val_loss
@@ -824,7 +699,7 @@ def main():
                     accelerator.save(checkpoint, ckpt_path)
                 else:
                     torch.save(checkpoint, ckpt_path)
-                print(f"Saved checkpoint to {ckpt_path}")
+                logger.info(f"Saved checkpoint to {ckpt_path}")
                 if wandb_enabled and is_main_process:
                     try:
                         wandb.save(ckpt_path)
@@ -845,12 +720,11 @@ def main():
             model_for_sampling = model.module if isinstance(model, nn.DataParallel) else model
             if isinstance(model, DDP):
                 model_for_sampling = model.module
+            from src.sampling import sample_flow_images
             with torch.no_grad():
-                z_samples = torch.randn(int(config["num_sample_images"]), *input_shape_hwc, device=device)
-                x_gen, _ = model_for_sampling.inverse(z_samples)
-                x_uint8 = (x_gen * 255.0).clamp(0, 255).to(torch.uint8).cpu()
+                images = sample_flow_images(model_for_sampling, device, int(config["num_sample_images"]), input_shape_hwc)
             try:
-                wandb_images = [wandb.Image(img.numpy(), caption=f"epoch{epoch+1}_sample_{i}") for i, img in enumerate(x_uint8)]
+                wandb_images = [wandb.Image(img, caption=f"epoch{epoch+1}_sample_{i}") for i, img in enumerate(images)]
                 wandb.log({"samples": wandb_images}, step=current_step)
             except Exception:
                 pass
@@ -859,8 +733,8 @@ def main():
     train_core_hours = (training_duration_s / 3600) * (os.cpu_count() or 1)
 
     if is_main_process:
-        print("Training complete.")
-        print(f"Total training time: {training_duration_s:.2f}s")
+        logger.info("Training complete.")
+        logger.info(f"Total training time: {training_duration_s:.2f}s")
     
     # --- Log final summary metrics to WandB ---
     if wandb_enabled and is_main_process:
@@ -877,16 +751,13 @@ def main():
         model_for_sampling = model.module if isinstance(model, nn.DataParallel) else model
         if isinstance(model, DDP):
             model_for_sampling = model.module
+        from src.sampling import sample_flow_images
         with torch.no_grad():
-            # Model expects inputs in [0, 1], so z -> x will produce outputs in [0, 1]
-            z_samples = torch.randn(config["num_sample_images"], *input_shape_hwc, device=device)
-            x_gen, _ = model_for_sampling.inverse(z_samples)
-            # Convert from [0,1] to uint8 [0,255]
-            x_uint8 = (x_gen * 255.0).clamp(0, 255).to(torch.uint8).cpu()  # (B,H,W,C)
+            images = sample_flow_images(model_for_sampling, device, int(config["num_sample_images"]), input_shape_hwc)
 
         # Log to WandB as a table of images
         if wandb_enabled:
-            wandb_images = [wandb.Image(img.numpy(), caption=f"sample_{i}") for i, img in enumerate(x_uint8)]
+            wandb_images = [wandb.Image(img, caption=f"sample_{i}") for i, img in enumerate(images)]
             wandb.log({"samples": wandb_images}, step=current_step)
 
     if wandb_enabled and is_main_process:

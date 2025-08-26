@@ -4,9 +4,12 @@ import torch
 import yaml
 from pathlib import Path
 from PIL import Image
+from src.utils.logging import get_logger
 import numpy as np
 
 from src.jetformer import JetFormer
+from src.sampling import generate_text_to_image_samples_cfg, generate_class_conditional_samples
+from src.accelerators import GPUAccelerator, TPUAccelerator, HAS_TPU as _HAS_TPU
 
 
 def _load_checkpoint(ckpt_path: str, device: torch.device):
@@ -47,22 +50,31 @@ def _build_model_from_cfg(cfg: dict, device: torch.device) -> JetFormer:
 
 @torch.no_grad()
 def _sample_t2i_cfg(model: JetFormer, prompts, device: torch.device, out_dir: Path, cfg_strength: float, num_images: int):
-    from src.train import generate_text_to_image_samples_cfg
     os.makedirs(out_dir, exist_ok=True)
-    class DummyDS:
-        def __init__(self, tok):
-            self.tok = tok
-        def tokenize_text(self, t):
-            return self.tok(t)
-
-    # Reuse dataset tokenizer via LAIONPOPTextImageDataset if available
-    try:
-        from src.dataset import LAIONPOPTextImageDataset
-        ds = LAIONPOPTextImageDataset(max_samples=1)
-        tokenizer = lambda t: ds.tokenize_text(t)
-    except Exception:
-        raise RuntimeError("Tokenization requires LAION dataset/tokenizer to be available.")
-
+    # Load SentencePiece tokenizer directly to avoid dataset side-effects
+    from sentencepiece import SentencePieceProcessor
+    from src.tokenizer import download_sentencepiece_model
+    spm_path = download_sentencepiece_model()
+    sp = SentencePieceProcessor()
+    sp.Load(spm_path)
+    def _tokenize_text(text: str):
+        ids = sp.EncodeAsIds(text)
+        ids = ids + [1]  # EOS id per datasets
+        max_len = 64
+        if len(ids) > max_len:
+            ids = ids[:max_len]
+        mask = [1] * len(ids)
+        pad = 0
+        ids = ids + [pad] * (max_len - len(ids))
+        mask = mask + [0] * (max_len - len(mask))
+        return {
+            'tokens': torch.tensor(ids, dtype=torch.long),
+            'text_mask': torch.tensor(mask, dtype=torch.bool),
+        }
+    class _TokDS:
+        def tokenize_text(self, t: str):
+            return _tokenize_text(t)
+    ds = _TokDS()
     samples = []
     for i, prompt in enumerate(prompts[:num_images]):
         try:
@@ -72,6 +84,11 @@ def _sample_t2i_cfg(model: JetFormer, prompts, device: torch.device, out_dir: Pa
                 img.save(out_dir / f"sample_{i:05d}.png")
                 samples.append(s[0])
         except Exception:
+            # Log but continue
+            try:
+                print(f"Failed to generate sample for prompt {i}: '{prompt}'")
+            except Exception:
+                pass
             continue
     return samples
 
@@ -79,35 +96,14 @@ def _sample_t2i_cfg(model: JetFormer, prompts, device: torch.device, out_dir: Pa
 @torch.no_grad()
 def _sample_class_cond(model: JetFormer, device: torch.device, out_dir: Path, num_images: int):
     os.makedirs(out_dir, exist_ok=True)
-    B = 1
-    image_seq_len = model.image_seq_len
-    d_ar = model.image_ar_dim
     num_classes = getattr(model, 'num_classes', None) or 1000
     classes = list(range(num_classes))
     total = min(num_images, len(classes))
-    for i, cls in enumerate(classes[:total]):
-        try:
-            text_tokens = torch.zeros(B, model.class_token_length, dtype=torch.long, device=device)
-            text_mask = torch.ones(B, model.class_token_length, dtype=torch.bool, device=device)
-            text_first_mask = torch.tensor([True], device=device)
-            img_tokens = torch.zeros(B, image_seq_len, d_ar, device=device)
-            for pos in range(image_seq_len):
-                _, image_logits = model(text_tokens, img_tokens, text_first_mask, text_mask, drop_text_cond_mask=None, class_ids=torch.tensor([cls], device=device))
-                hidden_pos = model.compute_image_hidden(text_tokens, img_tokens, text_first_mask, text_mask, drop_text_cond_mask=None, class_ids=torch.tensor([cls], device=device))[:, pos:pos+1]
-                sampled = model.sample_from_hidden_mixture_first(hidden_pos)
-                img_tokens[:, pos:pos+1] = sampled
-            # Append Gaussian residuals and decode
-            res_dim = max(0, model.image_token_dim - d_ar)
-            if res_dim > 0:
-                residual = torch.randn(B, image_seq_len, res_dim, device=device)
-                tokens_full = torch.cat([img_tokens, residual], dim=-1)
-            else:
-                tokens_full = img_tokens
-            image01_bchw = model.decode_tokens_to_image01(tokens_full)
-            img = (image01_bchw[0].permute(1, 2, 0).cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
-            Image.fromarray(img).save(out_dir / f"class_{cls:04d}.png")
-        except Exception:
-            continue
+    from src.sampling import generate_class_conditional_samples
+    samples = generate_class_conditional_samples(model, device, classes[:total])
+    for i, s in enumerate(samples):
+        img = s['image']
+        img.save(out_dir / f"class_{i:04d}.png")
 
 
 def _compute_fid(generated_dir: Path, ref_dir: Path = None, ref_stats: Path = None) -> float:
@@ -141,11 +137,27 @@ def main():
     parser.add_argument('--ref_stats', type=str, default=None)
     args = parser.parse_args()
 
+    logger = get_logger(__name__)
     device = torch.device(args.device)
     state, model_cfg = _load_checkpoint(args.ckpt, device)
     if model_cfg is None:
         raise RuntimeError('Checkpoint does not contain config; cannot instantiate model.')
+    # Normalize config keys for consistency
+    try:
+        from src.utils.config import normalize_config_keys
+        model_cfg = normalize_config_keys(model_cfg or {})
+    except Exception:
+        pass
     model = _build_model_from_cfg(model_cfg, device)
+    # Use accelerator for precision/autocast consistency with training
+    accelerator = None
+    try:
+        if _HAS_TPU:
+            accelerator = TPUAccelerator(model_cfg)
+        else:
+            accelerator = GPUAccelerator(model_cfg)
+    except Exception:
+        accelerator = None
     model.load_state_dict(state.get('model_state_dict', state))
     model.eval()
 
@@ -160,10 +172,10 @@ def main():
         else:
             prompts = ["a car", "a cat", "a dog", "a house", "a mountain", "a city" ]
         _sample_t2i_cfg(model, prompts, device, out_dir, args.cfg_strength, args.num_images)
-        print(f"Saved {args.num_images} samples to {out_dir}")
+        logger.info(f"Saved {args.num_images} samples to {out_dir}")
     elif args.task == 'class_cond':
         _sample_class_cond(model, device, out_dir, args.num_images)
-        print(f"Saved class-conditional samples to {out_dir}")
+        logger.info(f"Saved class-conditional samples to {out_dir}")
     elif args.task == 'fid':
         # Expect images already generated under out_dir, or generate from prompts file
         if len(list(out_dir.glob('*.png'))) == 0:
@@ -171,9 +183,9 @@ def main():
             _sample_t2i_cfg(model, prompts, device, out_dir, args.cfg_strength, args.num_images)
         fid = _compute_fid(out_dir, Path(args.ref_dir) if args.ref_dir else None, Path(args.ref_stats) if args.ref_stats else None)
         if fid is None:
-            print("FID computation unavailable; please install clean-fid or torch-fidelity, or provide ref_dir/ref_stats.")
+            logger.warning("FID computation unavailable; please install clean-fid or torch-fidelity, or provide ref_dir/ref_stats.")
         else:
-            print(f"FID: {fid:.3f}")
+            logger.info(f"FID: {fid:.3f}")
 
 
 if __name__ == '__main__':

@@ -14,7 +14,11 @@ class ActNorm(nn.Module):
         self.initialized = False
 
     def _initialize(self, x: torch.Tensor):
-        """Initializes scale and bias based on the first batch of data."""
+        """Initializes scale and bias based on the first batch of data.
+
+        Note: Must be called during training via `initialize_with_batch` before
+        evaluation, otherwise running eval() first will skip initialization.
+        """
         if not self.training:
             return
         

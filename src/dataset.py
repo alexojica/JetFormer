@@ -22,7 +22,10 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import warnings
 warnings.filterwarnings('ignore')
+from src.utils.logging import get_logger
+logger = get_logger(__name__)
 from sentencepiece import SentencePieceProcessor
+from src.tokenizer import download_sentencepiece_model
 
 class LAIONPOPTextImageDataset(Dataset): # tokenizer: gs://t5-data/vocabs/cc_en.32000/sentencepiece.model
     def _download_tokenizer_model(self, tokenizer_path):
@@ -80,8 +83,11 @@ class LAIONPOPTextImageDataset(Dataset): # tokenizer: gs://t5-data/vocabs/cc_en.
         self.bos_id = bos_id
         self.ignore_pad = ignore_pad
 
-        # Download/prepare tokenizer model
-        local_tokenizer_path = self._download_tokenizer_model(tokenizer_path)
+        # Download/prepare tokenizer model via centralized util
+        try:
+            local_tokenizer_path = download_sentencepiece_model() if tokenizer_path.startswith('gs://') else tokenizer_path
+        except Exception:
+            local_tokenizer_path = self._download_tokenizer_model(tokenizer_path)
         
         self.tokenizer = SentencePieceProcessor()
         self.tokenizer.Load(local_tokenizer_path)
@@ -95,7 +101,7 @@ class LAIONPOPTextImageDataset(Dataset): # tokenizer: gs://t5-data/vocabs/cc_en.
             transforms.ToTensor(),
         ])
         
-        print("Loading LAION-POP dataset...")
+        logger.info("Loading LAION-POP dataset...")
         # Attempt auto-auth from env/token file for gated datasets
         try:
             hf_token = os.environ.get('HF_TOKEN') or os.environ.get('HUGGINGFACE_TOKEN')
@@ -111,19 +117,19 @@ class LAIONPOPTextImageDataset(Dataset): # tokenizer: gs://t5-data/vocabs/cc_en.
     def _load_laion_pop_dataset(self):
         """Load LAION-POP dataset from Hugging Face"""
         try:
-            print("Downloading LAION-POP dataset from Hugging Face...")
+            logger.info("Downloading LAION-POP dataset from Hugging Face...")
             
             # Load the full dataset - LAION-POP is relatively small (600k samples)
             dataset = load_dataset("laion/laion-pop", split="train", streaming=False)
             
-            print(f"Raw dataset size: {len(dataset)}")
+            logger.info(f"Raw dataset size: {len(dataset)}")
             
             # Filter and collect samples
             data = []
             count = 0
             filtered_count = 0
             
-            print("Filtering LAION-POP samples...")
+            logger.info("Filtering LAION-POP samples...")
             for item in dataset:
                 try:
                     width = item.get('width', 0)
@@ -162,17 +168,17 @@ class LAIONPOPTextImageDataset(Dataset): # tokenizer: gs://t5-data/vocabs/cc_en.
                         filtered_count += 1
                         
                     if (count + filtered_count) % 10000 == 0 and count + filtered_count > 0:
-                        print(f"Processed {count + filtered_count} samples, kept {count}, filtered {filtered_count}")
+                        logger.info(f"Processed {count + filtered_count} samples, kept {count}, filtered {filtered_count}")
                         
                 except Exception as e:
                     filtered_count += 1
                     continue
             
-            print(f"Filtering complete: {count} samples kept, {filtered_count} filtered out")
+            logger.info(f"Filtering complete: {count} samples kept, {filtered_count} filtered out")
             return data
             
         except Exception as e:
-            print(f"Error loading LAION-POP dataset: {e}")
+            logger.error(f"Error loading LAION-POP dataset: {e}")
             raise e
     
     def _get_cache_path(self, url):
@@ -211,7 +217,7 @@ class LAIONPOPTextImageDataset(Dataset): # tokenizer: gs://t5-data/vocabs/cc_en.
                 
                 try:
                     image.save(cache_path, 'JPEG', quality=85)
-                except:
+                except Exception:
                     pass
                 
                 return image
@@ -225,7 +231,7 @@ class LAIONPOPTextImageDataset(Dataset): # tokenizer: gs://t5-data/vocabs/cc_en.
     
     def _predownload_images(self, num_predownload=200):
         """Pre-download some images for faster training startup"""
-        print(f"Pre-downloading {num_predownload} images...")
+        logger.info(f"Pre-downloading {num_predownload} images...")
         
         def download_worker(idx):
             if idx >= len(self.data):
@@ -240,7 +246,7 @@ class LAIONPOPTextImageDataset(Dataset): # tokenizer: gs://t5-data/vocabs/cc_en.
                 return True
                 
             image = self._download_image(item['url'], cache_path)
-            print(image)
+            # debug: logger.debug(image)
             return image is not None
         
         with ThreadPoolExecutor(max_workers=min(8, self.num_workers)) as executor:
@@ -252,9 +258,9 @@ class LAIONPOPTextImageDataset(Dataset): # tokenizer: gs://t5-data/vocabs/cc_en.
                     success_count += 1
                 
                 if (i + 1) % 50 == 0:
-                    print(f"Pre-downloaded {i + 1}/{num_predownload} images ({success_count} successful)")
+                    logger.info(f"Pre-downloaded {i + 1}/{num_predownload} images ({success_count} successful)")
         
-        print(f"Pre-download completed: {success_count}/{num_predownload} successful")
+        logger.info(f"Pre-download completed: {success_count}/{num_predownload} successful")
     
     def __len__(self):
         return len(self.data)
@@ -384,15 +390,18 @@ class TinyStoriesDataset(Dataset):
         self.bos_id = bos_id
         self.ignore_pad = ignore_pad
 
-        # Download/prepare tokenizer model
-        local_tokenizer_path = self._download_tokenizer_model(tokenizer_path)
+        # Download/prepare tokenizer model via centralized util
+        try:
+            local_tokenizer_path = download_sentencepiece_model() if tokenizer_path.startswith('gs://') else tokenizer_path
+        except Exception:
+            local_tokenizer_path = self._download_tokenizer_model(tokenizer_path)
         
         self.tokenizer = SentencePieceProcessor()
         self.tokenizer.Load(local_tokenizer_path)
         if self.tokenizer.vocab_size() != self.vocab_size:
             raise ValueError(f"Vocab size mismatch: {self.tokenizer.vocab_size()} != {self.vocab_size}")
         
-        print(f"Loading TinyStories dataset ({split} split)...")
+        logger.info(f"Loading TinyStories dataset ({split} split)...")
         self.data = self._load_tinystories_dataset(split)
         print(f"Loaded {len(self.data)} samples from TinyStories dataset")
 
@@ -423,12 +432,12 @@ class TinyStoriesDataset(Dataset):
     def _load_tinystories_dataset(self, split):
         """Load TinyStories dataset from Hugging Face"""
         try:
-            print("Downloading TinyStories dataset from Hugging Face...")
+            logger.info("Downloading TinyStories dataset from Hugging Face...")
             
             # Load the dataset
             dataset = load_dataset("roneneldan/TinyStories", split=split)
             
-            print(f"Raw dataset size: {len(dataset)}")
+            logger.info(f"Raw dataset size: {len(dataset)}")
             
             # Filter and collect samples
             data = []
@@ -453,16 +462,16 @@ class TinyStoriesDataset(Dataset):
                             break
                         
                     if count % 10000 == 0 and count > 0:
-                        print(f"Processed {count} samples")
+                        logger.info(f"Processed {count} samples")
                         
                 except Exception as e:
                     continue
             
-            print(f"Processing complete: {count} samples loaded")
+            logger.info(f"Processing complete: {count} samples loaded")
             return data
             
         except Exception as e:
-            print(f"Error loading TinyStories dataset: {e}")
+            logger.error(f"Error loading TinyStories dataset: {e}")
             raise e
 
     def tokenize_text(self, text):

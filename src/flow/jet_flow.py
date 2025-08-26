@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import itertools
-import einops
 import math
 from typing import Sequence, Tuple, Optional, Callable
 import torch.utils.checkpoint as checkpoint
@@ -72,38 +71,14 @@ class ViTEncoderBlock(nn.Module):
         return x
     
 class _NoAmpAutocast:
-    """A context manager to temporarily disable Automatic Mixed Precision (AMP)."""
+    """Local autocast-off context without global backend toggles."""
     def __enter__(self):
-        self.prev = torch.is_autocast_enabled()
-        torch.set_autocast_enabled(False)
-
-        # Force highest-precision matmuls for splitting/merging as per paper's numerical precision note
-        # Save and override float32 matmul precision (PyTorch 2.0+)
-        self._prev_matmul_precision = None
-        try:
-            self._prev_matmul_precision = torch.get_float32_matmul_precision()
-            torch.set_float32_matmul_precision("highest")
-        except Exception:
-            self._prev_matmul_precision = None
-
-        # Save and override TF32 flags on CUDA backends (Ampere+ GPUs)
-        self._has_cuda_backend = hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul")
-        if self._has_cuda_backend:
-            self._prev_allow_tf32_matmul = torch.backends.cuda.matmul.allow_tf32
-            self._prev_allow_tf32_cudnn = torch.backends.cudnn.allow_tf32
-            torch.backends.cuda.matmul.allow_tf32 = False
-            torch.backends.cudnn.allow_tf32 = False
+        self.ctx = torch.amp.autocast(device_type=torch.device('cuda' if torch.cuda.is_available() else 'cpu').type, enabled=False)
+        self.ctx.__enter__()
+        return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        torch.set_autocast_enabled(self.prev)
-        try:
-            if self._prev_matmul_precision is not None:
-                torch.set_float32_matmul_precision(self._prev_matmul_precision)
-        except Exception:
-            pass
-        if self._has_cuda_backend:
-            torch.backends.cuda.matmul.allow_tf32 = self._prev_allow_tf32_matmul
-            torch.backends.cudnn.allow_tf32 = self._prev_allow_tf32_cudnn
+        self.ctx.__exit__(exc_type, exc_val, exc_tb)
 
 class ViTEncoder(nn.Module):
     """A stack of Transformer encoder blocks, forming a complete ViT encoder."""

@@ -56,52 +56,11 @@ class InvertibleLinear(nn.Module):
                 p.requires_grad = False
 
 
-class InvertibleLinearPre(nn.Module):
-    """Same as InvertibleLinear, used for pre-flow pixel-space patch projection."""
-
-    def __init__(self, dim: int):
-        super().__init__()
-        W, _ = torch.linalg.qr(torch.randn(dim, dim))
-        P, L, U = torch.linalg.lu(W)
-        self.register_buffer('P', P)
-        self.L = nn.Parameter(L)
-        self.U = nn.Parameter(U)
-        self.L_mask = torch.tril(torch.ones_like(self.L), diagonal=-1)
-        self.U_mask = torch.triu(torch.ones_like(self.U), diagonal=0)
-
-    def _weight(self) -> torch.Tensor:
-        L = self.L * self.L_mask + torch.eye(self.L.shape[0], device=self.L.device, dtype=self.L.dtype)
-        U = self.U * self.U_mask
-        W = self.P @ L @ U
-        return W
-
-    def forward(self, x: torch.Tensor):
-        W = self._weight()
-        y = x @ W.t()
-        logdet = torch.sum(torch.log(torch.abs(torch.diag(self.U))))
-        return y, logdet
-
-    def inverse(self, y: torch.Tensor):
-        W = self._weight()
-        WinvT = torch.inverse(W).t()
-        x = y @ WinvT
-        logdet = -torch.sum(torch.log(torch.abs(torch.diag(self.U))))
-        return x, logdet
-
-    def set_weight(self, W_new: torch.Tensor, frozen: bool = True):
-        with torch.no_grad():
-            P, L, U = torch.linalg.lu(W_new)
-            self.P.copy_(P)
-            self.L.copy_(L)
-            self.U.copy_(U)
-        if frozen:
-            for p in self.parameters():
-                p.requires_grad = False
+    
 
 
 __all__ = [
     'InvertibleLinear',
-    'InvertibleLinearPre',
 ]
 
 

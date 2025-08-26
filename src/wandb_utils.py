@@ -59,9 +59,9 @@ class WBLogger:
         # Prefer explicit NLL (nats) if provided; otherwise derive from BPD if possible
         payload = {
             # Core likelihood metrics
-            "train/total_bpd": float(out.get('image_bpd_total', 0.0)),
+            "train/total_bpd": float(out.get('image_bpd_total', out.get('bpd', 0.0))),
             # Alias matching paper terminology
-            "train/nll_bpd": float(out.get('image_bpd_total', 0.0)),
+            "train/nll_bpd": float(out.get('image_bpd_total', out.get('bpd', 0.0))),
             "train/flow_bpd": float(out.get('flow_bpd_component', 0.0)),
             "train/ar_bpd": float(out.get('ar_bpd_component', 0.0)),
             # NLL (nats) and its components

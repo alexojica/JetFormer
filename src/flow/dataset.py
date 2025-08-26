@@ -257,18 +257,8 @@ class KaggleImageFolderImagenet(Dataset):
             return {"image": img_tensor, "label": label_tensor}
 
         # Geometric preprocessing: resize shorter side -> resolution (keep aspect), then center-crop to square
-        w, h = img.size
-        if min(w, h) != self.resolution:
-            scale = float(self.resolution) / float(min(w, h))
-            new_w = max(1, int(round(w * scale)))
-            new_h = max(1, int(round(h * scale)))
-            img = img.resize((new_w, new_h), Image.Resampling.BICUBIC)
-            w, h = img.size
-        # Center crop to (resolution, resolution)
-        if (w, h) != (self.resolution, self.resolution):
-            left = max(0, (w - self.resolution) // 2)
-            top = max(0, (h - self.resolution) // 2)
-            img = img.crop((left, top, left + self.resolution, top + self.resolution))
+        from src.utils.image import aspect_preserving_resize_and_center_crop
+        img = aspect_preserving_resize_and_center_crop(img, self.resolution)
         img_np = np.array(img, dtype=np.uint8)
         img_tensor = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()
         label_tensor = torch.tensor(target_class_idx, dtype=torch.long)
@@ -382,17 +372,8 @@ class ImageNet21kFolder(Dataset):
             return {"image": img_tensor, "label": label_tensor}
 
         # Aspect-preserving resize (shorter side -> resolution) + center-crop
-        w, h = img.size
-        if min(w, h) != self.resolution:
-            scale = float(self.resolution) / float(min(w, h))
-            new_w = max(1, int(round(w * scale)))
-            new_h = max(1, int(round(h * scale)))
-            img = img.resize((new_w, new_h), Image.Resampling.BICUBIC)
-            w, h = img.size
-        if (w, h) != (self.resolution, self.resolution):
-            left = max(0, (w - self.resolution) // 2)
-            top = max(0, (h - self.resolution) // 2)
-            img = img.crop((left, top, left + self.resolution, top + self.resolution))
+        from src.utils.image import aspect_preserving_resize_and_center_crop
+        img = aspect_preserving_resize_and_center_crop(img, self.resolution)
         img_np = np.array(img, dtype=np.uint8)
         img_tensor = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()
         label_tensor = torch.tensor(target_class_idx, dtype=torch.long)

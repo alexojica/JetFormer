@@ -9,7 +9,7 @@ from src.losses import cross_entropy_second_only
 from src.transformer import Transformer
 from src.flow.jet_flow import JetModel
 from src.transformer import GemmaBlock
-from src.flow.projections import InvertibleLinear, InvertibleLinearPre
+from src.flow.projections import InvertibleLinear
 import torch.utils.checkpoint as checkpoint
 
 class JetFormer(nn.Module):
@@ -131,7 +131,7 @@ class JetFormer(nn.Module):
         self.pre_proj = None
         if self.pre_latent_projection is not None:
             D_full_px = 3 * patch_size * patch_size
-            self.pre_proj = InvertibleLinearPre(D_full_px)
+            self.pre_proj = InvertibleLinear(D_full_px)
             if self.pre_latent_projection == "pca_frozen" and pre_latent_proj_matrix_path:
                 try:
                     W_px = torch.from_numpy(__import__('numpy').load(pre_latent_proj_matrix_path)).float()
@@ -561,13 +561,8 @@ class JetFormerTrain(JetFormer):
         text_second_mask = ~text_first_mask
 
         # Uniform dequant + RGB noise schedule to [0,1]
-        # Robustly normalize: support either uint8 [0,255] (ImageNet64) or float [-1,1] (LAION)
-        images_float = images.float()
-        # Heuristic: if values exceed 1.0, assume uint8-like range and map to [0,1]
-        if (images_float.min() >= 0.0) and (images_float.max() > 1.0):
-            images01 = images_float / 255.0
-        else:
-            images01 = (images_float + 1.0) * 0.5
+        from src.utils.image import to_x01, dequantize01
+        images01 = to_x01(images)
         u = torch.rand_like(images01) / 256.0
         # Allow callers (e.g., validation) to disable RGB noise while keeping dequantization
         no_rgb_noise = bool(batch.get('no_rgb_noise', False))

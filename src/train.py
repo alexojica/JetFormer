@@ -14,6 +14,9 @@ import torch.distributed as dist
 from src.dataset import LAIONPOPTextImageDataset
 from src.flow.dataset import KaggleImageFolderImagenet, ImageNet21kFolder
 from src.wandb_utils import WBLogger
+from src.utils.optim import get_optimizer_and_scheduler as get_opt_sched
+from src.utils.config import normalize_config_keys
+from src.utils.ema import ExponentialMovingAverage
 from src.jetformer import JetFormerTrain
 from PIL import Image
 import torchvision.transforms as transforms
@@ -53,49 +56,7 @@ from src.accelerators import GPUAccelerator, TPUAccelerator, HAS_TPU as _HAS_TPU
 IMAGE_SIZE = (256, 256, 3)
 
 
-class ExponentialMovingAverage:
-    def __init__(self, model, decay: float = 0.9999):
-        self.decay = float(decay)
-        self.shadow = {}
-        for name, param in unwrap_base_model(model).named_parameters():
-            if param.requires_grad:
-                self.shadow[name] = param.detach().clone().float()
-
-    @torch.no_grad()
-    def update(self, model):
-        base = unwrap_base_model(model)
-        for name, param in base.named_parameters():
-            if not param.requires_grad:
-                continue
-            if name not in self.shadow:
-                self.shadow[name] = param.detach().clone().float()
-            else:
-                self.shadow[name].mul_(self.decay).add_(param.detach().float(), alpha=(1.0 - self.decay))
-
-    def state_dict(self):
-        return {k: v.cpu() for k, v in self.shadow.items()}
-
-    def load_state_dict(self, state):
-        self.shadow = {k: v.clone() for k, v in state.items()}
-
-    @torch.no_grad()
-    def apply_to(self, model):
-        base = unwrap_base_model(model)
-        self._backup = {}
-        for name, param in base.named_parameters():
-            if name in self.shadow:
-                self._backup[name] = param.detach().clone()
-                param.data.copy_(self.shadow[name].to(param.dtype).to(param.device))
-
-    @torch.no_grad()
-    def restore(self, model):
-        base = unwrap_base_model(model)
-        if not hasattr(self, '_backup'):
-            return
-        for name, param in base.named_parameters():
-            if name in self._backup:
-                param.data.copy_(self._backup[name])
-        self._backup = {}
+    
 
 
 def train_from_config(config_dict: dict):
@@ -121,6 +82,7 @@ def train_from_config(config_dict: dict):
 
     # Config wrapper supporting attribute and dict-style get()
     cfg_map = dict(wandb.config) if wb_run is not None else cfg_raw
+    cfg_map = normalize_config_keys(cfg_map)
     config = SimpleNamespace(**cfg_map)
     setattr(config, 'get', lambda key, default=None: getattr(config, key, default))
     print(f"Using device: {device_obj}")
@@ -179,13 +141,16 @@ def train_from_config(config_dict: dict):
     model = accelerator.wrap_model(model)
     
     # Now that dataloader is ready, update total_steps in the model for schedules
-    set_model_total_steps(model, len(dataloader) * config.num_epochs)
+    # Account for gradient accumulation in total steps
+    grad_accum_steps = int(getattr(config, 'grad_accum_steps', 1) or 1)
+    total_opt_steps = (len(dataloader) * int(config.num_epochs) + (grad_accum_steps - 1)) // max(1, grad_accum_steps)
+    set_model_total_steps(model, total_opt_steps)
 
-    optimizer = create_optimizer(model, config)
-    # If resuming, load optimizer/scheduler state after optimizer is created
+    # Optimizer & scheduler (centralized)
+    total_steps = total_opt_steps
+    optimizer, scheduler = get_opt_sched(model, cfg_map, total_steps)
+    # If resuming, load optimizer state after optimizer is created
     resume_optimizer_from_ckpt(optimizer, _loaded_ckpt)
-    
-    total_steps = len(dataloader) * config.num_epochs
     # Initialize training step and model's internal step counter when resuming
     step = initialize_step_from_ckpt(model, len(dataloader), start_epoch, device_obj, _loaded_ckpt)
     # Initialize EMA and restore if present
@@ -196,16 +161,7 @@ def train_from_config(config_dict: dict):
     except Exception:
         pass
     
-    # Warmup to 2e-4 then cosine decay (paper-style); global batch may differ
-    init_lr = float(getattr(config, 'learning_rate', 2e-4) or 2e-4)
-    warmup_pct = float(getattr(config, 'warmup_percent', 0.03))
-    warmup_steps = int(max(1, total_steps) * warmup_pct)
-    def _lr_lambda(step_idx):
-        if warmup_steps > 0 and step_idx < warmup_steps:
-            return float(step_idx) / float(max(1, warmup_steps))
-        progress = float(step_idx - warmup_steps) / float(max(1, total_steps - warmup_steps))
-        return 0.5 * (1.0 + math.cos(math.pi * max(0.0, min(1.0, progress))))
-    scheduler = optim.lr_scheduler.LambdaLR(optimizer, _lr_lambda)
+    # Scheduler is already created via get_opt_sched
     
     # AMP scaler (enabled for fp16 on CUDA, no-op otherwise)
     scaler = accelerator.create_grad_scaler(enabled=True)
@@ -265,7 +221,8 @@ def train_from_config(config_dict: dict):
         for batch_idx, batch in enumerate(progress_bar):
             start_time = time.time()
 
-            optimizer.zero_grad(set_to_none=True)
+            if (batch_idx % max(1, grad_accum_steps)) == 0:
+                optimizer.zero_grad(set_to_none=True)
             autocast_ctx = accelerator.autocast(enabled=True) if hasattr(accelerator, 'autocast') else torch.amp.autocast(device_obj.type, enabled=False)
             with autocast_ctx:
                 # Mark beginning of a new cudagraph step to avoid overwriting captured outputs
@@ -276,18 +233,24 @@ def train_from_config(config_dict: dict):
                 out = model(batch)
                 loss = out["loss"]
 
-            scaler.scale(loss).backward()
+            # Normalize loss for gradient accumulation
+            loss_to_backward = loss / float(max(1, grad_accum_steps))
+            scaler.scale(loss_to_backward).backward()
             if hasattr(scaler, 'unscale_'):
                 scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            if hasattr(accelerator, 'step'):
-                accelerator.step(optimizer, scaler, scheduler)
-            else:
-                scaler.step(optimizer)
-                scaler.update()
-                scheduler.step()
-            # EMA update after each optimizer step
-            ema.update(model)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), float(getattr(config, 'grad_clip_norm', 1.0)))
+            took_step = False
+            if ((batch_idx + 1) % max(1, grad_accum_steps)) == 0:
+                if hasattr(accelerator, 'step'):
+                    accelerator.step(optimizer, scaler, scheduler)
+                else:
+                    scaler.step(optimizer)
+                    scaler.update()
+                    if scheduler is not None:
+                        scheduler.step()
+                # EMA update after each optimizer step
+                ema.update(model)
+                took_step = True
 
             epoch_losses['total'] += loss.item()
             epoch_losses['text'] += float(out.get('text_loss', 0.0))
@@ -341,14 +304,15 @@ def train_from_config(config_dict: dict):
                 finally:
                     ema.restore(model)
                 
-            step += 1
-            # Maintain model's internal step counter outside compiled regions
-            try:
-                base_model = unwrap_base_model(model)
-                if hasattr(base_model, '_step'):
-                    base_model._step = base_model._step + 1
-            except Exception:
-                pass
+            if took_step:
+                step += 1
+                # Maintain model's internal step counter outside compiled regions
+                try:
+                    base_model = unwrap_base_model(model)
+                    if hasattr(base_model, '_step'):
+                        base_model._step = base_model._step + 1
+                except Exception:
+                    pass
         # End of epoch: run validation and optional sampling per-epoch schedule
         run_val_this_epoch = True
         if hasattr(config, 'val_every_epochs') and isinstance(getattr(config, 'val_every_epochs'), (int, float)):
@@ -385,7 +349,13 @@ def train_from_config(config_dict: dict):
             improved = v_total < best_val_loss
             if improved:
                 best_val_loss = v_total
-                ckpt_path = os.path.join('checkpoints', 'best.pt')
+                # Include run name for clarity
+                try:
+                    rn = cfg_map.get('wandb_run_name', None)
+                except Exception:
+                    rn = None
+                ckpt_name = f"jetformer_{rn}_best.pt" if rn else "jetformer_best.pt"
+                ckpt_path = os.path.join('checkpoints', ckpt_name)
                 save_checkpoint(
                     model=model,
                     optimizer=optimizer,
@@ -399,7 +369,9 @@ def train_from_config(config_dict: dict):
 
         # Always save/overwrite rolling last checkpoint at end of each epoch
         if is_main_process:
-            last_ckpt_path = os.path.join('checkpoints', 'last.pt')
+            rn = cfg_map.get('wandb_run_name', None)
+            last_ckpt_name = f"jetformer_{rn}_last.pt" if rn else "jetformer_last.pt"
+            last_ckpt_path = os.path.join('checkpoints', last_ckpt_name)
             save_checkpoint(
                 model=model,
                 optimizer=optimizer,

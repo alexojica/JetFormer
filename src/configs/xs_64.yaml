@@ -13,7 +13,7 @@ jet_block_depth: 2
 jet_emb_dim: 128           # block width
 jet_num_heads: 4
 flow_actnorm: true
-flow_invertible_dense: false
+flow_invertible_dense: true
 pre_factor_dim: null       # post-flow factoring (paper main)
 
 # AR Transformer (Gemma-style)
@@ -30,14 +30,14 @@ dataset: imagenet64_kaggle
 kaggle_dataset_id: "ayaroshevskiy/downsampled-imagenet-64x64"
 
 # Optimization / curriculum
-batch_size: 64
+batch_size: 32
 learning_rate: 0.001
 num_epochs: 50
 precision: tf32
 distributed: false
 torch_compile: false
 
-rgb_sigma0: 64.0
+rgb_sigma0: 0.0
 rgb_sigma_final: 0.0       # ImageNet: cosine to zero
 latent_noise_std: 0.3
 text_loss_weight: 0.0      # class-conditional: no text loss

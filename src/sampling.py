@@ -1,0 +1,246 @@
+import math
+from typing import Any, Dict, List
+import torch
+from PIL import Image
+
+from src.losses import gmm_params
+
+
+@torch.no_grad()
+def generate_text_to_image_samples(model, dataset, device, num_samples: int = 3, temperature: float = 1.0):
+    model.eval()
+    samples = []
+    prompt_texts = ["a car", "a cat", "a dog"]
+    is_class_conditional = bool(getattr(model, 'num_classes', None)) and getattr(model, 'num_classes') > 0
+    for i, prompt_text in enumerate(prompt_texts[:num_samples]):
+        try:
+            class_id = None
+            if is_class_conditional and not hasattr(dataset, 'tokenize_text'):
+                class_id = int(i % int(getattr(model, 'num_classes', 1000)))
+                text_tokens = torch.zeros(1, getattr(model, 'class_token_length', 16), dtype=torch.long, device=device)
+                text_mask = torch.ones(1, getattr(model, 'class_token_length', 16), dtype=torch.bool, device=device)
+                prompt_label = None
+                if hasattr(dataset, 'classes') and class_id < len(getattr(dataset, 'classes', [])):
+                    prompt_label = dataset.classes[class_id]
+                prompt_value = prompt_label if prompt_label is not None else f'class_{class_id}'
+            else:
+                tokenized = dataset.tokenize_text(prompt_text)
+                text_tokens = tokenized['tokens'].unsqueeze(0).to(device)
+                text_mask = tokenized['text_mask'].unsqueeze(0).to(device)
+                prompt_value = prompt_text
+
+            ar_dim = getattr(model, 'image_ar_dim', model.image_token_dim)
+            full_dim = model.image_token_dim
+            res_dim = max(0, full_dim - ar_dim)
+            image_tokens = torch.zeros(1, model.image_seq_len, ar_dim, device=device)
+
+            text_first_mask = torch.tensor([True], device=device)
+            full_mask = torch.ones(1, text_tokens.shape[1], device=device, dtype=torch.bool)
+
+            for pos in range(model.image_seq_len):
+                if class_id is not None:
+                    _, image_logits = model(text_tokens, image_tokens, text_first_mask, full_mask, class_ids=torch.tensor([class_id], device=device))
+                else:
+                    _, image_logits = model(text_tokens, image_tokens, text_first_mask, full_mask)
+
+                if pos < image_logits.shape[1]:
+                    mix_logits, means, scales = gmm_params(image_logits[:, pos:pos+1], int(getattr(model, 'num_mixtures', 1024)), int(getattr(model, 'image_ar_dim', model.image_token_dim)))
+                    mix = torch.distributions.Categorical(logits=mix_logits.squeeze(1))
+                    comp_idx = mix.sample()
+                    bidx = torch.arange(comp_idx.shape[0], device=device)
+                    sel_means = means[:, 0, comp_idx, :]
+                    sel_scales = scales[:, 0, comp_idx, :]
+                    normal = torch.distributions.Normal(sel_means, sel_scales)
+                    sampled = normal.sample()
+                    if temperature != 1.0:
+                        sampled = sampled * float(temperature)
+                    image_tokens[0, pos] = sampled[0]
+
+            if res_dim > 0:
+                residual = torch.randn(1, model.image_seq_len, res_dim, device=device)
+                tokens_full = torch.cat([image_tokens, residual], dim=-1)
+            else:
+                tokens_full = image_tokens
+            image01_bchw = model.decode_tokens_to_image01(tokens_full)
+            image01 = image01_bchw[0]
+            image_np = image01.permute(1, 2, 0).cpu().numpy()
+            image_pil = Image.fromarray((image_np * 255).astype('uint8'))
+            samples.append({'prompt': prompt_value, 'image': image_pil})
+        except Exception as e:
+            placeholder = Image.new('RGB', (256, 256), color='red')
+            samples.append({'prompt': prompt_text, 'image': placeholder})
+    model.train()
+    return samples
+
+
+@torch.no_grad()
+def generate_text_to_image_samples_cfg(model, dataset, device, num_samples: int = 3, cfg_strength: float = 4.0, cfg_mode: str = "reject", fast_mixture_first: bool = False):
+    model.eval()
+    samples = []
+
+    def _mixture_log_prob(mix_logits, means, scales, x):
+        B, k = mix_logits.shape
+        logZ = torch.logsumexp(mix_logits, dim=-1)
+        x_exp = x.unsqueeze(1).expand(-1, k, -1)
+        var = (scales * scales).clamp_min(1e-12)
+        log_two_pi = torch.log(torch.tensor(2.0 * math.pi, device=x.device, dtype=x.dtype))
+        log_norm_const = -0.5 * (log_two_pi + torch.log(var))
+        log_exp_term = -0.5 * ((x_exp - means) * (x_exp - means) / var)
+        log_normal = (log_norm_const + log_exp_term).sum(dim=-1)
+        numer = torch.logsumexp(mix_logits + log_normal, dim=-1)
+        return numer - logZ
+
+    def _sample_from_mixture(mix_logits, means, scales):
+        B, k = mix_logits.shape
+        mix = torch.distributions.Categorical(logits=mix_logits)
+        comp_idx = mix.sample()
+        b = torch.arange(B, device=mix_logits.device)
+        sel_means = means[b, comp_idx, :]
+        sel_scales = scales[b, comp_idx, :]
+        normal = torch.distributions.Normal(sel_means, sel_scales)
+        return normal.sample()
+
+    prompt_texts = ["a car", "a cat", "a dog"]
+    is_class_conditional = bool(getattr(model, 'num_classes', None)) and getattr(model, 'num_classes') > 0
+
+    for i, prompt_text in enumerate(prompt_texts[:num_samples]):
+        try:
+            class_id = None
+            if is_class_conditional and not hasattr(dataset, 'tokenize_text'):
+                class_id = int(i % int(getattr(model, 'num_classes', 1000)))
+                text_tokens = torch.zeros(1, getattr(model, 'class_token_length', 16), dtype=torch.long, device=device)
+                text_mask = torch.ones(1, getattr(model, 'class_token_length', 16), dtype=torch.bool, device=device)
+                prompt_label = None
+                if hasattr(dataset, 'classes') and class_id < len(getattr(dataset, 'classes', [])):
+                    prompt_label = dataset.classes[class_id]
+                prompt_value = prompt_label if prompt_label is not None else f'class_{class_id}'
+            else:
+                tok = dataset.tokenize_text(prompt_text)
+                text_tokens = tok['tokens'].unsqueeze(0).to(device)
+                text_mask = tok['text_mask'].unsqueeze(0).to(device)
+                prompt_value = prompt_text
+            ar_dim = getattr(model, 'image_ar_dim', model.image_token_dim)
+            full_dim = model.image_token_dim
+            res_dim = max(0, full_dim - ar_dim)
+            image_tokens = torch.zeros(1, model.image_seq_len, ar_dim, device=device)
+            text_first_mask = torch.tensor([True], device=device)
+            full_mask = torch.ones(1, text_tokens.shape[1], device=device, dtype=torch.bool)
+
+            for pos in range(model.image_seq_len):
+                if class_id is not None:
+                    text_logits_c, image_logits_c = model(
+                        text_tokens, image_tokens, text_first_mask, full_mask, drop_text_cond_mask=None,
+                        class_ids=torch.tensor([class_id], device=device)
+                    )
+                    text_logits_u, image_logits_u = model(
+                        text_tokens, image_tokens, text_first_mask, full_mask, drop_text_cond_mask=torch.tensor([True], device=device),
+                        class_ids=torch.tensor([class_id], device=device)
+                    )
+                else:
+                    text_logits_c, image_logits_c = model(text_tokens, image_tokens, text_first_mask, full_mask, drop_text_cond_mask=None)
+                    text_logits_u, image_logits_u = model(text_tokens, image_tokens, text_first_mask, full_mask, drop_text_cond_mask=torch.tensor([True], device=device))
+
+                if pos < image_logits_c.shape[1]:
+                    if cfg_mode == "interp" and fast_mixture_first:
+                        hid_c = model.compute_image_hidden(text_tokens, image_tokens, text_first_mask, full_mask, drop_text_cond_mask=None)
+                        hid_u = model.compute_image_hidden(text_tokens, image_tokens, text_first_mask, full_mask, drop_text_cond_mask=torch.tensor([True], device=device))
+                        guided_hid = hid_u + cfg_strength * (hid_c - hid_u)
+                        pos_hidden = guided_hid[:, pos:pos+1]
+                        sampled = model.sample_from_hidden_mixture_first(pos_hidden)
+                        image_tokens[0, pos] = sampled[0, 0]
+                    elif cfg_mode == "interp":
+                        guided_logits = image_logits_u + cfg_strength * (image_logits_c - image_logits_u)
+                        mix_logits, means, scales = gmm_params(guided_logits[:, pos:pos+1], int(getattr(model, 'num_mixtures', 1024)), int(getattr(model, 'image_ar_dim', model.image_token_dim)))
+                        mix = torch.distributions.Categorical(logits=mix_logits.squeeze(1))
+                        comp_idx = mix.sample()
+                        bidx = torch.arange(comp_idx.shape[0], device=device)
+                        sel_means = means[:, 0, comp_idx, :]
+                        sel_scales = scales[:, 0, comp_idx, :]
+                        normal = torch.distributions.Normal(sel_means, sel_scales)
+                        sampled = normal.sample()
+                        image_tokens[0, pos] = sampled[0]
+                    else:
+                        gamma = float(cfg_strength) / (float(cfg_strength) + 1.0)
+                        gamma = max(0.0, min(0.999, gamma))
+                        mix_c, means_c, scales_c = gmm_params(image_logits_c[:, pos:pos+1], int(getattr(model, 'num_mixtures', 1024)), int(getattr(model, 'image_ar_dim', model.image_token_dim)))
+                        mix_u, means_u, scales_u = gmm_params(image_logits_u[:, pos:pos+1], int(getattr(model, 'num_mixtures', 1024)), int(getattr(model, 'image_ar_dim', model.image_token_dim)))
+                        mix_c = mix_c.squeeze(1); means_c = means_c.squeeze(1); scales_c = scales_c.squeeze(1)
+                        mix_u = mix_u.squeeze(1); means_u = means_u.squeeze(1); scales_u = scales_u.squeeze(1)
+                        max_tries = 64
+                        accepted = False
+                        for _ in range(max_tries):
+                            x = _sample_from_mixture(mix_c, means_c, scales_c)
+                            log_pc = _mixture_log_prob(mix_c, means_c, scales_c, x)
+                            log_pu = _mixture_log_prob(mix_u, means_u, scales_u, x)
+                            log_r = (1.0 - gamma) * (log_pu - log_pc)
+                            log_r = torch.clamp(log_r, min=-20.0, max=0.0)
+                            r = torch.exp(log_r)
+                            u = torch.rand_like(r)
+                            if (u <= r).item():
+                                image_tokens[0, pos] = x[0]
+                                accepted = True
+                                break
+                        if not accepted:
+                            guided_logits = image_logits_u + cfg_strength * (image_logits_c - image_logits_u)
+                            mix_logits, means, scales = gmm_params(guided_logits[:, pos:pos+1], int(getattr(model, 'num_mixtures', 1024)), int(getattr(model, 'image_ar_dim', model.image_token_dim)))
+                            mix = torch.distributions.Categorical(logits=mix_logits.squeeze(1))
+                            comp_idx = mix.sample()
+                            bidx = torch.arange(comp_idx.shape[0], device=device)
+                            sel_means = means[:, 0, comp_idx, :]
+                            sel_scales = scales[:, 0, comp_idx, :]
+                            normal = torch.distributions.Normal(sel_means, sel_scales)
+                            sampled = normal.sample()
+                            image_tokens[0, pos] = sampled[0]
+
+            if res_dim > 0:
+                residual = torch.randn(1, model.image_seq_len, res_dim, device=device)
+                tokens_full = torch.cat([image_tokens, residual], dim=-1)
+            else:
+                tokens_full = image_tokens
+            image01_bchw = model.decode_tokens_to_image01(tokens_full)
+            image01 = image01_bchw[0]
+            image_np = image01.permute(1, 2, 0).cpu().numpy()
+            image_pil = Image.fromarray((image_np * 255).astype('uint8'))
+            samples.append({'prompt': prompt_value, 'image': image_pil})
+        except Exception:
+            placeholder = Image.new('RGB', (256, 256), color='red')
+            samples.append({'prompt': (prompt_value if 'prompt_value' in locals() else prompt_text), 'image': placeholder})
+    model.train()
+    return samples
+
+
+@torch.no_grad()
+def generate_class_conditional_samples(base, device: torch.device, class_ids: List[int]) -> List[Dict[str, Any]]:
+    samples: List[Dict[str, Any]] = []
+    for cls in class_ids:
+        try:
+            text_tokens = torch.zeros(1, base.class_token_length, dtype=torch.long, device=device)
+            text_mask = torch.ones(1, base.class_token_length, dtype=torch.bool, device=device)
+            text_first_mask = torch.tensor([True], device=device)
+            img_tokens = torch.zeros(1, base.image_seq_len, base.image_ar_dim, device=device)
+            for pos in range(base.image_seq_len):
+                _ , _ = base(text_tokens, img_tokens, text_first_mask, text_mask, drop_text_cond_mask=None, class_ids=torch.tensor([cls], device=device))
+                hidden_pos = base.compute_image_hidden(text_tokens, img_tokens, text_first_mask, text_mask, drop_text_cond_mask=None, class_ids=torch.tensor([cls], device=device))[:, pos:pos+1]
+                sampled = base.sample_from_hidden_mixture_first(hidden_pos)
+                img_tokens[:, pos:pos+1] = sampled
+            res_dim = max(0, base.image_token_dim - base.image_ar_dim)
+            tokens_full = torch.cat([img_tokens, torch.randn(1, base.image_seq_len, res_dim, device=device)], dim=-1) if res_dim > 0 else img_tokens
+            image01_bchw = base.decode_tokens_to_image01(tokens_full)
+            img = image01_bchw[0].permute(1,2,0).cpu().numpy()
+            samples.append({'prompt': f'class_{cls}', 'image': Image.fromarray((img*255).clip(0,255).astype('uint8'))})
+        except Exception:
+            continue
+    return samples
+
+
+@torch.no_grad()
+def sample_flow_images(flow_model, device: torch.device, num_images: int, image_shape_hwc: tuple):
+    """Sample images from a flow-only model (NHWC [0,1]) and return list of PIL images."""
+    z_samples = torch.randn(int(num_images), *image_shape_hwc, device=device)
+    x_gen, _ = flow_model.inverse(z_samples)
+    x_uint8 = (x_gen * 255.0).clamp(0, 255).to(torch.uint8).cpu()  # (B,H,W,C)
+    pil_images = []
+    for img in x_uint8:
+        pil_images.append(Image.fromarray(img.numpy()))
+    return pil_images
+
