@@ -360,7 +360,8 @@ class Coupling(nn.Module):
         if self.masking_mode == 'pairing':
             if self.kind_is_channel:
                 with _NoAmpAutocast():
-                    x_proj = x_patched @ self.P_chan
+                    P_chan = self.P_chan.to(dtype=x_patched.dtype, device=x_patched.device)
+                    x_proj = x_patched @ P_chan
                 # Split features into halves
                 x1, x2 = torch.chunk(x_proj, 2, dim=-1)
                 # Get bias and scale from the first half (full token count)
@@ -373,11 +374,13 @@ class Coupling(nn.Module):
                 x2_prime = (x2 + bias) * scale
                 x_merged = torch.cat([x1, x2_prime], dim=-1)
                 with _NoAmpAutocast():
-                    x_unproj = x_merged @ self.P_chan.t()
+                    P_chan = self.P_chan.to(dtype=x_patched.dtype, device=x_patched.device)
+                    x_unproj = x_merged @ P_chan.t()
             else:
                 # Spatial pairing: reorder tokens, split along token dimension
                 with _NoAmpAutocast():
-                    x_proj = torch.einsum("b n c, n m -> b m c", x_patched, self.P_spatial)
+                    P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
+                    x_proj = torch.einsum("b n c, n m -> b m c", x_patched, P_spatial)
                 x1_tokens, x2_tokens = torch.chunk(x_proj, 2, dim=1)
                 # Predict on x1 tokens only; DNN is configured with full feature dim
                 bias, scale, logdet_dnn = self.dnn(x1_tokens, context=context)
@@ -386,7 +389,8 @@ class Coupling(nn.Module):
                 x2_prime_tokens = (x2_tokens + bias) * scale
                 x_merged_tokens = torch.cat([x1_tokens, x2_prime_tokens], dim=1)
                 with _NoAmpAutocast():
-                    x_unproj = torch.einsum("b m c, m n -> b n c", x_merged_tokens, self.P_spatial.t())
+                    P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
+                    x_unproj = torch.einsum("b m c, m n -> b n c", x_merged_tokens, P_spatial.t())
 
         elif self.masking_mode == 'masking':
             if self.kind_is_channel:
@@ -491,7 +495,8 @@ class Coupling(nn.Module):
         if self.masking_mode == 'pairing':
             if self.kind_is_channel:
                 with _NoAmpAutocast():
-                    y_proj = x_patched @ self.P_chan
+                    P_chan = self.P_chan.to(dtype=x_patched.dtype, device=x_patched.device)
+                    y_proj = x_patched @ P_chan
                 y1, y2 = torch.chunk(y_proj, 2, dim=-1)
                 if self.backbone == 'cnn':
                     bias, scale, logdet_dnn = self.dnn(y1, H_patch=H//self.ps, W_patch=W//self.ps, context=context)
@@ -501,17 +506,20 @@ class Coupling(nn.Module):
                 x2 = (y2 / scale) - bias
                 x_merged = torch.cat([y1, x2], dim=-1)
                 with _NoAmpAutocast():
-                    x_unproj = x_merged @ self.P_chan.t()
+                    P_chan = self.P_chan.to(dtype=x_patched.dtype, device=x_patched.device)
+                    x_unproj = x_merged @ P_chan.t()
             else:
                 with _NoAmpAutocast():
-                    y_proj = torch.einsum("b n c, n m -> b m c", x_patched, self.P_spatial)
+                    P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
+                    y_proj = torch.einsum("b n c, n m -> b m c", x_patched, P_spatial)
                 y1_tokens, y2_tokens = torch.chunk(y_proj, 2, dim=1)
                 bias, scale, logdet_dnn = self.dnn(y1_tokens, context=context)
                 fwd_logdet = fwd_logdet + logdet_dnn
                 x2_tokens = (y2_tokens / scale) - bias
                 x_merged_tokens = torch.cat([y1_tokens, x2_tokens], dim=1)
                 with _NoAmpAutocast():
-                    x_unproj = torch.einsum("b m c, m n -> b n c", x_merged_tokens, self.P_spatial.t())
+                    P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
+                    x_unproj = torch.einsum("b m c, m n -> b n c", x_merged_tokens, P_spatial.t())
 
         elif self.masking_mode == 'masking':
             if self.kind_is_channel:
