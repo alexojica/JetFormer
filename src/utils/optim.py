@@ -4,16 +4,20 @@ from typing import Any, Dict, Tuple
 import torch
 
 
-def create_adamw(model: torch.nn.Module, lr: float, wd: float = 1e-4, beta2: float = 0.95) -> torch.optim.Optimizer:
+def create_adamw(model: torch.nn.Module,
+                 lr: float,
+                 wd: float = 1e-4,
+                 beta1: float = 0.9,
+                 beta2: float = 0.95) -> torch.optim.Optimizer:
     try:
         return torch.optim.AdamW(
             filter(lambda p: p.requires_grad, model.parameters()),
-            lr=lr, betas=(0.9, beta2), weight_decay=wd, fused=True
+            lr=lr, betas=(beta1, beta2), weight_decay=wd, fused=True
         )
     except TypeError:
         return torch.optim.AdamW(
             filter(lambda p: p.requires_grad, model.parameters()),
-            lr=lr, betas=(0.9, beta2), weight_decay=wd
+            lr=lr, betas=(beta1, beta2), weight_decay=wd
         )
 
 
@@ -46,11 +50,12 @@ def get_optimizer_and_scheduler(model: torch.nn.Module, cfg: Dict[str, Any], tot
     """
     lr = float(cfg.get('learning_rate', cfg.get('lr', 3e-4)))
     wd = float(cfg.get('weight_decay', cfg.get('wd', 1e-4)))
+    beta1 = float(cfg.get('opt_b1', 0.9))
     beta2 = float(cfg.get('opt_b2', 0.95))
     warmup_percent = float(cfg.get('warmup_percent', 0.0))
     use_cosine = bool(cfg.get('use_cosine', True))
 
-    optimizer = create_adamw(model, lr=lr, wd=wd, beta2=beta2)
+    optimizer = create_adamw(model, lr=lr, wd=wd, beta1=beta1, beta2=beta2)
     scheduler = build_cosine_scheduler(optimizer, total_steps=total_steps, warmup_percent=warmup_percent, use_cosine=use_cosine)
     return optimizer, scheduler
 

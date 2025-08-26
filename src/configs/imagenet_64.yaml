@@ -2,7 +2,7 @@ vocab_size: 32000
 
 # Image/tokenization
 input_size: [64, 64]
-patch_size: 16                 # ↓ seq length (16 image tokens); keeps 3*p^2 = 768 ≥ image_ar_dim
+patch_size: 16                 # seq length (16 image tokens); keeps 3*p^2 = 768 ≥ image_ar_dim
 image_ar_dim: 128              # d = 128 (paper-consistent at this p)
 num_mixtures: 1024             # k = 1024 (paper); drop to 256 only if you must save mem
 use_bfloat16_img_head: true
@@ -28,7 +28,6 @@ max_seq_len: 64                # 16 class + 16 image tokens fits comfortably
 # Conditioning (class-conditional ImageNet)
 num_classes: 1000
 class_token_length: 16
-use_class_conditioning: true
 cfg_drop_prob: 0.1             # classifier-free guidance training drop
 cfg_strength: 4.0              # used at sampling
 cfg_mode: "reject"

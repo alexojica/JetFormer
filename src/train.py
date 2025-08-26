@@ -11,8 +11,7 @@ from pathlib import Path
 import numpy as np
 from torch.utils.data import DataLoader, Dataset
 import torch.distributed as dist
-from src.dataset import LAIONPOPTextImageDataset
-from src.datasets import KaggleImageFolderImagenet, ImageNet21kFolder
+ 
 from src.wandb_utils import WBLogger
 from src.utils.optim import get_optimizer_and_scheduler as get_opt_sched
 from src.utils.config import normalize_config_keys
@@ -145,6 +144,20 @@ def train_from_config(config_dict: dict):
     grad_accum_steps = int(getattr(config, 'grad_accum_steps', 1) or 1)
     total_opt_steps = (len(dataloader) * int(config.num_epochs) + (grad_accum_steps - 1)) // max(1, grad_accum_steps)
     set_model_total_steps(model, total_opt_steps)
+    # Also expose a separate noise curriculum window in steps
+    try:
+        noise_epochs = int(getattr(config, 'noise_curriculum_epochs', 0) or 0)
+        noise_steps = (len(dataloader) * noise_epochs + (grad_accum_steps - 1)) // max(1, grad_accum_steps)
+    except Exception:
+        noise_steps = 0
+    try:
+        base_model = unwrap_base_model(model)
+        if not hasattr(base_model, 'noise_total_steps'):
+            base_model.register_buffer('noise_total_steps', torch.tensor(int(max(0, noise_steps))), persistent=False)
+        else:
+            base_model.noise_total_steps = torch.tensor(int(max(0, noise_steps)))
+    except Exception:
+        pass
 
     # Optimizer & scheduler (centralized)
     total_steps = total_opt_steps
@@ -410,10 +423,17 @@ if __name__ == "__main__":
     parser.add_argument('--flow_invertible_dense', type=str, default=None, choices=['true','false'])
     # Pre-flow factoring
     parser.add_argument('--pre_factor_dim', type=int, default=None, help='Keep d channels per patch before flow; remaining modeled as Gaussian')
+    parser.add_argument('--use_bfloat16_img_head', type=str, default=None, choices=['true','false'])
     # Training
     parser.add_argument('--batch_size', type=int, default=None)
     parser.add_argument('--learning_rate', type=float, default=None)
+    parser.add_argument('--weight_decay', type=float, default=None)
+    parser.add_argument('--opt_b1', type=float, default=None)
+    parser.add_argument('--opt_b2', type=float, default=None)
     parser.add_argument('--num_epochs', type=int, default=None)
+    parser.add_argument('--val_every_epochs', type=int, default=None)
+    parser.add_argument('--sample_every_epochs', type=int, default=None)
+    parser.add_argument('--noise_curriculum_epochs', type=int, default=None)
     parser.add_argument('--torch_compile', type=str, default=None, choices=['true','false'])
     parser.add_argument('--grad_checkpoint_transformer', type=str, default=None, choices=['true','false'])
     parser.add_argument('--flow_grad_checkpoint', type=str, default=None, choices=['true','false'])
@@ -437,6 +457,8 @@ if __name__ == "__main__":
     parser.add_argument('--rgb_sigma0', type=float, default=None)
     parser.add_argument('--rgb_sigma_final', type=float, default=None)
     parser.add_argument('--latent_noise_std', type=float, default=None)
+    parser.add_argument('--text_loss_weight', type=float, default=None)
+    parser.add_argument('--image_loss_weight', type=float, default=None)
     parser.add_argument('--cfg_drop_prob', type=float, default=None)
     parser.add_argument('--cfg_strength', type=float, default=None)
     parser.add_argument('--cfg_mode', type=str, default=None, choices=['reject','interp'])

@@ -206,7 +206,7 @@ class JetFormer(nn.Module):
         # Use learned special embeddings
         bos_emb = self.bos_emb.expand(batch_size, 1, -1)
         boi_emb = self.boi_emb.expand(batch_size, 1, -1)
-        if class_ids is not None and hasattr(self, 'class_tokens_table'):
+        if (self.num_classes is not None and self.num_classes > 0) and class_ids is not None and hasattr(self, 'class_tokens_table'):
             # Use class tokens instead of text tokens
             ct = self.class_tokens_table[class_ids]  # [B, Tcls, D]
             text_emb = ct
@@ -542,7 +542,7 @@ class JetFormerTrain(JetFormer):
         if class_ids is not None:
             class_ids = class_ids.to(device, non_blocking=True)
         # Build text tokens/masks
-        if class_ids is not None:
+        if (self.num_classes is not None and self.num_classes > 0) and class_ids is not None:
             B = images.size(0)
             text_tokens = torch.zeros(B, self.class_token_length, dtype=torch.long, device=device)
             text_mask = torch.ones(B, self.class_token_length, dtype=torch.bool, device=device)
@@ -554,7 +554,7 @@ class JetFormerTrain(JetFormer):
 
         batch_size = images.shape[0]
         # Modality order
-        if class_ids is not None:
+        if (self.num_classes is not None and self.num_classes > 0) and class_ids is not None:
             text_first_mask = torch.ones(batch_size, dtype=torch.bool, device=device)
         else:
             text_first_mask = torch.bernoulli(torch.ones(batch_size, device=device) * 0.5).bool()
@@ -596,7 +596,7 @@ class JetFormerTrain(JetFormer):
         text_logits, image_logits = super().forward(text_tokens, hat_tokens_in, text_first_mask, text_mask, drop_text_cond_mask=drop_mask, class_ids=class_ids)
 
         # Text loss
-        if class_ids is not None:
+        if (self.num_classes is not None and self.num_classes > 0) and class_ids is not None:
             text_loss = torch.tensor(0.0, device=device)
         else:
             text_loss = cross_entropy_second_only(text_logits, text_tokens, text_loss_mask, text_second_mask)
