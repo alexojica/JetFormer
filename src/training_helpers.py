@@ -20,19 +20,20 @@ from src.jetformer import JetFormerTrain
 
 # Datasets
 from src.dataset import LAIONPOPTextImageDataset
-from src.flow.dataset import KaggleImageFolderImagenet, ImageNet21kFolder
+from src.datasets import KaggleImageFolderImagenet, ImageNet21kFolder
 from src.utils.dataset_utils import create_datasets_and_loaders as create_datasets_and_loaders_util
 from src.utils.image import to_x01, dequantize01
 from src.utils.train_utils import (
     initialize_actnorm_if_needed as initialize_actnorm_if_needed_util,
     broadcast_flow_params_if_ddp as broadcast_flow_params_if_ddp_util,
     set_model_total_steps as set_model_total_steps_util,
-    create_optimizer as create_optimizer_util,
     resume_optimizer_from_ckpt as resume_optimizer_from_ckpt_util,
     initialize_step_from_ckpt as initialize_step_from_ckpt_util,
     unwrap_model as unwrap_model_util,
     save_checkpoint as save_checkpoint_util,
 )
+from src.utils.optim import get_optimizer_and_scheduler as get_opt_sched
+from src.utils.train_eval import evaluate_one_epoch as unified_eval
 
 # Sampling utilities (canonical implementations live in src/sampling.py)
 from src.sampling import (
@@ -203,8 +204,12 @@ def set_model_total_steps(model: torch.nn.Module, total_steps: int) -> None:
     return set_model_total_steps_util(model, total_steps)
 
 
-def create_optimizer(model: torch.nn.Module, config: SimpleNamespace) -> torch.optim.Optimizer:
-    return create_optimizer_util(model, config)
+def create_optimizer(model: torch.nn.Module, config: SimpleNamespace, total_steps: int = None):
+    """Use central optimizer utils; returns (optimizer, scheduler)."""
+    cfg_map = dict(vars(config)) if hasattr(config, '__dict__') else dict(config)
+    if total_steps is None:
+        total_steps = int(cfg_map.get('total_steps', 0) or 0)
+    return get_opt_sched(model, cfg_map, total_steps)
 
 
 def resume_optimizer_from_ckpt(optimizer: torch.optim.Optimizer, ckpt: Optional[Dict[str, Any]]) -> None:
@@ -216,41 +221,8 @@ def initialize_step_from_ckpt(model: torch.nn.Module, steps_per_epoch: int, star
 
 
 @torch.no_grad()
-def evaluate_one_epoch(model_obj: torch.nn.Module, loader: DataLoader, accelerator) -> Tuple[float, float, float, float]:
-    """Evaluate the model over one epoch and return averaged (total, text, image, flow) metrics.
-
-    Also forces RGB noise off during validation by passing a flag in the batch.
-    """
-    model_obj.eval()
-    sum_total = 0.0
-    sum_text = 0.0
-    sum_img = 0.0
-    sum_flow = 0.0
-    count = 0
-    iterable = accelerator.wrap_dataloader(loader, is_train=False) if hasattr(accelerator, 'wrap_dataloader') else loader
-    for batch in iterable:
-        # Signal to the training forward to disable RGB noise (keep dequant) for clean eval
-        try:
-            batch = dict(batch)
-            batch['no_rgb_noise'] = True
-        except Exception:
-            pass
-        try:
-            torch.compiler.cudagraph_mark_step_begin()
-        except Exception:
-            pass
-        # Forward pass and accumulate metrics per batch
-        out = model_obj(batch)
-        bsz = batch['image'].size(0)
-        sum_total += float(out.get('loss', 0.0)) * bsz
-        sum_text += float(out.get('text_loss', 0.0)) * bsz
-        # Use forward-returned metrics directly
-        sum_img += float(out.get('image_bpd_total', out.get('image_loss', 0.0))) * bsz
-        sum_flow += float(out.get('flow_bpd_component', 0.0)) * bsz
-        count += bsz
-    model_obj.train()
-    denom = max(1, count)
-    return (sum_total/denom, sum_text/denom, sum_img/denom, sum_flow/denom)
+def evaluate_one_epoch(model_obj: torch.nn.Module, loader: DataLoader, accelerator, eval_no_rgb_noise: bool = True) -> Tuple[float, float, float, float]:
+    return unified_eval(model_obj, loader, accelerator, mode="ar_flow", eval_no_rgb_noise=bool(eval_no_rgb_noise))
 
 
 def persist_wandb_run_id(cfg: Dict[str, Any], wb_run) -> None:
@@ -306,7 +278,10 @@ def generate_and_log_samples(base_model,
     dataset_choice_l = str(dataset_choice).lower() if dataset_choice is not None else ''
     if dataset_choice_l in ('imagenet64_kaggle', 'imagenet21k_folder'):
         class_ids = [0, 250, 500, 750]
-        samples = generate_class_conditional_samples(base_model, device, class_ids)
+        samples = generate_class_conditional_samples(
+            base_model, device, class_ids,
+            cfg_strength=float(cfg_strength), cfg_mode=str(cfg_mode)
+        )
     else:
         samples = generate_text_to_image_samples_cfg(
             base_model, dataset, device,

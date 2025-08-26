@@ -12,7 +12,7 @@ import numpy as np
 from torch.utils.data import DataLoader, Dataset
 import torch.distributed as dist
 from src.dataset import LAIONPOPTextImageDataset
-from src.flow.dataset import KaggleImageFolderImagenet, ImageNet21kFolder
+from src.datasets import KaggleImageFolderImagenet, ImageNet21kFolder
 from src.wandb_utils import WBLogger
 from src.utils.optim import get_optimizer_and_scheduler as get_opt_sched
 from src.utils.config import normalize_config_keys
@@ -175,7 +175,7 @@ def train_from_config(config_dict: dict):
     # Initial validation before training starts
     best_val_loss = float('inf')
     if is_main_process:
-        v_total, v_text, v_img, v_flow = evaluate_one_epoch(model, val_loader, accelerator)
+        v_total, v_text, v_img, v_flow = evaluate_one_epoch(model, val_loader, accelerator, eval_no_rgb_noise=bool(getattr(config, 'eval_no_rgb_noise', True)))
         print(f"Initial Val — total: {v_total:.4f} | text: {v_text:.4f} | img: {v_img:.4f}")
         if wb_run is not None:
             wb_logger.log_validation_epoch(model, v_total, v_text, v_img, v_flow, epoch=0, step=0)
@@ -319,7 +319,7 @@ def train_from_config(config_dict: dict):
             vee = int(getattr(config, 'val_every_epochs'))
             run_val_this_epoch = (vee <= 1) or (((epoch + 1) % max(1, vee)) == 0)
         if is_main_process and run_val_this_epoch:
-            v_total, v_text, v_img, v_flow = evaluate_one_epoch(model, val_loader, accelerator)
+            v_total, v_text, v_img, v_flow = evaluate_one_epoch(model, val_loader, accelerator, eval_no_rgb_noise=bool(getattr(config, 'eval_no_rgb_noise', True)))
             print(f"Val Epoch {epoch+1} — total: {v_total:.4f} | text: {v_text:.4f} | img: {v_img:.4f}")
             if wb_run is not None:
                 wb_logger.log_validation_epoch(model, v_total, v_text, v_img, v_flow, epoch=epoch+1, step=step)
@@ -442,6 +442,9 @@ if __name__ == "__main__":
     parser.add_argument('--cfg_mode', type=str, default=None, choices=['reject','interp'])
     parser.add_argument('--log_every_batches', type=int, default=None)
     parser.add_argument('--sample_every_batches', type=int, default=None)
+    # Eval/data flags
+    parser.add_argument('--eval_no_rgb_noise', type=str, default=None, choices=['true','false'])
+    parser.add_argument('--random_flip_prob', type=float, default=None)
     # W&B
     parser.add_argument('--wandb', type=str, default=None, choices=['true','false'])
     parser.add_argument('--wandb_offline', type=str, default=None, choices=['true','false'])

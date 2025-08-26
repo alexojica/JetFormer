@@ -14,7 +14,7 @@ import time # For timing steps/epochs
 import random
 from .jet_flow import FlowCore
 from .train_module import FlowTrain
-from .dataset import TFDSImagenet64, KaggleImageFolderImagenet64, TFDSImagenet32, KaggleImageFolderImagenet, TorchvisionCIFAR10, ImageNet21kFolder
+from src.datasets import TFDSImagenet64, KaggleImageFolderImagenet64, TFDSImagenet32, KaggleImageFolderImagenet, TorchvisionCIFAR10, ImageNet21kFolder
 from tqdm import tqdm
 import wandb
 from src.utils.logging import get_logger
@@ -22,7 +22,8 @@ import pathlib
 import argparse
 from src.accelerators import GPUAccelerator
 from src.utils.optim import get_optimizer_and_scheduler as get_opt_sched
-from src.losses import bits_per_dim
+from src.losses import bits_per_dim_flow
+from src.utils.train_eval import evaluate_one_epoch as unified_eval
 try:
     from src.accelerators import TPUAccelerator, HAS_TPU as _HAS_TPU
 except Exception:
@@ -94,7 +95,7 @@ def evaluate_one_epoch(model: nn.Module,
             with autocast_ctx:
                 z, logdet = model(images_input.permute(0, 2, 3, 1))
             # Compute loss in float32 for numerical stability
-            loss_bpd, nll_bpd, logdet_bpd = bits_per_dim(z.float(), logdet.float(), image_shape_hwc, reduce=True)
+            loss_bpd, nll_bpd, logdet_bpd = bits_per_dim_flow(z.float(), logdet.float(), image_shape_hwc, reduce=True)
 
             # Accumulate sample-weighted sums
             sum_loss += loss_bpd.item() * batch_size
@@ -388,8 +389,7 @@ def main():
             x_nhwc = images01.permute(0, 2, 3, 1).contiguous()
             core.initialize_with_batch(x_nhwc)
         except Exception as e:
-            if is_main_process:
-                logger.warning(f"FlowCore initialize_with_batch failed: {e}")
+            logger.warning(f"FlowCore initialize_with_batch failed: {e}")
 
     # Broadcast initialized params to other ranks if distributed
     if ddp_enabled and dist.is_initialized():
@@ -415,14 +415,15 @@ def main():
     # OPTIMIZER & SCHEDULER
     # -----------------------
     total_steps_per_epoch = len(train_loader)
-    total_epochs = config["total_epochs"]
-    # Epoch presets per paper
-    if config.get("dataset") == "imagenet64_kaggle" and total_epochs == 40:
+    epochs_cfg = int(config["total_epochs"])
+    # Apply dataset-specific defaults only when the user hasn't overridden epochs
+    if config.get("dataset") == "imagenet64_kaggle" and epochs_cfg == 40:
         logger.info("Setting epochs to 200 for ImageNet-1k (paper default). Override with --total_epochs if desired.")
-        total_epochs = 200
-    if config.get("dataset") == "imagenet21k_folder" and total_epochs == 40:
+        epochs_cfg = 200
+    if config.get("dataset") == "imagenet21k_folder" and epochs_cfg == 40:
         logger.info("Setting epochs to 50 for ImageNet-21k (paper default). Override with --total_epochs if desired.")
-        total_epochs = 50
+        epochs_cfg = 50
+    total_epochs = epochs_cfg
     total_steps = total_steps_per_epoch * total_epochs
     optimizer, scheduler = get_optimizer_and_scheduler(model, config, total_steps)
     
@@ -437,44 +438,22 @@ def main():
         # Auto-generate a concise, paper-consistent name if not provided
         run_name = f"N{model_cfg['N']}_L{(model_cfg['vit_depth'] if model_cfg['backbone']=='vit' else model_cfg.get('cnn_depth') or model_cfg['vit_depth'])}_D{(model_cfg['vit_dim'] if model_cfg['backbone']=='vit' else model_cfg.get('cnn_dim') or model_cfg['vit_dim'])}_M{model_cfg['M']}_ps{model_cfg['ps']}_bs{config['batch_size']}"
 
-    # Initialize Weights & Biases only if explicitly enabled and a project is provided
+    # Initialize Weights & Biases via same helper used in main trainer for consistency
     want_wandb = bool(config.get("wandb", True))
-    # If user passed a run_id, configure resume
-    if want_wandb and config.get("wandb_run_id"):
-        os.environ.setdefault("WANDB_RESUME", "allow")
-        os.environ["WANDB_RUN_ID"] = str(config["wandb_run_id"])  # attach to existing run
-    if want_wandb and config["wandb_project"] and is_main_process:
+    if want_wandb and is_main_process:
         try:
-            wandb.init(
-                project=config["wandb_project"],
-                name=run_name,
-                config=wandb_config,
-                tags=config["wandb_tags"]
-            )
-            wandb.watch(model, log="all", log_freq=max(100, total_steps_per_epoch))
-            wandb_enabled = True
+            from src.training_helpers import init_wandb as helpers_init_wandb
+            wb_run = helpers_init_wandb({**config, "wandb_run_name": run_name}, is_main_process=True)
+            wandb_enabled = wb_run is not None
+            if wandb_enabled:
+                try:
+                    wandb.watch(model, log="all", log_freq=max(100, total_steps_per_epoch))
+                except Exception:
+                    pass
         except Exception as e:
-            logger.warning(f"W&B init failed ({e}). Attempting offline fallback…")
-            try:
-                os.environ["WANDB_MODE"] = "offline"
-                wandb.init(
-                    project=config["wandb_project"],
-                    name=run_name,
-                    config=wandb_config,
-                    tags=(config["wandb_tags"] + ["offline_fallback"]) if isinstance(config.get("wandb_tags"), list) else config.get("wandb_tags")
-                )
-                wandb.watch(model, log="all", log_freq=max(100, total_steps_per_epoch))
-                wandb_enabled = True
-                logger.info("W&B offline mode enabled. Logging locally.")
-            except Exception as e2:
-                logger.warning(f"W&B offline init failed ({e2}). Continuing without W&B logging.")
-                wandb_enabled = False
+            logger.warning(f"W&B init failed ({e}). Continuing without W&B logging.")
+            wandb_enabled = False
     else:
-        if is_main_process:
-            if not want_wandb:
-                logger.info("W&B logging disabled via --wandb false.")
-            else:
-                logger.info("W&B project not provided. You can enable W&B by passing --wandb_project <name> or setting WANDB_PROJECT.")
         wandb_enabled = False
 
     # Disable wandb on non-main ranks to avoid duplicate logs
@@ -638,25 +617,10 @@ def main():
         )
 
         if perform_val:
-            sum_val_loss, sum_val_nll, sum_val_logdet, num_val_samples = evaluate_one_epoch(
-                model=core,
-                dataloader=val_loader,
-                device=device,
-                image_shape_hwc=image_shape_hwc_for_loss,
-                show_progress=is_main_process,
-                accelerator=accelerator
-            )
-
-            # All-reduce validation sums and counts across ranks for true global means
-            if ddp_enabled:
-                accelerator.sync_if_needed()
-                sum_val_loss, sum_val_nll, sum_val_logdet, num_val_samples = accelerator.reduce_sums([
-                    sum_val_loss, sum_val_nll, sum_val_logdet, float(num_val_samples)
-                ])
-
-            avg_val_loss = sum_val_loss / max(1.0, num_val_samples)
-            avg_val_nll = sum_val_nll / max(1.0, num_val_samples)
-            avg_val_logdet = sum_val_logdet / max(1.0, num_val_samples)
+            v_total, v_text, v_img, v_flow = unified_eval(model, val_loader, accelerator, mode="flow")
+            avg_val_loss = v_total
+            avg_val_nll = v_img  # For flow-only, 'img' channel holds bpd
+            avg_val_logdet = v_flow
 
             if is_main_process:
                 logger.info(f"Epoch {epoch+1:3d}/{total_epochs} — Val Loss (bpd): {avg_val_loss:.4f} | Val NLL (bpd): {avg_val_nll:.4f} | LR: {scheduler.get_last_lr()[0]:.2e}")

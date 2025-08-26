@@ -1,0 +1,84 @@
+vocab_size: 32000
+
+# Image/tokenization
+input_size: [64, 64]
+patch_size: 16                 # ↓ seq length (16 image tokens); keeps 3*p^2 = 768 ≥ image_ar_dim
+image_ar_dim: 128              # d = 128 (paper-consistent at this p)
+num_mixtures: 1024             # k = 1024 (paper); drop to 256 only if you must save mem
+use_bfloat16_img_head: true
+
+# Flow (Jet) — post-flow factoring, channel-wise only
+jet_depth: 32
+jet_block_depth: 4
+jet_emb_dim: 512
+jet_num_heads: 8
+flow_actnorm: true
+flow_invertible_dense: true
+pre_factor_dim: 0              # keep POST-flow factoring (paper’s main setup)
+
+# AR Transformer (Gemma-style)
+d_model: 640
+n_heads: 10
+n_layers: 18
+d_ff: 2560
+n_kv_heads: 1
+dropout: 0.1
+max_seq_len: 64                # 16 class + 16 image tokens fits comfortably
+
+# Conditioning (class-conditional ImageNet)
+num_classes: 1000
+class_token_length: 16
+use_class_conditioning: true
+cfg_drop_prob: 0.1             # classifier-free guidance training drop
+cfg_strength: 4.0              # used at sampling
+cfg_mode: "reject"
+
+# Dataset / training target
+dataset: imagenet64_kaggle
+kaggle_dataset_id: "ayaroshevskiy/downsampled-imagenet-64x64"
+
+# Optimization / curriculum
+batch_size: 48
+learning_rate: 0.001           # AdamW w/ decoupled WD assumed
+weight_decay: 0.0001
+opt_b1: 0.9
+opt_b2: 0.95
+grad_clip_norm: 1.0
+num_epochs: 50
+precision: tf32
+distributed: false
+torch_compile: false
+grad_checkpoint_transformer: false
+flow_grad_checkpoint: false
+
+rgb_sigma0: 64.0
+rgb_sigma_final: 0.0           # ImageNet: decay to zero
+noise_curriculum_epochs: 20    # front-load the decay so σ≈0 by ~epoch 20
+latent_noise_std: 0.3
+text_loss_weight: 0.0
+image_loss_weight: 1.0
+grad_accum_steps: 1
+
+# Epoch-level schedules
+sample_every_epochs: 1
+val_every_epochs: 1            # see progress every epoch
+
+# Evaluation controls
+eval_no_rgb_noise: true        # ensure σ=0 at validation to see “true” NLL/BPD
+
+# Dataloader / augmentation
+num_workers: 8
+max_samples: null
+ignore_pad: false
+random_flip_prob: 0.5          # horizontal flip probability for ImageNet train set
+
+# Accelerator
+accelerator: auto
+device: auto
+
+# W&B (optional)
+wandb: true
+wandb_offline: false
+wandb_project: "jetformer-imagenet-64"
+wandb_run_name: "S-64"
+wandb_tags: ["imagenet64", "s"]

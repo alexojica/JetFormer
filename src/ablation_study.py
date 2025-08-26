@@ -5,6 +5,8 @@ from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import wandb
+from src.utils.logging import get_logger
+logger = get_logger(__name__)
 import math
 from tqdm import tqdm
 from src.dataset import TinyStoriesDataset
@@ -148,11 +150,14 @@ def create_model(config):
 def run_ablation_study(config):
     """Run ablation study with given configuration."""
     # Initialize wandb
-    wandb.init(
-        project="gemma-ablation",
-        config=config,
-        name=f"{config['model_type']}-{config.get('model_size', '')}-{config.get('pe_type', '')}-{config.get('activation', '')}"
-    )
+    try:
+        wandb.init(
+            project="gemma-ablation",
+            config=config,
+            name=f"{config['model_type']}-{config.get('model_size', '')}-{config.get('pe_type', '')}-{config.get('activation', '')}"
+        )
+    except Exception as e:
+        logger.warning(f"W&B init failed in ablation study: {e}")
     
     # Create wandb tables for metrics
     train_metrics_table = wandb.Table(columns=["epoch", "loss", "nll", "perplexity", "grad_norm"])
@@ -273,6 +278,7 @@ def run_ablation_study(config):
     wandb.finish()
 
 if __name__ == "__main__":
+    # NOTE: This script is experimental. Consider using the unified trainer in src/train.py.
     # Base configuration
     # STILL TOO BIG
     # base_config = {

@@ -56,11 +56,7 @@ def set_model_total_steps(model: torch.nn.Module, total_steps: int) -> None:
         pass
 
 
-def create_optimizer(model: torch.nn.Module, config: SimpleNamespace) -> torch.optim.Optimizer:
-    try:
-        return torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=0.01, betas=(0.9, 0.95), fused=True)
-    except TypeError:
-        return torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=0.01, betas=(0.9, 0.95))
+# Optimizer creation is centralized under src.utils.optim.get_optimizer_and_scheduler
 
 
 def resume_optimizer_from_ckpt(optimizer: torch.optim.Optimizer, ckpt: Optional[Dict[str, Any]]) -> None:

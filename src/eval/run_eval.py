@@ -51,56 +51,44 @@ def _build_model_from_cfg(cfg: dict, device: torch.device) -> JetFormer:
 @torch.no_grad()
 def _sample_t2i_cfg(model: JetFormer, prompts, device: torch.device, out_dir: Path, cfg_strength: float, num_images: int):
     os.makedirs(out_dir, exist_ok=True)
-    # Load SentencePiece tokenizer directly to avoid dataset side-effects
+    # Minimal tokenizer wrapper used by sampling.py
     from sentencepiece import SentencePieceProcessor
     from src.tokenizer import download_sentencepiece_model
     spm_path = download_sentencepiece_model()
-    sp = SentencePieceProcessor()
-    sp.Load(spm_path)
-    def _tokenize_text(text: str):
-        ids = sp.EncodeAsIds(text)
-        ids = ids + [1]  # EOS id per datasets
-        max_len = 64
-        if len(ids) > max_len:
-            ids = ids[:max_len]
-        mask = [1] * len(ids)
-        pad = 0
-        ids = ids + [pad] * (max_len - len(ids))
-        mask = mask + [0] * (max_len - len(mask))
-        return {
-            'tokens': torch.tensor(ids, dtype=torch.long),
-            'text_mask': torch.tensor(mask, dtype=torch.bool),
-        }
+    sp = SentencePieceProcessor(); sp.Load(spm_path)
     class _TokDS:
-        def tokenize_text(self, t: str):
-            return _tokenize_text(t)
+        def tokenize_text(self, text: str):
+            ids = sp.EncodeAsIds(text)
+            ids = ids + [1]
+            max_len = 64
+            ids = ids[:max_len] + [0] * max(0, max_len - len(ids))
+            mask = [1 if i < len(ids) and ids[i] != 0 else 0 for i in range(max_len)]
+            return {
+                'tokens': torch.tensor(ids, dtype=torch.long),
+                'text_mask': torch.tensor(mask, dtype=torch.bool),
+            }
     ds = _TokDS()
-    samples = []
     for i, prompt in enumerate(prompts[:num_images]):
         try:
             s = generate_text_to_image_samples_cfg(model, ds, device, num_samples=1, cfg_strength=cfg_strength)
             if len(s) > 0:
                 img = s[0]['image']
                 img.save(out_dir / f"sample_{i:05d}.png")
-                samples.append(s[0])
         except Exception:
-            # Log but continue
             try:
                 print(f"Failed to generate sample for prompt {i}: '{prompt}'")
             except Exception:
                 pass
-            continue
-    return samples
 
 
 @torch.no_grad()
-def _sample_class_cond(model: JetFormer, device: torch.device, out_dir: Path, num_images: int):
+def _sample_class_cond(model: JetFormer, device: torch.device, out_dir: Path, num_images: int, cfg_strength: float = 4.0, cfg_mode: str = "reject"):
     os.makedirs(out_dir, exist_ok=True)
     num_classes = getattr(model, 'num_classes', None) or 1000
     classes = list(range(num_classes))
     total = min(num_images, len(classes))
     from src.sampling import generate_class_conditional_samples
-    samples = generate_class_conditional_samples(model, device, classes[:total])
+    samples = generate_class_conditional_samples(model, device, classes[:total], cfg_strength=cfg_strength, cfg_mode=str(cfg_mode))
     for i, s in enumerate(samples):
         img = s['image']
         img.save(out_dir / f"class_{i:04d}.png")
@@ -132,6 +120,7 @@ def main():
     parser.add_argument('--num_images', type=int, default=32)
     parser.add_argument('--out_dir', type=str, default='./eval_out')
     parser.add_argument('--cfg_strength', type=float, default=4.0)
+    parser.add_argument('--cfg_mode', type=str, default='reject', choices=['reject','interp'])
     parser.add_argument('--prompts_file', type=str, default=None)
     parser.add_argument('--ref_dir', type=str, default=None)
     parser.add_argument('--ref_stats', type=str, default=None)
@@ -174,7 +163,7 @@ def main():
         _sample_t2i_cfg(model, prompts, device, out_dir, args.cfg_strength, args.num_images)
         logger.info(f"Saved {args.num_images} samples to {out_dir}")
     elif args.task == 'class_cond':
-        _sample_class_cond(model, device, out_dir, args.num_images)
+        _sample_class_cond(model, device, out_dir, args.num_images, args.cfg_strength, args.cfg_mode)
         logger.info(f"Saved class-conditional samples to {out_dir}")
     elif args.task == 'fid':
         # Expect images already generated under out_dir, or generate from prompts file

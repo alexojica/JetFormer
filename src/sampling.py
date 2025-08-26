@@ -210,19 +210,123 @@ def generate_text_to_image_samples_cfg(model, dataset, device, num_samples: int 
 
 
 @torch.no_grad()
-def generate_class_conditional_samples(base, device: torch.device, class_ids: List[int]) -> List[Dict[str, Any]]:
+def generate_class_conditional_samples(base,
+                                       device: torch.device,
+                                       class_ids: List[int],
+                                       cfg_strength: float = 4.0,
+                                       cfg_mode: str = "reject",
+                                       fast_mixture_first: bool = False) -> List[Dict[str, Any]]:
     samples: List[Dict[str, Any]] = []
+
+    def _mixture_log_prob(mix_logits, means, scales, x):
+        B, k = mix_logits.shape
+        logZ = torch.logsumexp(mix_logits, dim=-1)
+        x_exp = x.unsqueeze(1).expand(-1, k, -1)
+        var = (scales * scales).clamp_min(1e-12)
+        log_two_pi = torch.log(torch.tensor(2.0 * math.pi, device=x.device, dtype=x.dtype))
+        log_norm_const = -0.5 * (log_two_pi + torch.log(var))
+        log_exp_term = -0.5 * ((x_exp - means) * (x_exp - means) / var)
+        log_normal = (log_norm_const + log_exp_term).sum(dim=-1)
+        numer = torch.logsumexp(mix_logits + log_normal, dim=-1)
+        return numer - logZ
+
+    def _sample_from_mixture(mix_logits, means, scales):
+        B, k = mix_logits.shape
+        mix = torch.distributions.Categorical(logits=mix_logits)
+        comp_idx = mix.sample()
+        b = torch.arange(B, device=mix_logits.device)
+        sel_means = means[b, comp_idx, :]
+        sel_scales = scales[b, comp_idx, :]
+        normal = torch.distributions.Normal(sel_means, sel_scales)
+        return normal.sample()
+
     for cls in class_ids:
         try:
             text_tokens = torch.zeros(1, base.class_token_length, dtype=torch.long, device=device)
             text_mask = torch.ones(1, base.class_token_length, dtype=torch.bool, device=device)
             text_first_mask = torch.tensor([True], device=device)
             img_tokens = torch.zeros(1, base.image_seq_len, base.image_ar_dim, device=device)
+
             for pos in range(base.image_seq_len):
-                _ , _ = base(text_tokens, img_tokens, text_first_mask, text_mask, drop_text_cond_mask=None, class_ids=torch.tensor([cls], device=device))
-                hidden_pos = base.compute_image_hidden(text_tokens, img_tokens, text_first_mask, text_mask, drop_text_cond_mask=None, class_ids=torch.tensor([cls], device=device))[:, pos:pos+1]
-                sampled = base.sample_from_hidden_mixture_first(hidden_pos)
-                img_tokens[:, pos:pos+1] = sampled
+                # Conditional and unconditional forward passes
+                text_logits_c, image_logits_c = base(
+                    text_tokens, img_tokens, text_first_mask, text_mask,
+                    drop_text_cond_mask=None,
+                    class_ids=torch.tensor([cls], device=device)
+                )
+                text_logits_u, image_logits_u = base(
+                    text_tokens, img_tokens, text_first_mask, text_mask,
+                    drop_text_cond_mask=torch.tensor([True], device=device),
+                    class_ids=torch.tensor([cls], device=device)
+                )
+
+                if pos < image_logits_c.shape[1]:
+                    if cfg_mode == "interp" and fast_mixture_first:
+                        hid_c = base.compute_image_hidden(
+                            text_tokens, img_tokens, text_first_mask, text_mask,
+                            drop_text_cond_mask=None, class_ids=torch.tensor([cls], device=device)
+                        )
+                        hid_u = base.compute_image_hidden(
+                            text_tokens, img_tokens, text_first_mask, text_mask,
+                            drop_text_cond_mask=torch.tensor([True], device=device), class_ids=torch.tensor([cls], device=device)
+                        )
+                        guided_hid = hid_u + cfg_strength * (hid_c - hid_u)
+                        pos_hidden = guided_hid[:, pos:pos+1]
+                        sampled = base.sample_from_hidden_mixture_first(pos_hidden)
+                        img_tokens[0, pos] = sampled[0, 0]
+                    elif cfg_mode == "interp":
+                        guided_logits = image_logits_u + cfg_strength * (image_logits_c - image_logits_u)
+                        mix_logits, means, scales = gmm_params(
+                            guided_logits[:, pos:pos+1], int(getattr(base, 'num_mixtures', 1024)), int(getattr(base, 'image_ar_dim', base.image_token_dim))
+                        )
+                        mix = torch.distributions.Categorical(logits=mix_logits.squeeze(1))
+                        comp_idx = mix.sample()
+                        bidx = torch.arange(comp_idx.shape[0], device=device)
+                        sel_means = means[:, 0, comp_idx, :]
+                        sel_scales = scales[:, 0, comp_idx, :]
+                        normal = torch.distributions.Normal(sel_means, sel_scales)
+                        sampled = normal.sample()
+                        img_tokens[0, pos] = sampled[0]
+                    else:
+                        # Reject mode
+                        gamma = float(cfg_strength) / (float(cfg_strength) + 1.0)
+                        gamma = max(0.0, min(0.999, gamma))
+                        mix_c, means_c, scales_c = gmm_params(
+                            image_logits_c[:, pos:pos+1], int(getattr(base, 'num_mixtures', 1024)), int(getattr(base, 'image_ar_dim', base.image_token_dim))
+                        )
+                        mix_u, means_u, scales_u = gmm_params(
+                            image_logits_u[:, pos:pos+1], int(getattr(base, 'num_mixtures', 1024)), int(getattr(base, 'image_ar_dim', base.image_token_dim))
+                        )
+                        mix_c = mix_c.squeeze(1); means_c = means_c.squeeze(1); scales_c = scales_c.squeeze(1)
+                        mix_u = mix_u.squeeze(1); means_u = means_u.squeeze(1); scales_u = scales_u.squeeze(1)
+                        max_tries = 64
+                        accepted = False
+                        for _ in range(max_tries):
+                            x = _sample_from_mixture(mix_c, means_c, scales_c)
+                            log_pc = _mixture_log_prob(mix_c, means_c, scales_c, x)
+                            log_pu = _mixture_log_prob(mix_u, means_u, scales_u, x)
+                            log_r = (1.0 - gamma) * (log_pu - log_pc)
+                            log_r = torch.clamp(log_r, min=-20.0, max=0.0)
+                            r = torch.exp(log_r)
+                            u = torch.rand_like(r)
+                            if (u <= r).item():
+                                img_tokens[0, pos] = x[0]
+                                accepted = True
+                                break
+                        if not accepted:
+                            guided_logits = image_logits_u + cfg_strength * (image_logits_c - image_logits_u)
+                            mix_logits, means, scales = gmm_params(
+                                guided_logits[:, pos:pos+1], int(getattr(base, 'num_mixtures', 1024)), int(getattr(base, 'image_ar_dim', base.image_token_dim))
+                            )
+                            mix = torch.distributions.Categorical(logits=mix_logits.squeeze(1))
+                            comp_idx = mix.sample()
+                            bidx = torch.arange(comp_idx.shape[0], device=device)
+                            sel_means = means[:, 0, comp_idx, :]
+                            sel_scales = scales[:, 0, comp_idx, :]
+                            normal = torch.distributions.Normal(sel_means, sel_scales)
+                            sampled = normal.sample()
+                            img_tokens[0, pos] = sampled[0]
+
             res_dim = max(0, base.image_token_dim - base.image_ar_dim)
             tokens_full = torch.cat([img_tokens, torch.randn(1, base.image_seq_len, res_dim, device=device)], dim=-1) if res_dim > 0 else img_tokens
             image01_bchw = base.decode_tokens_to_image01(tokens_full)

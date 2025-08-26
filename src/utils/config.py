@@ -10,6 +10,12 @@ ALIASES = {
     'grad_clip': 'grad_clip_norm',
     # Validation cadence
     'val_interval': 'val_every_epochs',
+    # Optimizer / schedule
+    'wd': 'weight_decay',
+    'weightdecay': 'weight_decay',
+    'warmup': 'warmup_percent',
+    'warmup_pct': 'warmup_percent',
+    'cosine': 'use_cosine',
 }
 
 
@@ -26,6 +32,11 @@ def normalize_config_keys(cfg: Dict[str, Any]) -> Dict[str, Any]:
     # Coerce some defaults if missing
     if 'num_epochs' not in out and 'epochs' in out:
         out['num_epochs'] = out['epochs']
+    # Normalize boolean-like strings for use_cosine et al.
+    for key in ['use_cosine']:
+        if key in out and isinstance(out[key], str):
+            v = out[key].lower()
+            out[key] = v in ('1','true','yes','y')
     return out
 
 

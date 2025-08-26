@@ -4,7 +4,7 @@ from typing import Any, Tuple
 from torch.utils.data import DataLoader
 
 from src.dataset import LAIONPOPTextImageDataset
-from src.flow.dataset import KaggleImageFolderImagenet, ImageNet21kFolder
+from src.datasets import KaggleImageFolderImagenet, ImageNet21kFolder
 
 
 def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[Any, Any, DataLoader, DataLoader]:
@@ -20,11 +20,13 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
             split='train',
             resolution=res,
             kaggle_dataset_id=getattr(config, 'kaggle_dataset_id', 'ayaroshevskiy/downsampled-imagenet-64x64'),
-            max_samples=getattr(config, 'max_samples', None)
+            max_samples=getattr(config, 'max_samples', None),
+            random_flip_prob=float(getattr(config, 'random_flip_prob', 0.5))
         )
         val_dataset = KaggleImageFolderImagenet(
             split='val', resolution=res,
-            kaggle_dataset_id=getattr(config, 'kaggle_dataset_id', 'ayaroshevskiy/downsampled-imagenet-64x64')
+            kaggle_dataset_id=getattr(config, 'kaggle_dataset_id', 'ayaroshevskiy/downsampled-imagenet-64x64'),
+            random_flip_prob=0.0
         )
     elif str(dataset_choice).lower() == 'imagenet21k_folder':
         root = getattr(config, 'imagenet21k_root', None)

@@ -28,27 +28,57 @@ def cross_entropy_second_only(logits: torch.Tensor,
     denom = mask.sum().clamp_min(1.0)
     return masked_sum / denom
 
-def bits_per_dim(z: torch.Tensor, logdet: torch.Tensor, image_shape_hwc: tuple, reduce: bool = True):
-    """Compute bits-per-dimension for flow latents.
+def bits_per_dim_flow(z: torch.Tensor, logdet: torch.Tensor, image_shape_hwc: tuple, reduce: bool = True):
+    """Flow-only bits-per-dimension consistent with JetFormer/Jet paper.
 
-    Matches the computation in flow/train.py but factored out.
+    Returns either per-sample or mean triplet: (total_bpd, nll_bpd, logdet_bpd),
+    where total_bpd = (NLL(z) + ln256*D - logdet) / (ln2*D).
     """
     normal_dist = torch.distributions.Normal(0.0, 1.0)
     nll = -normal_dist.log_prob(z)
     ln_dequant = math.log(256.0)
     nll_plus_dequant = nll + ln_dequant
     nll_summed = torch.sum(nll_plus_dequant, dim=list(range(1, nll.ndim)))
-    total_bits = nll_summed - logdet
+    total_nats = nll_summed - logdet
     dim_count = np.prod(image_shape_hwc)
     normalizer = math.log(2.0) * dim_count
-    loss_bpd = total_bits / normalizer
+    loss_bpd = total_nats / normalizer
+    nll_bpd = nll_summed / normalizer
+    logdet_bpd = logdet / normalizer
     if reduce:
-        mean_loss_bpd = torch.mean(loss_bpd)
-        mean_nll = torch.mean(nll_summed / normalizer)
-        mean_logdet = torch.mean(logdet / normalizer)
-        return mean_loss_bpd, mean_nll, mean_logdet
+        return torch.mean(loss_bpd), torch.mean(nll_bpd), torch.mean(logdet_bpd)
     else:
-        return loss_bpd, nll_summed / normalizer, logdet / normalizer
+        return loss_bpd, nll_bpd, logdet_bpd
+
+
+def bits_per_dim(z: torch.Tensor, logdet: torch.Tensor, image_shape_hwc: tuple, reduce: bool = True):
+    """Backward-compat shim; use bits_per_dim_flow."""
+    return bits_per_dim_flow(z, logdet, image_shape_hwc, reduce=reduce)
+
+
+def bits_per_dim_ar(gmm_nll_nats: torch.Tensor,
+                    residual_nll_nats: torch.Tensor,
+                    flow_logdet: torch.Tensor,
+                    image_shape_chw: tuple,
+                    reduce: bool = True):
+    """AR decomposition bits/dim helper.
+
+    Returns either per-sample or mean triplet: (total_bpd, ar_bpd, flow_bpd),
+    where ar_bpd = (gmm_nll + residual_nll + ln256*D)/(ln2*D) and flow_bpd = (-logdet)/(ln2*D).
+    """
+    C, H, W = image_shape_chw
+    D = C * H * W
+    denom = (H * W * C) * math.log(2.0)
+    const = D * math.log(256.0)
+    total_nll = gmm_nll_nats + residual_nll_nats - flow_logdet + const
+    ar_nll = gmm_nll_nats + residual_nll_nats + const
+    total_bpd = total_nll / denom
+    ar_bpd = ar_nll / denom
+    flow_bpd = (-flow_logdet) / denom
+    if reduce:
+        return total_bpd.mean(), ar_bpd.mean(), flow_bpd.mean()
+    else:
+        return total_bpd, ar_bpd, flow_bpd
 
 def _square_plus(x: torch.Tensor) -> torch.Tensor:
     return (x + torch.sqrt(x * x + torch.tensor(4.0, dtype=x.dtype, device=x.device))) / 2.0

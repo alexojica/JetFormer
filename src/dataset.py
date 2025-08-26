@@ -84,10 +84,14 @@ class LAIONPOPTextImageDataset(Dataset): # tokenizer: gs://t5-data/vocabs/cc_en.
         self.ignore_pad = ignore_pad
 
         # Download/prepare tokenizer model via centralized util
-        try:
-            local_tokenizer_path = download_sentencepiece_model() if tokenizer_path.startswith('gs://') else tokenizer_path
-        except Exception:
-            local_tokenizer_path = self._download_tokenizer_model(tokenizer_path)
+        # Centralize tokenizer model download via src.tokenizer
+        local_tokenizer_path = tokenizer_path
+        if tokenizer_path.startswith('gs://'):
+            try:
+                local_tokenizer_path = download_sentencepiece_model()
+            except Exception:
+                # Fallback to class-local downloader (kept temporarily for robustness)
+                local_tokenizer_path = self._download_tokenizer_model(tokenizer_path)
         
         self.tokenizer = SentencePieceProcessor()
         self.tokenizer.Load(local_tokenizer_path)
@@ -391,10 +395,12 @@ class TinyStoriesDataset(Dataset):
         self.ignore_pad = ignore_pad
 
         # Download/prepare tokenizer model via centralized util
-        try:
-            local_tokenizer_path = download_sentencepiece_model() if tokenizer_path.startswith('gs://') else tokenizer_path
-        except Exception:
-            local_tokenizer_path = self._download_tokenizer_model(tokenizer_path)
+        local_tokenizer_path = tokenizer_path
+        if tokenizer_path.startswith('gs://'):
+            try:
+                local_tokenizer_path = download_sentencepiece_model()
+            except Exception:
+                local_tokenizer_path = self._download_tokenizer_model(tokenizer_path)
         
         self.tokenizer = SentencePieceProcessor()
         self.tokenizer.Load(local_tokenizer_path)

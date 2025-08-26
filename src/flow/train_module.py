@@ -3,7 +3,7 @@ import torch.nn as nn
 import math
 
 from .jet_flow import FlowCore
-from src.losses import bits_per_dim
+from src.losses import bits_per_dim_flow
 
 
 class FlowTrain(nn.Module):
@@ -38,7 +38,7 @@ class FlowTrain(nn.Module):
         x_nhwc = images01.permute(0, 2, 3, 1).contiguous()
         z, logdet = self.flow(x_nhwc)
 
-        loss_bpd, nll_bpd, logdet_bpd = bits_per_dim(z.float(), logdet.float(), self.image_shape_hwc, reduce=True)
+        loss_bpd, nll_bpd, logdet_bpd = bits_per_dim_flow(z.float(), logdet.float(), self.image_shape_hwc, reduce=True)
         self._step = self._step + 1
         return {
             "loss": loss_bpd,
