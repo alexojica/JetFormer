@@ -21,7 +21,6 @@ from types import SimpleNamespace
 from tqdm import tqdm
 from src.training_helpers import (
     build_accelerator,
-    resolve_wandb_resume_by_name,
     init_wandb as helpers_init_wandb,
     build_model_from_config,
     count_model_parameters,
@@ -71,9 +70,6 @@ def train_from_config(config_dict: dict):
         acc_name = accelerator.__class__.__name__.replace('Accelerator', '').upper()
         print(f"Using device: {device_obj}; accelerator={acc_name}; DDP: {ddp_enabled}; world_size={accelerator.world_size}; rank={accelerator.rank}")
 
-    # Support resuming W&B by run name if run_id not specified
-    resolve_wandb_resume_by_name(cfg_raw)
-
     wb_run = helpers_init_wandb(cfg_raw, is_main_process=is_main_process)
     if os.environ.get('DEBUG') is not None:
         torch.autograd.set_detect_anomaly(True)
@@ -87,24 +83,9 @@ def train_from_config(config_dict: dict):
     # total_steps set later after dataloader creation
     dataset_choice = getattr(config, 'dataset', 'laion_pop')
 
-    # Resolve resume path: if not provided, prefer local rolling checkpoints
+    # Resolve resume path: only resume when explicitly provided via --resume_from
     resume_from_path = cfg_raw.get('resume_from', None)
-    if not resume_from_path:
-        try:
-            default_last = os.path.join('checkpoints', 'last.pt')
-            default_best = os.path.join('checkpoints', 'best.pt')
-            if os.path.exists(default_last):
-                resume_from_path = default_last
-                cfg_raw['resume_from'] = resume_from_path
-                if is_main_process:
-                    print(f"Auto-resume: using {resume_from_path}")
-            elif os.path.exists(default_best):
-                resume_from_path = default_best
-                cfg_raw['resume_from'] = resume_from_path
-                if is_main_process:
-                    print(f"Auto-resume: using {resume_from_path}")
-        except Exception:
-            pass
+
     model = build_model_from_config(config, device_obj)
     # If resuming, load model weights before optional compile/wrap
     start_epoch = 0

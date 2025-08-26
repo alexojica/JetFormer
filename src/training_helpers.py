@@ -66,13 +66,19 @@ def init_wandb(cfg: Dict[str, Any], is_main_process: bool = True):
     project = cfg.get("wandb_project", "jetformer-laion-pop")
     run_name = cfg.get("wandb_run_name")
     run_id = cfg.get("wandb_run_id")
+    resume_from = cfg.get("resume_from")
     tags = cfg.get("wandb_tags", [])
     try:
         if offline:
             os.environ["WANDB_MODE"] = "offline"
-        if run_id:
+        # Only resume W&B when BOTH a checkpoint path and a run_id are provided.
+        if run_id and isinstance(resume_from, str) and os.path.exists(resume_from):
             os.environ.setdefault("WANDB_RESUME", "allow")
             os.environ["WANDB_RUN_ID"] = str(run_id)
+        else:
+            # Ensure a fresh run even if the same name is reused.
+            os.environ.pop("WANDB_RESUME", None)
+            os.environ.pop("WANDB_RUN_ID", None)
         return wandb.init(project=project, name=run_name, config=cfg, tags=tags)
     except Exception as e:
         try:
