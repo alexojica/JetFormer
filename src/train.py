@@ -271,19 +271,6 @@ def train_from_config(config_dict: dict):
                     print(f"Failed to generate samples: {e}")
                     import traceback
                     traceback.print_exc()
-
-            if is_main_process and (batch_idx % 2000 == 0):
-                print(f"Saving checkpoint for epoch {epoch+1} at batch {batch_idx}")
-                ckpt_path = f'jetformer_laion_pop_epoch_{epoch+1}_batch_{batch_idx}.pt'
-                save_checkpoint(
-                    model=model,
-                    optimizer=optimizer,
-                    scheduler=scheduler,
-                    epoch=epoch,
-                    ckpt_path=ckpt_path,
-                    wb_run=wb_run,
-                    config_dict=(dict(wandb.config) if wb_run is not None else config_dict),
-                )
                 
             step += 1
             # Maintain model's internal step counter outside compiled regions
@@ -325,9 +312,7 @@ def train_from_config(config_dict: dict):
             improved = v_total < best_val_loss
             if improved:
                 best_val_loss = v_total
-            if improved and ((epoch + 1) % 5 == 0):
-                os.makedirs('checkpoints', exist_ok=True)
-                ckpt_path = os.path.join('checkpoints', f'jetformer_best_epoch{epoch+1}.pt')
+                ckpt_path = os.path.join('checkpoints', 'best.pt')
                 save_checkpoint(
                     model=model,
                     optimizer=optimizer,
@@ -339,22 +324,21 @@ def train_from_config(config_dict: dict):
                     extra_fields={'best_val_loss': best_val_loss},
                 )
 
-    print("Training completed!")
-    # Save final checkpoint at end of training
-    try:
+        # Always save/overwrite rolling last checkpoint at end of each epoch
         if is_main_process:
-            final_ckpt_path = 'jetformer_final.pt'
+            last_ckpt_path = os.path.join('checkpoints', 'last.pt')
             save_checkpoint(
                 model=model,
                 optimizer=optimizer,
                 scheduler=scheduler,
-                epoch=(config.num_epochs - 1 if hasattr(config, 'num_epochs') else 0),
-                ckpt_path=final_ckpt_path,
+                epoch=epoch,
+                ckpt_path=last_ckpt_path,
                 wb_run=wb_run,
                 config_dict=(dict(wandb.config) if wb_run is not None else config_dict),
             )
-    except Exception:
-        pass
+
+    print("Training completed!")
+    # Final checkpoint is already covered by the rolling 'last.pt' saved each epoch.
     if is_main_process and wb_run is not None:
         wandb.finish()
     accelerator.cleanup()

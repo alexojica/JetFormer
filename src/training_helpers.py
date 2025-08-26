@@ -753,6 +753,13 @@ def save_checkpoint(model: torch.nn.Module,
                     extra_fields: Optional[Dict[str, Any]] = None) -> None:
     """Save a training checkpoint to ckpt_path and register with W&B when active."""
     model_to_save = unwrap_model(model)
+    # Ensure directory exists
+    try:
+        dirn = os.path.dirname(ckpt_path)
+        if dirn:
+            os.makedirs(dirn, exist_ok=True)
+    except Exception:
+        pass
     checkpoint = {
         'model_state_dict': model_to_save.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
