@@ -14,7 +14,7 @@ jet_emb_dim: 512           # block width
 jet_num_heads: 8
 flow_actnorm: true
 flow_invertible_dense: true
-pre_factor_dim: 128
+pre_factor_dim: 32
 
 # AR Transformer (Gemma-style)
 d_model: 512
