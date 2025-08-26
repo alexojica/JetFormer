@@ -321,9 +321,9 @@ def set_model_total_steps(model: torch.nn.Module, total_steps: int) -> None:
 def create_optimizer(model: torch.nn.Module, config: SimpleNamespace) -> torch.optim.Optimizer:
     """Create an AdamW optimizer with sensible defaults and fused=True when available."""
     try:
-        return torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=0.0001, betas=(0.9, 0.95), fused=True)
+        return torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=0.01, betas=(0.9, 0.95), fused=True)
     except TypeError:
-        return torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=0.0001, betas=(0.9, 0.95))
+        return torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=0.01, betas=(0.9, 0.95))
 
 
 def resume_optimizer_from_ckpt(optimizer: torch.optim.Optimizer, ckpt: Optional[Dict[str, Any]]) -> None:
@@ -385,7 +385,7 @@ def evaluate_one_epoch(model_obj: torch.nn.Module, loader: DataLoader, accelerat
         bsz = batch['image'].size(0)
         sum_total += float(out.get('loss', 0.0)) * bsz
         sum_text += float(out.get('text_loss', 0.0)) * bsz
-        # Use unmasked image bits/dim for accurate NLL/BPD reporting
+        # Use forward-returned metrics directly
         sum_img += float(out.get('image_bpd_total', out.get('image_loss', 0.0))) * bsz
         sum_flow += float(out.get('flow_bpd_component', 0.0)) * bsz
         count += bsz

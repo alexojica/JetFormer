@@ -69,11 +69,16 @@ class WBLogger:
             "train/nll_nats": float(out.get('total_nll_nats', float('nan'))),
             "train/ar_nll_nats": float(out.get('ar_nll_nats', float('nan'))),
             "train/flow_neg_logdet_nats": float(out.get('flow_neg_logdet_nats', float('nan'))),
-            # Raw AR log-likelihood (nats)
-            "train/image_loglik": float(out.get('image_loglik_nats', 0.0)),
+            # Log-likelihoods (nats)
+            "train/ar_log_pz_nats": float(out.get('ar_log_pz_nats', float('nan'))),
+            "train/total_log_px_nats": float(out.get('total_log_px_nats', float('nan'))),
             # Text
             "train/text_ce": text_ce,
             "train/text_ppl": text_ppl,
+            "train/text_loss_masked": float(out.get('text_loss_masked', text_ce)),
+            "train/image_loss_masked": float(out.get('image_loss_masked', out.get('image_bpd_total', 0.0))),
+            "train/text_loss_unmasked": float(out.get('text_loss_unmasked', float('nan'))),
+            "train/text_ce_denom": float(out.get('text_ce_denom', float('nan'))),
             # Curriculum & noise
             "train/sigma_rgb": float(out.get('sigma_rgb', 0.0)),
             "train/sigma_rgb_final": float(getattr(self.cfg, 'rgb_sigma_final', 3.0)),
@@ -98,14 +103,20 @@ class WBLogger:
         except Exception:
             pass
 
-    def log_validation_epoch(self, v_total: float, v_text: float, v_img_bpd: float, v_flow_bpd: float, epoch: int, step: int):
+    def log_validation_epoch(self, model, v_total: float, v_text: float, v_img_bpd: float, v_flow_bpd: float, epoch: int, step: int):
         if not self.enabled:
             return
         text_ppl = float(math.exp(min(30.0, v_text))) if v_text > 0 else 0.0
-        # Recover NLL in nats from BPD when image dims are known
+        # Recover NLL in nats from BPD using actual model input size
+        base = model
+        if hasattr(base, 'module'):
+            base = base.module
         C = 3
-        H = int(getattr(self.cfg, 'input_size', (256,256))[0])
-        W = int(getattr(self.cfg, 'input_size', (256,256))[1])
+        try:
+            H, W = int(base.input_size[0]), int(base.input_size[1])
+        except Exception:
+            H = int(getattr(self.cfg, 'input_size', (256,256))[0])
+            W = int(getattr(self.cfg, 'input_size', (256,256))[1])
         dim_x = float(C * H * W)
         val_total_nll = float(v_img_bpd) * math.log(2.0) * dim_x
         val_flow_neg_logdet = float(v_flow_bpd) * math.log(2.0) * dim_x

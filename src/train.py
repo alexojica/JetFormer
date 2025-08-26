@@ -53,6 +53,51 @@ from src.accelerators import GPUAccelerator, TPUAccelerator, HAS_TPU as _HAS_TPU
 IMAGE_SIZE = (256, 256, 3)
 
 
+class ExponentialMovingAverage:
+    def __init__(self, model, decay: float = 0.9999):
+        self.decay = float(decay)
+        self.shadow = {}
+        for name, param in unwrap_base_model(model).named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.detach().clone().float()
+
+    @torch.no_grad()
+    def update(self, model):
+        base = unwrap_base_model(model)
+        for name, param in base.named_parameters():
+            if not param.requires_grad:
+                continue
+            if name not in self.shadow:
+                self.shadow[name] = param.detach().clone().float()
+            else:
+                self.shadow[name].mul_(self.decay).add_(param.detach().float(), alpha=(1.0 - self.decay))
+
+    def state_dict(self):
+        return {k: v.cpu() for k, v in self.shadow.items()}
+
+    def load_state_dict(self, state):
+        self.shadow = {k: v.clone() for k, v in state.items()}
+
+    @torch.no_grad()
+    def apply_to(self, model):
+        base = unwrap_base_model(model)
+        self._backup = {}
+        for name, param in base.named_parameters():
+            if name in self.shadow:
+                self._backup[name] = param.detach().clone()
+                param.data.copy_(self.shadow[name].to(param.dtype).to(param.device))
+
+    @torch.no_grad()
+    def restore(self, model):
+        base = unwrap_base_model(model)
+        if not hasattr(self, '_backup'):
+            return
+        for name, param in base.named_parameters():
+            if name in self._backup:
+                param.data.copy_(self._backup[name])
+        self._backup = {}
+
+
 def train_from_config(config_dict: dict):
     # Accelerator + process setup
     cfg_raw = dict(config_dict or {})
@@ -143,9 +188,24 @@ def train_from_config(config_dict: dict):
     total_steps = len(dataloader) * config.num_epochs
     # Initialize training step and model's internal step counter when resuming
     step = initialize_step_from_ckpt(model, len(dataloader), start_epoch, device_obj, _loaded_ckpt)
+    # Initialize EMA and restore if present
+    ema = ExponentialMovingAverage(model, decay=0.9999)
+    try:
+        if _loaded_ckpt is not None and 'ema_state_dict' in _loaded_ckpt:
+            ema.load_state_dict(_loaded_ckpt['ema_state_dict'])
+    except Exception:
+        pass
     
-    # Remove OneCycle to align closer with paper defaults; keep constant LR unless configured
-    scheduler = None
+    # Warmup to 2e-4 then cosine decay (paper-style); global batch may differ
+    init_lr = float(getattr(config, 'learning_rate', 2e-4) or 2e-4)
+    warmup_pct = float(getattr(config, 'warmup_percent', 0.03))
+    warmup_steps = int(max(1, total_steps) * warmup_pct)
+    def _lr_lambda(step_idx):
+        if warmup_steps > 0 and step_idx < warmup_steps:
+            return float(step_idx) / float(max(1, warmup_steps))
+        progress = float(step_idx - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        return 0.5 * (1.0 + math.cos(math.pi * max(0.0, min(1.0, progress))))
+    scheduler = optim.lr_scheduler.LambdaLR(optimizer, _lr_lambda)
     
     # AMP scaler (enabled for fp16 on CUDA, no-op otherwise)
     scaler = accelerator.create_grad_scaler(enabled=True)
@@ -162,9 +222,10 @@ def train_from_config(config_dict: dict):
         v_total, v_text, v_img, v_flow = evaluate_one_epoch(model, val_loader, accelerator)
         print(f"Initial Val — total: {v_total:.4f} | text: {v_text:.4f} | img: {v_img:.4f}")
         if wb_run is not None:
-            wb_logger.log_validation_epoch(v_total, v_text, v_img, v_flow, epoch=0, step=0)
-            # Sampling at initial validation (dataset-aware)
+            wb_logger.log_validation_epoch(model, v_total, v_text, v_img, v_flow, epoch=0, step=0)
+            # Sampling at initial validation (dataset-aware) with EMA weights
             try:
+                ema.apply_to(model)
                 base = unwrap_base_model(model)
                 generate_and_log_samples(
                     base_model=base,
@@ -179,6 +240,8 @@ def train_from_config(config_dict: dict):
                 )
             except Exception as e:
                 print(f"Sampling at initial validation failed: {e}")
+            finally:
+                ema.restore(model)
         best_val_loss = v_total
 
     for epoch in range(int(start_epoch), int(config.num_epochs)):
@@ -196,6 +259,9 @@ def train_from_config(config_dict: dict):
 
         iterable = accelerator.wrap_dataloader(dataloader, is_train=True) if hasattr(accelerator, 'wrap_dataloader') else dataloader
         progress_bar = tqdm(iterable, desc=f"Train Epoch {epoch+1}/{config.num_epochs}", total=len(dataloader), leave=True) if is_main_process else iterable
+        ema = locals().get('ema', None)
+        if ema is None:
+            ema = ExponentialMovingAverage(model, decay=0.9999)
         for batch_idx, batch in enumerate(progress_bar):
             start_time = time.time()
 
@@ -220,6 +286,8 @@ def train_from_config(config_dict: dict):
                 scaler.step(optimizer)
                 scaler.update()
                 scheduler.step()
+            # EMA update after each optimizer step
+            ema.update(model)
 
             epoch_losses['total'] += loss.item()
             epoch_losses['text'] += float(out.get('text_loss', 0.0))
@@ -252,6 +320,7 @@ def train_from_config(config_dict: dict):
                 
                 print("Generating samples for wandb logging...")
                 try:
+                    ema.apply_to(model)
                     base = unwrap_base_model(model)
                     generate_and_log_samples(
                         base_model=base,
@@ -269,6 +338,8 @@ def train_from_config(config_dict: dict):
                     print(f"Failed to generate samples: {e}")
                     import traceback
                     traceback.print_exc()
+                finally:
+                    ema.restore(model)
                 
             step += 1
             # Maintain model's internal step counter outside compiled regions
@@ -287,11 +358,12 @@ def train_from_config(config_dict: dict):
             v_total, v_text, v_img, v_flow = evaluate_one_epoch(model, val_loader, accelerator)
             print(f"Val Epoch {epoch+1} — total: {v_total:.4f} | text: {v_text:.4f} | img: {v_img:.4f}")
             if wb_run is not None:
-                wb_logger.log_validation_epoch(v_total, v_text, v_img, v_flow, epoch=epoch+1, step=step)
+                wb_logger.log_validation_epoch(model, v_total, v_text, v_img, v_flow, epoch=epoch+1, step=step)
                 # Optional sampling at epoch granularity
                 try:
                     see = int(getattr(config, 'sample_every_epochs', 0) or 0)
                     if see > 0 and ((epoch + 1) % see == 0):
+                        ema.apply_to(model)
                         base = unwrap_base_model(model)
                         generate_and_log_samples(
                             base_model=base,
@@ -306,6 +378,9 @@ def train_from_config(config_dict: dict):
                         )
                 except Exception as e:
                     print(f"Sampling at validation failed: {e}")
+                finally:
+                    if see > 0 and ((epoch + 1) % see == 0):
+                        ema.restore(model)
             # Save checkpoint every 5 epochs if validation improves
             improved = v_total < best_val_loss
             if improved:
@@ -319,7 +394,7 @@ def train_from_config(config_dict: dict):
                     ckpt_path=ckpt_path,
                     wb_run=wb_run,
                     config_dict=(dict(wandb.config) if wb_run is not None else config_dict),
-                    extra_fields={'best_val_loss': best_val_loss},
+                    extra_fields={'best_val_loss': best_val_loss, 'ema_state_dict': ema.state_dict()},
                 )
 
         # Always save/overwrite rolling last checkpoint at end of each epoch
@@ -333,6 +408,7 @@ def train_from_config(config_dict: dict):
                 ckpt_path=last_ckpt_path,
                 wb_run=wb_run,
                 config_dict=(dict(wandb.config) if wb_run is not None else config_dict),
+                extra_fields={'ema_state_dict': ema.state_dict()},
             )
 
     print("Training completed!")

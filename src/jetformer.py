@@ -581,7 +581,8 @@ class JetFormerTrain(JetFormer):
             # Clamp to a minimum final noise level as per paper (0 for ImageNet, 3 for multimodal)
             sigma_t = torch.clamp_min(sigma_t, self.rgb_sigma_final)
         gaussian = torch.randn_like(images01) * (sigma_t / 255.0)
-        images01_noisy = torch.clamp(images01 + u + gaussian, 0.0, 1.0)
+        # Dequantization: do not clamp after adding Gaussian noise
+        images01_noisy = images01 + u + gaussian
 
         # Flow encode
         x_nhwc = images01_noisy.permute(0, 2, 3, 1).contiguous()
@@ -614,22 +615,45 @@ class JetFormerTrain(JetFormer):
         residual_nll = self.gaussian_residual_nll(residual_tokens)
         C, H, W = 3, self.input_size[0], self.input_size[1]
         denom = (H * W * C) * math.log(2.0)
+        # Discrete dequantization constant (+ ln 256 per dimension)
+        const = (H * W * C) * math.log(256.0)
         # Bits/dim decomposition: flow term contributes -log_det
-        total_nll = gmm_nll + residual_nll - log_det
+        total_nll = gmm_nll + residual_nll - log_det + const
         flow_bpd_per_sample = (-log_det) / denom
-        ar_bpd_per_sample = (gmm_nll + residual_nll) / denom
+        ar_bpd_per_sample = (gmm_nll + residual_nll + const) / denom
         image_bpd_per_sample = total_nll / denom
         image_loss = (image_bpd_per_sample * text_first_mask.float()).mean()
 
         total_loss = (self.text_loss_weight * text_loss) + (self.image_loss_weight * image_loss)
         # Diagnostics
         with torch.no_grad():
-            image_loglik_nats = (-gmm_nll).mean()
+            # Clear naming for log-likelihoods
+            ar_log_pz_nats = -(gmm_nll + residual_nll).mean()
+            total_log_px_nats = -total_nll.mean()
             small_scales_rate = (scales < 1e-4).float().mean()
+            # Text CE denominator sanity check and unmasked text CE (masked over pads only)
+            if class_ids is not None:
+                text_ce_denom = torch.tensor(0.0, device=device)
+                text_loss_unmasked = torch.tensor(0.0, device=device)
+            else:
+                B, T, V = text_logits.shape
+                logits_flat = text_logits.reshape(B * T, V)
+                tokens_flat = text_tokens.reshape(B * T)
+                ce_all = F.cross_entropy(logits_flat, tokens_flat, reduction='none').view(B, T)
+                # Denominator used in cross_entropy_second_only (pads masked, text second only)
+                mask_used = text_loss_mask.float() * text_second_mask.float().unsqueeze(1)
+                text_ce_denom = mask_used.sum().clamp_min(1.0)
+                text_loss_unmasked = (ce_all * text_loss_mask.float()).sum() / text_loss_mask.float().sum().clamp_min(1.0)
         return {
             "loss": total_loss,
             "text_loss": text_loss.detach(),
             "image_loss": image_loss.detach(),
+            # Masked losses (the ones optimized)
+            "image_loss_masked": image_loss.detach(),
+            "text_loss_masked": text_loss.detach(),
+            # Unmasked text CE (pads-only mask), for sanity
+            "text_loss_unmasked": text_loss_unmasked.detach(),
+            "text_ce_denom": text_ce_denom.detach(),
             "flow_bpd_component": flow_bpd_per_sample.mean().detach(),
             "ar_bpd_component": ar_bpd_per_sample.mean().detach(),
             "image_bpd_total": image_bpd_per_sample.mean().detach(),
@@ -639,7 +663,8 @@ class JetFormerTrain(JetFormer):
             "total_nll_nats": total_nll.mean().detach(),
             "ar_nll_nats": (gmm_nll + residual_nll).mean().detach(),
             "flow_neg_logdet_nats": (-log_det).mean().detach(),
-            "image_loglik_nats": image_loglik_nats.detach(),
+            "ar_log_pz_nats": ar_log_pz_nats.detach(),
+            "total_log_px_nats": total_log_px_nats.detach(),
             "gmm_small_scales_rate": small_scales_rate.detach(),
             "sigma_rgb": sigma_t.detach(),
         }
