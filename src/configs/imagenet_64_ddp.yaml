@@ -37,7 +37,7 @@ dataset: imagenet64_kaggle
 kaggle_dataset_id: "ayaroshevskiy/downsampled-imagenet-64x64"
 
 # Optimization / curriculum
-batch_size: 1024
+batch_size: 768
 learning_rate: 0.001           # AdamW w/ decoupled WD assumed
 weight_decay: 0.0001
 opt_b1: 0.9
@@ -60,7 +60,7 @@ grad_accum_steps: 1
 
 # Epoch-level schedules
 sample_every_epochs: 1
-val_every_epochs: 1            # see progress every epoch
+val_every_epochs: 5            # see progress every epoch
 
 # Evaluation controls
 eval_no_rgb_noise: true        # ensure σ=0 at validation to see “true” NLL/BPD
