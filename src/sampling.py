@@ -74,7 +74,16 @@ def generate_text_to_image_samples(model, dataset, device, num_samples: int = 3,
 
 
 @torch.no_grad()
-def generate_text_to_image_samples_cfg(model, dataset, device, num_samples: int = 3, cfg_strength: float = 4.0, cfg_mode: str = "reject", fast_mixture_first: bool = False):
+def generate_text_to_image_samples_cfg(
+    model,
+    dataset,
+    device,
+    num_samples: int = 3,
+    cfg_strength: float = 4.0,
+    cfg_mode: str = "reject",
+    prompts: list | None = None,
+    fast_mixture_first: bool = False,
+):
     model.eval()
     samples = []
 
@@ -100,7 +109,18 @@ def generate_text_to_image_samples_cfg(model, dataset, device, num_samples: int 
         normal = torch.distributions.Normal(sel_means, sel_scales)
         return normal.sample()
 
-    prompt_texts = ["a car", "a cat", "a dog"]
+    default_prompts = [
+        "a car", "a cat", "a dog", "a house", "a mountain", "a city",
+        "a landscape", "a person", "a bird", "a flower",
+    ]
+    if prompts is None or len(prompts) == 0:
+        # Repeat defaults to reach requested num_samples
+        reps = (max(1, num_samples) + len(default_prompts) - 1) // len(default_prompts)
+        prompt_texts = (default_prompts * reps)[: max(1, num_samples)]
+    else:
+        # Ensure we have at least num_samples prompts by repeating the provided list
+        reps = (max(1, num_samples) + len(prompts) - 1) // len(prompts)
+        prompt_texts = (list(prompts) * reps)[: max(1, num_samples)]
     is_class_conditional = bool(getattr(model, 'num_classes', None)) and getattr(model, 'num_classes') > 0
 
     for i, prompt_text in enumerate(prompt_texts[:num_samples]):

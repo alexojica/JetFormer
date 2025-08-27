@@ -316,3 +316,177 @@ def save_checkpoint(model: torch.nn.Module,
     return save_checkpoint_util(model, optimizer, scheduler, epoch, ckpt_path, wb_run, config_dict, extra_fields)
 
 
+# ----------------------------
+# FID / IS utilities
+# ----------------------------
+
+def _ensure_dir(path: str) -> None:
+    try:
+        os.makedirs(path, exist_ok=True)
+    except Exception:
+        pass
+
+
+def _save_pil_images_to_dir(images: List[Image.Image], out_dir: str, prefix: str = "img") -> int:
+    _ensure_dir(out_dir)
+    count = 0
+    for i, img in enumerate(images):
+        try:
+            img.save(os.path.join(out_dir, f"{prefix}_{i:05d}.png"))
+            count += 1
+        except Exception:
+            continue
+    return count
+
+
+@torch.no_grad()
+def _save_real_images_from_loader(val_loader, out_dir: str, target_count: int) -> int:
+    _ensure_dir(out_dir)
+    saved = 0
+    for batch in val_loader:
+        if saved >= target_count:
+            break
+        images = batch.get("image") if isinstance(batch, dict) else None
+        if images is None:
+            continue
+        # Expect CHW tensors in either uint8 [0,255] or float [-1,1] / [0,1]
+        if images.dtype != torch.uint8:
+            # Assume [-1,1] or [0,1]
+            img = images
+            if img.min() < 0.0:
+                img = (img + 1.0) * 0.5
+            img = (img * 255.0).clamp(0, 255).to(torch.uint8)
+        else:
+            img = images
+        img = img.cpu()
+        b = img.shape[0]
+        for i in range(b):
+            if saved >= target_count:
+                break
+            try:
+                chw = img[i]
+                hwc = chw.permute(1, 2, 0).contiguous().numpy()
+                Image.fromarray(hwc).save(os.path.join(out_dir, f"real_{saved:05d}.png"))
+                saved += 1
+            except Exception:
+                continue
+    return saved
+
+
+def _compute_fid_and_is(generated_dir: str,
+                        ref_dir: Optional[str],
+                        want_fid: bool,
+                        want_is: bool) -> Dict[str, float]:
+    metrics: Dict[str, float] = {}
+    # FID via clean-fid first, fallback to torch-fidelity
+    if want_fid:
+        fid_score = None
+        try:
+            import cleanfid
+            if ref_dir is not None and os.path.isdir(ref_dir):
+                fid_score = cleanfid.compute_fid(generated_dir, ref_dir, mode='clean')
+        except Exception:
+            try:
+                from torch_fidelity import calculate_metrics
+                tm = calculate_metrics(
+                    generated_dir,
+                    ref_dir if (ref_dir and os.path.isdir(ref_dir)) else None,
+                    cuda=torch.cuda.is_available(),
+                    isc=False,
+                    kid=False,
+                    fid=True,
+                )
+                fid_score = float(tm.get('frechet_inception_distance', tm.get('fid', None)))
+            except Exception:
+                fid_score = None
+        if fid_score is not None:
+            metrics["fid"] = float(fid_score)
+
+    if want_is:
+        is_mean = None
+        is_std = None
+        try:
+            from torch_fidelity import calculate_metrics
+            tm = calculate_metrics(
+                generated_dir,
+                None,
+                cuda=torch.cuda.is_available(),
+                isc=True,
+                kid=False,
+                fid=False,
+            )
+            # torch-fidelity uses these keys
+            is_mean = float(tm.get('inception_score_mean', tm.get('isc_mean', None)))
+            is_std = float(tm.get('inception_score_std', tm.get('isc_std', None)))
+        except Exception:
+            is_mean = None
+            is_std = None
+        if is_mean is not None:
+            metrics["is_mean"] = is_mean
+        if is_std is not None:
+            metrics["is_std"] = is_std
+
+    return metrics
+
+
+@torch.no_grad()
+def compute_and_log_fid_is(
+    base_model,
+    dataset,
+    val_loader,
+    device: torch.device,
+    num_samples: int,
+    compute_fid: bool,
+    compute_is: bool,
+    step: int,
+    epoch: int,
+    cfg_strength: float = 4.0,
+    cfg_mode: str = "reject",
+) -> Dict[str, float]:
+    """Generate samples, gather real images, compute FID/IS, and log to W&B.
+
+    Returns a dict of computed metrics.
+    """
+    if (not compute_fid) and (not compute_is):
+        return {}
+
+    gen_root = os.path.join("eval_metrics", f"epoch_{epoch+1:04d}")
+    gen_dir = os.path.join(gen_root, "generated")
+    real_dir = os.path.join(gen_root, "real")
+    _ensure_dir(gen_dir)
+    _ensure_dir(real_dir)
+
+    # Generate images from the model (class-conditional or T2I depending on dataset)
+    samples = generate_text_to_image_samples_cfg(
+        base_model,
+        dataset,
+        device,
+        num_samples=int(num_samples),
+        cfg_strength=float(cfg_strength),
+        cfg_mode=str(cfg_mode),
+        prompts=None,
+    )
+    gen_images = [s.get('image') for s in samples if isinstance(s, dict) and s.get('image') is not None]
+    _save_pil_images_to_dir(gen_images, gen_dir, prefix="gen")
+
+    # Collect real images from validation loader
+    _save_real_images_from_loader(val_loader, real_dir, int(num_samples))
+
+    metrics = _compute_fid_and_is(gen_dir, (real_dir if compute_fid else None), want_fid=compute_fid, want_is=compute_is)
+
+    # Log to W&B if available
+    log_payload: Dict[str, Any] = {"metrics/epoch": epoch + 1, "metrics/num_samples": int(num_samples)}
+    if "fid" in metrics:
+        log_payload["metrics/fid"] = metrics["fid"]
+    if "is_mean" in metrics:
+        log_payload["metrics/is_mean"] = metrics["is_mean"]
+    if "is_std" in metrics:
+        log_payload["metrics/is_std"] = metrics["is_std"]
+    try:
+        if len(log_payload) > 0:
+            wandb.log(log_payload, step=step)
+    except Exception:
+        pass
+
+    return metrics
+

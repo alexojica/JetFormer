@@ -15,7 +15,6 @@ import torch.distributed as dist
 from src.wandb_utils import WBLogger
 from src.utils.optim import get_optimizer_and_scheduler as get_opt_sched
 from src.utils.config import normalize_config_keys
-from src.utils.ema import ExponentialMovingAverage
 from src.jetformer import JetFormerTrain
 from PIL import Image
 import torchvision.transforms as transforms
@@ -39,6 +38,7 @@ from src.training_helpers import (
     unwrap_model as unwrap_base_model,
     generate_and_log_samples,
     save_checkpoint,
+    compute_and_log_fid_is,
 )
 
 # Prefer CUDA graphs when using torch.compile reduce-overhead
@@ -177,13 +177,27 @@ def train_from_config(config_dict: dict):
     resume_optimizer_from_ckpt(optimizer, _loaded_ckpt)
     # Initialize training step and model's internal step counter when resuming
     step = initialize_step_from_ckpt(model, len(dataloader), start_epoch, device_obj, _loaded_ckpt)
-    # Initialize EMA and restore if present
-    ema = ExponentialMovingAverage(model, decay=0.9999)
-    try:
-        if _loaded_ckpt is not None and 'ema_state_dict' in _loaded_ckpt:
-            ema.load_state_dict(_loaded_ckpt['ema_state_dict'])
-    except Exception:
-        pass
+    # Initialize EMA only if enabled in config (paper parity: RAW by default)
+    ema_cfg = getattr(config, 'ema', {})
+    if not isinstance(ema_cfg, dict):
+        try:
+            ema_cfg = {
+                'enabled': bool(getattr(ema_cfg, 'enabled', False)),
+                'decay': float(getattr(ema_cfg, 'decay', 0.9999)),
+            }
+        except Exception:
+            ema_cfg = {}
+    ema_enabled = bool(ema_cfg.get('enabled', False))
+    ema_decay = float(ema_cfg.get('decay', 0.9999))
+    ema = None
+    if ema_enabled:
+        from src.utils.ema import ExponentialMovingAverage
+        ema = ExponentialMovingAverage(model, decay=ema_decay)
+        try:
+            if _loaded_ckpt is not None and 'ema_state_dict' in _loaded_ckpt:
+                ema.load_state_dict(_loaded_ckpt['ema_state_dict'])
+        except Exception:
+            pass
     
     # Scheduler is already created via get_opt_sched
     
@@ -203,9 +217,10 @@ def train_from_config(config_dict: dict):
         print(f"Initial Val — total: {v_total:.4f} | text: {v_text:.4f} | img: {v_img:.4f}")
         if wb_run is not None:
             wb_logger.log_validation_epoch(model, v_total, v_text, v_img, v_flow, epoch=0, step=0)
-            # Sampling at initial validation (dataset-aware) with EMA weights
+            # Sampling at initial validation (RAW by default; EMA swap only if enabled)
             try:
-                ema.apply_to(model)
+                if ema_enabled and ema is not None:
+                    ema.apply_to(model)
                 base = unwrap_base_model(model)
                 generate_and_log_samples(
                     base_model=base,
@@ -221,7 +236,8 @@ def train_from_config(config_dict: dict):
             except Exception as e:
                 print(f"Sampling at initial validation failed: {e}")
             finally:
-                ema.restore(model)
+                if ema_enabled and ema is not None:
+                    ema.restore(model)
         best_val_loss = v_total
 
     for epoch in range(int(start_epoch), int(config.num_epochs)):
@@ -240,8 +256,9 @@ def train_from_config(config_dict: dict):
         iterable = accelerator.wrap_dataloader(dataloader, is_train=True) if hasattr(accelerator, 'wrap_dataloader') else dataloader
         progress_bar = tqdm(iterable, desc=f"Train Epoch {epoch+1}/{config.num_epochs}", total=len(dataloader), leave=True) if is_main_process else iterable
         ema = locals().get('ema', None)
-        if ema is None:
-            ema = ExponentialMovingAverage(model, decay=0.9999)
+        if ema is None and ema_enabled:
+            from src.utils.ema import ExponentialMovingAverage
+            ema = ExponentialMovingAverage(model, decay=ema_decay)
         for batch_idx, batch in enumerate(progress_bar):
             start_time = time.time()
 
@@ -272,8 +289,9 @@ def train_from_config(config_dict: dict):
                     scaler.update()
                     if scheduler is not None:
                         scheduler.step()
-                # EMA update after each optimizer step
-                ema.update(model)
+                # EMA update after each optimizer step (gated)
+                if ema_enabled and ema is not None:
+                    ema.update(model)
                 took_step = True
 
             epoch_losses['total'] += loss.item()
@@ -307,7 +325,8 @@ def train_from_config(config_dict: dict):
                 
                 print("Generating samples for wandb logging...")
                 try:
-                    ema.apply_to(model)
+                    if ema_enabled and ema is not None:
+                        ema.apply_to(model)
                     base = unwrap_base_model(model)
                     generate_and_log_samples(
                         base_model=base,
@@ -326,7 +345,8 @@ def train_from_config(config_dict: dict):
                     import traceback
                     traceback.print_exc()
                 finally:
-                    ema.restore(model)
+                    if ema_enabled and ema is not None:
+                        ema.restore(model)
                 
             if took_step:
                 step += 1
@@ -351,7 +371,8 @@ def train_from_config(config_dict: dict):
                 try:
                     see = int(getattr(config, 'sample_every_epochs', 0) or 0)
                     if see > 0 and ((epoch + 1) % see == 0):
-                        ema.apply_to(model)
+                        if ema_enabled and ema is not None:
+                            ema.apply_to(model)
                         base = unwrap_base_model(model)
                         generate_and_log_samples(
                             base_model=base,
@@ -367,8 +388,41 @@ def train_from_config(config_dict: dict):
                 except Exception as e:
                     print(f"Sampling at validation failed: {e}")
                 finally:
-                    if see > 0 and ((epoch + 1) % see == 0):
+                    if see > 0 and ((epoch + 1) % see == 0) and (ema_enabled and ema is not None):
                         ema.restore(model)
+            # Periodic FID/IS computation after validation (EMA weights) based on flags
+            try:
+                fid_every = int(getattr(config, 'fid_every_epochs', 0) or 0)
+                is_every = int(getattr(config, 'is_every_epochs', 0) or 0)
+                do_fid = fid_every > 0 and (((epoch + 1) % fid_every) == 0)
+                do_is = is_every > 0 and (((epoch + 1) % is_every) == 0)
+                if (do_fid or do_is) and wb_run is not None:
+                    if ema_enabled and ema is not None:
+                        ema.apply_to(model)
+                    base = unwrap_base_model(model)
+                    num_eval_samples = int(getattr(config, 'fid_is_num_samples', 2048) or 2048)
+                    compute_and_log_fid_is(
+                        base_model=base,
+                        dataset=dataset,
+                        val_loader=val_loader,
+                        device=device_obj,
+                        num_samples=num_eval_samples,
+                        compute_fid=do_fid,
+                        compute_is=do_is,
+                        step=step,
+                        epoch=epoch,
+                        cfg_strength=float(getattr(config, 'cfg_strength', 4.0)),
+                        cfg_mode=str(getattr(config, 'cfg_mode', 'reject')),
+                    )
+            except Exception as e:
+                print(f"FID/IS computation failed: {e}")
+            finally:
+                try:
+                    if ema_enabled and ema is not None:
+                        ema.restore(model)
+                except Exception:
+                    pass
+
             # Save checkpoint every 5 epochs if validation improves
             improved = v_total < best_val_loss
             if improved:
@@ -388,7 +442,10 @@ def train_from_config(config_dict: dict):
                     ckpt_path=ckpt_path,
                     wb_run=wb_run,
                     config_dict=(dict(wandb.config) if wb_run is not None else config_dict),
-                    extra_fields={'best_val_loss': best_val_loss, 'ema_state_dict': ema.state_dict()},
+                    extra_fields=(
+                        {'best_val_loss': best_val_loss, 'ema_state_dict': ema.state_dict()} if (ema_enabled and ema is not None)
+                        else {'best_val_loss': best_val_loss}
+                    ),
                 )
 
         # Always save/overwrite rolling last checkpoint at end of each epoch
@@ -404,7 +461,7 @@ def train_from_config(config_dict: dict):
                 ckpt_path=last_ckpt_path,
                 wb_run=wb_run,
                 config_dict=(dict(wandb.config) if wb_run is not None else config_dict),
-                extra_fields={'ema_state_dict': ema.state_dict()},
+                extra_fields=(({'ema_state_dict': ema.state_dict()} if (ema_enabled and ema is not None) else {})),
             )
 
     print("Training completed!")
@@ -475,6 +532,10 @@ if __name__ == "__main__":
     parser.add_argument('--cfg_mode', type=str, default=None, choices=['reject','interp'])
     parser.add_argument('--log_every_batches', type=int, default=None)
     parser.add_argument('--sample_every_batches', type=int, default=None)
+    # FID / IS
+    parser.add_argument('--fid_every_epochs', type=int, default=None)
+    parser.add_argument('--is_every_epochs', type=int, default=None)
+    parser.add_argument('--fid_is_num_samples', type=int, default=None)
     # Eval/data flags
     parser.add_argument('--eval_no_rgb_noise', type=str, default=None, choices=['true','false'])
     parser.add_argument('--random_flip_prob', type=float, default=None)
