@@ -148,11 +148,6 @@ class GPUAccelerator:
                 find_unused_parameters=True,
             )
             return _attach_passthroughs(wrapped, model)
-        elif self.device.type == 'cuda' and torch.cuda.device_count() > 1:
-            wrapped = nn.DataParallel(model.to(self.device))
-            # DataParallel keeps the original in .module
-            inner = wrapped.module if hasattr(wrapped, 'module') else model
-            return _attach_passthroughs(wrapped, inner)
         else:
             return model.to(self.device)
 
