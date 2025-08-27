@@ -30,7 +30,7 @@ import tensorflow_datasets as tfds
 import torchvision
 import torchvision.transforms as T
 import numpy as np
-from PIL import Image # For loading images from files
+from PIL import Image, ImageOps # For loading images and simple flips
 import kagglehub # For the new download method
 
 # Suppress TFDS info messages if desired
@@ -137,135 +137,11 @@ class TFDSImagenet32(TFDSImagenet):
         super().__init__(resolution=32, **kwargs)
 
 
-class KaggleImageFolderImagenet(Dataset):
-    """A PyTorch Dataset that downloads and loads an ImageFolder-style dataset from Kaggle."""
-
-    def __init__(self,
-                 split: str = 'train',  # 'train' or 'val'
-                 resolution: int = 64,
-                 kaggle_dataset_id: str = "ayaroshevskiy/downsampled-imagenet-64x64",
-                 max_samples: Optional[int] = None,
-                 random_subset_seed: Optional[int] = None):
-        """Initializes the dataset, downloading and scanning it from Kaggle."""
-        super().__init__()
-        if split not in {"train", "val", "validation"}:
-            raise ValueError("split must be 'train' or 'val'.")
-        if split == "validation":
-            split = "val"
-        self.split = split
-        self.resolution = resolution
-        self.kaggle_dataset_id = kaggle_dataset_id
-        self.max_samples = max_samples
-        self.random_subset_seed = random_subset_seed
-
-        # Will populate:
-        self.samples: List[Tuple[pathlib.Path, int]] = []  # (img_path, class_idx)
-        self.classes: List[str] = []
-        self.class_to_idx: Dict[str, int] = {}
-
-        self._download_and_scan()
-
-        if not self.samples:
-            raise RuntimeError(f"No images found for split '{self.split}' in Kaggle dataset '{self.kaggle_dataset_id}'.")
-
-        if self.max_samples is not None:
-            # If a seed is provided, shuffle the dataset for a consistent random subset
-            if self.random_subset_seed is not None:
-                print(f"Shuffling dataset with seed {self.random_subset_seed} before taking a subset of {self.max_samples} samples.")
-                random.Random(self.random_subset_seed).shuffle(self.samples)
-            
-            self.samples = self.samples[: self.max_samples]
-
-    def _download_and_scan(self):
-        """Downloads the dataset from Kaggle and scans the directory to find image samples."""
-        print(f"Attempting to download '{self.kaggle_dataset_id}' using kagglehub...")
-        download_root = pathlib.Path(kagglehub.dataset_download(self.kaggle_dataset_id))
-        print(f"Kagglehub download completed. Content cached at: {download_root}")
-
-        # Potential locations of the split directory
-        candidate_split_dirs: List[pathlib.Path] = []
-
-        # 1. Directly under download_root / split
-        candidate_split_dirs.append(download_root / self.split)
-
-        # 2. Download root / dataset_slug / split
-        dataset_slug = self.kaggle_dataset_id.split('/')[-1]
-        candidate_split_dirs.append(download_root / dataset_slug / self.split)
-
-        # 3. Sometimes 'validation' is used instead of 'val'
-        if self.split == 'val':
-            candidate_split_dirs.append(download_root / 'validation')
-            candidate_split_dirs.append(download_root / dataset_slug / 'validation')
-
-        # Select the first directory that exists and contains subdirectories (classes)
-        split_dir = None
-        for cand in candidate_split_dirs:
-            if cand.is_dir() and any(p.is_dir() for p in cand.iterdir()):
-                split_dir = cand
-                break
-        if split_dir is None:
-            # Fallback: recursively search for a directory whose name contains the split string (e.g. 'train')
-            possible_dirs = [d for d in download_root.rglob('*') if d.is_dir() and self.split in d.name.lower()]
-            for cand in possible_dirs:
-                # Check if this directory directly contains images OR contains subdirs with images
-                has_images = any(p.suffix.lower() in _IMAGE_EXTS for p in cand.rglob('*'))
-                if has_images:
-                    split_dir = cand
-                    break
-
-        if split_dir is None:
-            raise FileNotFoundError(
-                f"Could not locate '{self.split}' data in downloaded dataset structure under {download_root}. Searched recursively but found no directory with images.")
-
-        print(f"Using split directory: {split_dir}")
-
-        # Determine if class subdirectories exist
-        subdirs = [d for d in split_dir.iterdir() if d.is_dir()]
-        if subdirs and all(any((p.suffix.lower() in _IMAGE_EXTS) for p in sd.rglob('*')) for sd in subdirs):
-            # Treat each subdir as a class
-            self.classes = sorted([d.name for d in subdirs])
-            self.class_to_idx = {cls_name: i for i, cls_name in enumerate(self.classes)}
-            for cls_name in self.classes:
-                cls_dir = split_dir / cls_name
-                cls_idx = self.class_to_idx[cls_name]
-                for img_path in cls_dir.rglob('*'):
-                    if img_path.suffix.lower() in _IMAGE_EXTS:
-                        self.samples.append((img_path, cls_idx))
-        else:
-            # No class folders – treat all images in split_dir (recursively) as a single class 0
-            self.classes = ['unknown']
-            self.class_to_idx = {'unknown': 0}
-            for img_path in split_dir.rglob('*'):
-                if img_path.suffix.lower() in _IMAGE_EXTS:
-                    self.samples.append((img_path, 0))
-
-        print(f"Found {len(self.samples)} images across {len(self.classes)} class folders for split '{self.split}'.")
-
-    def __len__(self):
-        """Returns the total number of samples in the dataset."""
-        return len(self.samples)
-
-    def __getitem__(self, idx: int) -> Dict[str, Any]:
-        """Retrieves an image and its corresponding label from the dataset."""
-        img_path, target_class_idx = self.samples[idx]
-        try:
-            img = Image.open(img_path).convert('RGB')
-        except Exception as e:
-            print(f"Error loading image {img_path}: {e}. Returning a placeholder.")
-            img_tensor = torch.zeros((3, self.resolution, self.resolution), dtype=torch.uint8)
-            label_tensor = torch.tensor(-1, dtype=torch.long)
-            return {"image": img_tensor, "label": label_tensor}
-
-        # Geometric preprocessing: resize shorter side -> resolution (keep aspect), then center-crop to square
-        from src.utils.image import aspect_preserving_resize_and_center_crop
-        img = aspect_preserving_resize_and_center_crop(img, self.resolution)
-        img_np = np.array(img, dtype=np.uint8)
-        img_tensor = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()
-        label_tensor = torch.tensor(target_class_idx, dtype=torch.long)
-        return {"image": img_tensor, "label": label_tensor}
+# Use the centralized implementation to avoid duplication
+from src.datasets.imagenet_kaggle import KaggleImageFolderImagenet  # noqa: E402
 
 
-# Allowed image extensions
+# Allowed image extensions (used by ImageNet21kFolder below)
 _IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tif', '.tiff'}
 
 # For backwards compatibility
