@@ -37,7 +37,7 @@ dataset: imagenet64_kaggle
 kaggle_dataset_id: "ayaroshevskiy/downsampled-imagenet-64x64"
 
 # Optimization / curriculum
-batch_size: 48
+batch_size: 1024
 learning_rate: 0.001           # AdamW w/ decoupled WD assumed
 weight_decay: 0.0001
 opt_b1: 0.9
@@ -45,7 +45,7 @@ opt_b2: 0.95
 grad_clip_norm: 1.0
 num_epochs: 200
 precision: bf16
-distributed: false
+distributed: true
 torch_compile: false
 grad_checkpoint_transformer: false
 flow_grad_checkpoint: false
@@ -66,7 +66,7 @@ val_every_epochs: 1            # see progress every epoch
 eval_no_rgb_noise: true        # ensure σ=0 at validation to see “true” NLL/BPD
 
 # Dataloader / augmentation
-num_workers: 8
+num_workers: 16
 max_samples: null
 ignore_pad: false
 random_flip_prob: 0.5          # horizontal flip probability for ImageNet train set

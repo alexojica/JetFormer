@@ -63,7 +63,7 @@ def train_from_config(config_dict: dict):
     cfg_raw = dict(config_dict or {})
     cfg_raw.setdefault('accelerator', 'auto')
     cfg_raw.setdefault('device', 'auto')
-    cfg_raw.setdefault('precision', 'tf32')
+    cfg_raw.setdefault('precision', 'bf16')
     cfg_raw.setdefault('distributed', False)
 
     accelerator = build_accelerator(cfg_raw)
@@ -451,7 +451,7 @@ if __name__ == "__main__":
     parser.add_argument('--device', type=str, default=None, choices=['auto','cpu','cuda','mps'])
     parser.add_argument('--accelerator', type=str, default=None, choices=['auto','gpu','tpu'])
     parser.add_argument('--distributed', type=str, default=None, choices=['true','false'])
-    parser.add_argument('--precision', type=str, default=None, choices=['auto','fp32','fp16','bf16','tf32'])
+    parser.add_argument('--precision', type=str, default='bf16', choices=['auto','fp32','fp16','bf16','tf32'])
     parser.add_argument('--grad_accum_steps', type=int, default=None)
     # Dataset
     parser.add_argument('--dataset', type=str, default=None, choices=['laion_pop','imagenet64_kaggle','imagenet21k_folder'])

@@ -571,7 +571,14 @@ class JetFormerTrain(JetFormer):
         else:
             # Keep in graph: avoid .item()/int() and use tensor math
             step_val = self._step.to(dtype=torch.float32)
-            t_prog = torch.clamp(step_val / max(1, self.total_steps), min=0.0, max=1.0)
+            # If a custom noise schedule length is provided (via train loop buffer), use it; otherwise fall back to total_steps
+            denom = torch.tensor(float(max(1, self.total_steps)), device=device, dtype=torch.float32)
+            nts = getattr(self, 'noise_total_steps', None)
+            if isinstance(nts, torch.Tensor):
+                ntsf = nts.to(device=device, dtype=torch.float32)
+                # Use nts when positive; otherwise keep default denom
+                denom = torch.where(ntsf > 0.0, ntsf, denom)
+            t_prog = torch.clamp(step_val / denom, min=0.0, max=1.0)
             sigma_t = torch.tensor(self.rgb_sigma0, device=device) * (1.0 + torch.cos(math.pi * t_prog)) * 0.5
             # Clamp to a minimum final noise level as per paper (0 for ImageNet, 3 for multimodal)
             sigma_t = torch.clamp_min(sigma_t, self.rgb_sigma_final)
