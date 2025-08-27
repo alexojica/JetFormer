@@ -152,10 +152,21 @@ def train_from_config(config_dict: dict):
         noise_steps = 0
     try:
         base_model = unwrap_base_model(model)
+        # Ensure the buffer lives on the same device as the model to satisfy DP/DDP
+        try:
+            model_dev = next(base_model.parameters()).device
+        except Exception:
+            model_dev = device_obj
         if not hasattr(base_model, 'noise_total_steps'):
-            base_model.register_buffer('noise_total_steps', torch.tensor(int(max(0, noise_steps))), persistent=False)
+            base_model.register_buffer(
+                'noise_total_steps',
+                torch.tensor(int(max(0, noise_steps)), device=model_dev),
+                persistent=False,
+            )
         else:
-            base_model.noise_total_steps = torch.tensor(int(max(0, noise_steps)))
+            # Preserve device placement if buffer already exists
+            target_dev = getattr(base_model.noise_total_steps, 'device', model_dev)
+            base_model.noise_total_steps = torch.tensor(int(max(0, noise_steps)), device=target_dev)
     except Exception:
         pass
 
