@@ -302,7 +302,14 @@ def generate_and_log_samples(base_model,
 
     image_dict = {f"generation/{stage_label}_image_{i+1}_{s['prompt']}": wandb.Image(s['image']) for i, s in enumerate(samples)}
     wandb_images = [wandb.Image(s['image'], caption=s['prompt']) for s in samples]
-    wandb.log({"generation/samples_table": table, **image_dict, "samples": wandb_images, "generation/step": step})
+    try:
+        wandb.log({"generation/samples_table": table, **image_dict, "samples": wandb_images, "generation/step": step}, step=int(step))
+    except Exception:
+        # Fall back to default step if explicit step fails
+        try:
+            wandb.log({"generation/samples_table": table, **image_dict, "samples": wandb_images, "generation/step": step})
+        except Exception:
+            pass
 
 
 def save_checkpoint(model: torch.nn.Module,

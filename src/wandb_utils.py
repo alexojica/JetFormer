@@ -99,7 +99,8 @@ class WBLogger:
             "sanity/gmm_small_scales_rate": float(out.get('gmm_small_scales_rate', 0.0)),
         }
         try:
-            self.wb.log(payload)
+            # Use explicit step so W&B curves are aligned with optimizer steps
+            self.wb.log(payload, step=int(step))
         except Exception:
             pass
 
@@ -141,7 +142,8 @@ class WBLogger:
             'global_step': step,
         }
         try:
-            self.wb.log(payload)
+            # Log a single point per validation by committing exactly once with the optimizer step index
+            self.wb.log(payload, step=int(step))
         except Exception:
             pass
 
