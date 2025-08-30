@@ -15,7 +15,7 @@ import torch.distributed as dist
 from src.wandb_utils import WBLogger
 from src.utils.optim import get_optimizer_and_scheduler as get_opt_sched
 from src.utils.config import normalize_config_keys
-from src.jetformer import JetFormerTrain
+from src.jetformer import JetFormer
 from PIL import Image
 import torchvision.transforms as transforms
 from types import SimpleNamespace
@@ -40,6 +40,7 @@ from src.training_helpers import (
     save_checkpoint,
     compute_and_log_fid_is,
 )
+import src.training_helpers as training_helpers
 
 # Prefer CUDA graphs when using torch.compile reduce-overhead
 try:
@@ -271,7 +272,8 @@ def train_from_config(config_dict: dict):
                     torch.compiler.cudagraph_mark_step_begin()
                 except Exception:
                     pass
-                out = model(batch)
+                base = unwrap_base_model(model)
+                out = training_helpers.train_step(base, batch, step, total_opt_steps, config)
                 loss = out["loss"]
 
             # Normalize loss for gradient accumulation

@@ -6,7 +6,110 @@ import itertools
 import math
 from typing import Sequence, Tuple, Optional, Callable
 import torch.utils.checkpoint as checkpoint
-from .nn_modules import ActNorm, Invertible1x1Conv
+class ActNorm(nn.Module):
+    """An activation normalization layer that normalizes inputs using data-dependent initialization of scale and bias."""
+    def __init__(self, num_features: int, eps: float = 1e-6):
+        super().__init__()
+        self.num_features = num_features
+        self.eps = eps
+        self.log_scale = nn.Parameter(torch.zeros(1, 1, 1, num_features), requires_grad=True)
+        self.bias = nn.Parameter(torch.zeros(1, 1, 1, num_features), requires_grad=True)
+        self.initialized = False
+
+    def _initialize(self, x: torch.Tensor):
+        """Initializes scale and bias based on the first batch of data.
+
+        Note: Must be called during training via `initialize_with_batch` before
+        evaluation, otherwise running eval() first will skip initialization.
+        """
+        if not self.training:
+            return
+        
+        with torch.no_grad():
+            # (B, H, W, C) -> mean/std over B, H, W
+            mean = torch.mean(x, dim=(0, 1, 2))
+            std = torch.std(x, dim=(0, 1, 2))
+            
+            self.log_scale.data.copy_(-torch.log(std + self.eps))
+            self.bias.data.copy_(-mean)
+            self.initialized = True
+
+    def forward(self, x: torch.Tensor):
+        """Applies activation normalization and returns the transformed output and log-determinant."""
+        if not self.initialized:
+            self._initialize(x)
+
+        z = (x + self.bias) * torch.exp(self.log_scale)
+        
+        B, H, W, C = x.shape
+        logdet = H * W * torch.sum(self.log_scale)
+        
+        return z, logdet.expand(B).clone()
+
+    def inverse(self, z: torch.Tensor):
+        """Applies the inverse of activation normalization."""
+        x = z * torch.exp(-self.log_scale) - self.bias
+        
+        B, H, W, C = z.shape
+        inv_logdet = -H * W * torch.sum(self.log_scale)
+
+        return x, inv_logdet.expand(B).clone()
+
+
+class Invertible1x1Conv(nn.Module):
+    """An invertible 1x1 convolution layer using LU decomposition for efficient determinant calculation."""
+    def __init__(self, num_channels: int):
+        super().__init__()
+        self.num_channels = num_channels
+
+        # Initialize with a random orthogonal matrix, then LU-decompose
+        W, _ = torch.linalg.qr(torch.randn(num_channels, num_channels))
+        P, L, U = torch.linalg.lu(W)
+
+        self.register_buffer('P', P)
+        self.L = nn.Parameter(L)
+        self.U = nn.Parameter(U)
+
+        # Masks must follow device/dtype of parameters
+        self.register_buffer('L_mask', torch.tril(torch.ones_like(self.L), diagonal=-1), persistent=False)
+        self.register_buffer('U_mask', torch.triu(torch.ones_like(self.U), diagonal=0), persistent=False)
+
+    def _get_weight(self):
+        """Computes the convolutional weight matrix from its LU decomposition."""
+        eye = torch.eye(self.num_channels, device=self.L.device, dtype=self.L.dtype)
+        L = self.L * self.L_mask + eye
+        U = self.U * self.U_mask
+        W = self.P @ L @ U
+        return W.view(self.num_channels, self.num_channels, 1, 1)
+
+    def forward(self, x: torch.Tensor):
+        """Applies the 1x1 convolution and returns the output and log-determinant."""
+        B, Hs, Ws, C = x.shape
+        Wmat = self._get_weight()
+
+        # permute to (B, C, H, W) for conv2d
+        x_perm = x.permute(0, 3, 1, 2)
+        z_perm = F.conv2d(x_perm, Wmat)
+        z = z_perm.permute(0, 2, 3, 1)
+
+        # log|det(W)| per spatial location times H*W
+        logdet_W = torch.sum(torch.log(torch.abs(torch.diagonal(self.U))))
+        logdet = Hs * Ws * logdet_W
+        return z, logdet.expand(B).clone()
+
+    def inverse(self, z: torch.Tensor):
+        """Applies the inverse 1x1 convolution."""
+        B, Hs, Ws, C = z.shape
+        Wmat = self._get_weight()
+        W_inv = torch.inverse(Wmat.squeeze()).view(self.num_channels, self.num_channels, 1, 1)
+
+        z_perm = z.permute(0, 3, 1, 2)
+        x_perm = F.conv2d(z_perm, W_inv)
+        x = x_perm.permute(0, 2, 3, 1)
+
+        logdet_W = torch.sum(torch.log(torch.abs(torch.diagonal(self.U))))
+        inv_logdet = -Hs * Ws * logdet_W
+        return x, inv_logdet.expand(B).clone()
 
 
 def xavier_uniform_init(tensor):
@@ -827,131 +930,4 @@ class CNNPredictor(nn.Module):
 
 
 JetModel = FlowCore
-
-if __name__ == '__main__':
-    dummy_x = torch.randn(2, 32, 32, 3)
-    
-    test_input_img_shape_hwc = (dummy_x.shape[1], dummy_x.shape[2], dummy_x.shape[3])
-
-    jet_config = {
-        "depth": 4,
-        "block_depth": 1,
-        "emb_dim": 64,
-        "num_heads": 2,
-        "scale_factor": 2.0,
-        "ps": 4,
-        "input_img_shape_hwc": test_input_img_shape_hwc,
-        "kinds": ('channels', 'spatial') * 2,
-        "channels_coupling_projs": ("random",),
-        "spatial_coupling_projs": ("checkerboard", "checkerboard-inv")
-    }
-
-    model = FlowCore(**jet_config)
-    print("JetModel instantiated.")
-    
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    dummy_x = dummy_x.to(device)
-    
-    print(f"Input shape: {dummy_x.shape}")
-
-    dummy_context = None
-
-    try:
-        z, logdet_fwd = model(dummy_x, context=dummy_context)
-        print("Forward pass successful.")
-        print(f"Output z shape: {z.shape}")
-        print(f"Log determinant (forward): {logdet_fwd.shape}, {logdet_fwd}")
-
-        x_reconstructed, logdet_inv = model.inverse(z, context=dummy_context)
-        print("Inverse pass successful.")
-        print(f"Reconstructed x shape: {x_reconstructed.shape}")
-        print(f"Log determinant (inverse): {logdet_inv.shape}, {logdet_inv}")
-
-        print(f"Sum of logdets (should be ~0): {logdet_fwd + logdet_inv}")
-
-        reconstruction_error = torch.abs(dummy_x - x_reconstructed).mean()
-        print(f"Mean reconstruction error: {reconstruction_error.item()}")
-
-        dummy_x_test2 = torch.randn(2, 8, 8, 1).to(device)
-        test2_input_img_shape_hwc = (dummy_x_test2.shape[1], dummy_x_test2.shape[2], dummy_x_test2.shape[3])
-        jet_config_test2 = {**jet_config, 
-                            "ps": 2, 
-                            "emb_dim": 32, 
-                            "input_img_shape_hwc": test2_input_img_shape_hwc}
-        model_test2 = JetModel(**jet_config_test2).to(device)
-        
-        z2, logdet_fwd2 = model_test2(dummy_x_test2)
-        print(f"Test 2: z shape: {z2.shape}, logdet: {logdet_fwd2}")
-        x_rec2, logdet_inv2 = model_test2.inverse(z2)
-        print(f"Test 2: x_rec shape: {x_rec2.shape}, logdet: {logdet_inv2}")
-        print(f"Test 2: Sum of logdets: {logdet_fwd2 + logdet_inv2}")
-        print(f"Test 2: Reconstruction error: {torch.abs(dummy_x_test2 - x_rec2).mean().item()}")
-
-
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        import traceback
-        traceback.print_exc()
-
-
-    # --- Tiny test for spatial masks ---
-    print("\nTesting spatial coupling masks...")
-    grid_h_test, grid_w_test = 8, 8
-    n_test = grid_h_test * grid_w_test
-    n_half_test = n_test // 2
-    test_kinds = ['checkerboard', 'hstripes', 'vstripes']
-    for kind in test_kinds:
-        try:
-            masks = get_spatial_coupling_masks_torch(1, n_test, [kind], grid_h_test, grid_w_test)
-            mask = masks[0]
-            # Each input token must be mapped to exactly one output slot
-            assert torch.all(mask.sum(dim=1) == 1)
-            # Each output slot must be filled by exactly one input token
-            assert torch.all(mask.sum(dim=0) == 1)
-            
-            # Check if exactly half the tokens are mapped to the first half of the output
-            first_half_sum = mask[:, :n_half_test].sum()
-            assert first_half_sum == n_half_test, f"[{kind}] First half sum is {first_half_sum}, expected {n_half_test}"
-            print(f"Test passed for spatial mask: {kind}")
-        except Exception as e:
-            print(f"Test FAILED for spatial mask: {kind}: {e}")
-            import traceback
-            traceback.print_exc()
-
-    # --- Gradient Check for Log-Determinant ---
-    print("\nTesting log-determinant gradients...")
-    try:
-        grad_check_config = {
-            "depth": 4,
-            "block_depth": 1,
-            "emb_dim": 16, # Smaller to speed up test
-            "num_heads": 2,
-            "scale_factor": 2.0,
-            "ps": 2,
-            "input_img_shape_hwc": (4, 4, 4),
-            "channel_repeat": 1,
-            "spatial_mode": "checkerboard",
-            "masking_mode": 'pairing',
-            "actnorm": True,
-            "invertible_dense": True,
-            "use_grad_checkpoint": False # Gradcheck is not compatible with checkpointing
-        }
-        grad_model = JetModel(**grad_check_config).to(torch.double)
-
-        # Input must be double and require grad
-        dummy_x_grad = torch.randn(1, 4, 4, 4, device=device, dtype=torch.double, requires_grad=True)
-
-        def get_logdet(x):
-            _, logdet = grad_model(x)
-            return logdet.sum()
-
-        test_passed = torch.autograd.gradcheck(get_logdet, (dummy_x_grad,), atol=1e-4, rtol=1e-3)
-        print(f"Log-det gradient check passed: {test_passed}")
-
-    except Exception as e:
-        print(f"Test FAILED for log-det gradient check: {e}")
-        import traceback
-        traceback.print_exc()
-
 

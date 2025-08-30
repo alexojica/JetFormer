@@ -14,7 +14,7 @@ jet_emb_dim: 512
 jet_num_heads: 8
 flow_actnorm: true
 flow_invertible_dense: true
-pre_factor_dim: 0              # keep POST-flow factoring (paper’s main setup)
+pre_factor_dim: None              # keep POST-flow factoring (paper’s main setup)
 
 # AR Transformer (Gemma-style)
 d_model: 640

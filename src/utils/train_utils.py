@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, Optional, Tuple
 
 import os
+import math
 import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader
@@ -127,4 +128,102 @@ def save_checkpoint(model: torch.nn.Module,
         except Exception:
             pass
 
+
+# ----------------------------
+# Training-time utilities
+# ----------------------------
+
+@torch.no_grad()
+def compute_rgb_noise_sigma(step_tensor: torch.Tensor,
+                            total_steps_tensor: torch.Tensor,
+                            sigma0: float,
+                            sigma_final: float,
+                            noise_total_steps: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """Cosine schedule in pixel-space sigma (RGB), clamped to sigma_final.
+
+    Args:
+        step_tensor: scalar long/float tensor for current global optimization step
+        total_steps_tensor: scalar float tensor of total optimization steps
+        sigma0: initial sigma in pixel domain
+        sigma_final: floor sigma in pixel domain
+        noise_total_steps: optional override window length as tensor; when >0, overrides total_steps_tensor
+    Returns:
+        sigma_t: float tensor on same device as inputs
+    """
+    step_val = step_tensor.to(dtype=torch.float32)
+    denom = total_steps_tensor.to(dtype=torch.float32)
+    if isinstance(noise_total_steps, torch.Tensor):
+        nts = noise_total_steps.to(dtype=torch.float32, device=step_val.device)
+        use_nts = (nts > 0.0).to(dtype=torch.float32)
+        # When nts>0, replace denom by nts
+        denom = use_nts * nts + (1.0 - use_nts) * denom
+    t_prog = torch.clamp(step_val / denom.clamp_min(1.0), min=0.0, max=1.0)
+    sigma_t = torch.tensor(float(sigma0), device=step_val.device) * (1.0 + torch.cos(torch.tensor(math.pi, device=step_val.device) * t_prog)) * 0.5
+    sigma_t = torch.clamp_min(sigma_t, float(sigma_final))
+    return sigma_t
+
+
+@torch.no_grad()
+def flow_encode_images01_to_tokens(model, images01: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Mirror of JetFormer.flow_from_x01, moved out of the model file.
+
+    Args:
+        model: JetFormer instance
+        images01: [B,3,H,W] in [0,1]
+    Returns:
+        (log_det, tokens_full) as in original implementation
+    """
+    if images01.dim() != 4 or images01.size(1) != 3:
+        raise ValueError("images01 must be [B,3,H,W]")
+    H, W = model.input_size
+    ps = model.patch_size
+    B = images01.size(0)
+    x_nhwc = images01.permute(0, 2, 3, 1).contiguous()
+
+    if getattr(model, 'pre_factor_dim', None) is None:
+        pre_logdet = 0.0
+        if getattr(model, 'pre_latent_projection', None) is not None and getattr(model, 'pre_proj', None) is not None:
+            tokens_px = model._patchify(x_nhwc)
+            tokens_px, pre_logdet = model.pre_proj(tokens_px)
+            x_nhwc = model._unpatchify(tokens_px, H, W)
+        z_nhwc, log_det = model.jet(x_nhwc)
+        tokens = model._patchify(z_nhwc)
+        if getattr(model, 'latent_projection', None) is not None:
+            tokens, proj_logdet = model.proj(tokens)
+            N_patches = tokens.shape[1]
+            log_det = log_det + proj_logdet.expand(B) * N_patches
+        if getattr(model, 'pre_latent_projection', None) is not None:
+            N_patches = tokens.shape[1]
+            log_det = log_det + torch.as_tensor(pre_logdet, device=log_det.device).expand(B) * N_patches
+        return log_det, tokens
+
+    # Pre-flow factoring path
+    tokens_px = model._patchify(x_nhwc)  # [B, N, 3*ps*ps]
+    pre_logdet = 0.0
+    if getattr(model, 'pre_latent_projection', None) is not None and getattr(model, 'pre_proj', None) is not None:
+        tokens_px, pre_logdet = model.pre_proj(tokens_px)
+    d = int(model.pre_factor_dim)
+    N = tokens_px.shape[1]
+    # Split into kept (hat) and residual (tilde)
+    tokens_hat_in = tokens_px[..., :d]              # [B, N, d]
+    tokens_tilde = tokens_px[..., d:]               # [B, N, D_full - d]
+    # Reshape kept dims to patch grid and run flow (ps=1)
+    H_patch = H // ps
+    W_patch = W // ps
+    tokens_hat_grid = tokens_hat_in.transpose(1, 2).contiguous().view(B, d, H_patch, W_patch).permute(0, 2, 3, 1).contiguous()  # [B,H/ps,W/ps,d]
+    z_hat_grid, log_det_flow = model.jet(tokens_hat_grid)  # flow over patch grid
+    tokens_hat_latents = z_hat_grid.permute(0, 3, 1, 2).contiguous().view(B, d, N).transpose(1, 2).contiguous()  # [B,N,d]
+    # Concatenate latents with Gaussian residual dims to form full token tensor
+    tokens_full = torch.cat([tokens_hat_latents, tokens_tilde], dim=-1)  # [B,N,D_full]
+
+    # Optional latent (post-flow) projection on full tokens
+    log_det = log_det_flow
+    if getattr(model, 'latent_projection', None) is not None:
+        tokens_full, proj_logdet = model.proj(tokens_full)
+        log_det = log_det + proj_logdet.expand(B) * N
+
+    if getattr(model, 'pre_latent_projection', None) is not None:
+        log_det = log_det + torch.as_tensor(pre_logdet, device=log_det.device).expand(B) * N
+
+    return log_det, tokens_full
 

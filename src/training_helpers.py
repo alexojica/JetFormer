@@ -13,12 +13,8 @@ from PIL import Image
 import wandb
 from src.utils.logging import get_logger
 logger = get_logger(__name__)
-
-# Accelerators and model
 from src.accelerators import GPUAccelerator, TPUAccelerator, HAS_TPU as _HAS_TPU
-from src.jetformer import JetFormerTrain
-
-# Datasets
+from src.jetformer import JetFormer
 from src.dataset import LAIONPOPTextImageDataset
 from src.datasets import KaggleImageFolderImagenet, ImageNet21kFolder
 from src.utils.dataset_utils import create_datasets_and_loaders as create_datasets_and_loaders_util
@@ -34,8 +30,6 @@ from src.utils.train_utils import (
 )
 from src.utils.optim import get_optimizer_and_scheduler as get_opt_sched
 from src.utils.train_eval import evaluate_one_epoch as unified_eval
-
-# Sampling utilities (canonical implementations live in src/sampling.py)
 from src.sampling import (
     generate_text_to_image_samples_cfg,
     generate_class_conditional_samples,
@@ -43,11 +37,10 @@ from src.sampling import (
 
 
 def build_accelerator(cfg: Dict[str, Any]):
-    """Return an accelerator instance based on config.
-
-    Handles GPU vs TPU and 'auto' selection. Raises when TPU requested but unavailable.
-    """
-    accelerator_choice = str(cfg.get('accelerator', 'auto')).lower()
+    accelerator_choice = cfg.get('accelerator')
+    accelerator_choice = str(accelerator_choice).lower() if accelerator_choice is not None else None
+    if accelerator_choice is None:
+        raise KeyError("accelerator must be specified")
     if accelerator_choice == 'tpu' or (accelerator_choice == 'auto' and _HAS_TPU):
         if TPUAccelerator is None:
             raise RuntimeError("TPU accelerator requested but torch_xla is not available.")
@@ -56,10 +49,6 @@ def build_accelerator(cfg: Dict[str, Any]):
 
 
 def resolve_wandb_resume_by_name(cfg: Dict[str, Any]) -> None:
-    """If a run name is provided but no run_id, try to resume by reading a sidecar file.
-
-    Modifies cfg in-place to set 'wandb_run_id' when found.
-    """
     logger = get_logger(__name__)
     try:
         desired_run_name = cfg.get('wandb_run_name', None)
@@ -77,91 +66,62 @@ def resolve_wandb_resume_by_name(cfg: Dict[str, Any]) -> None:
 
 
 def init_wandb(cfg: Dict[str, Any], is_main_process: bool = True):
-    """Initialize Weights & Biases with robust offline fallback.
-
-    Returns a wandb run object or None when disabled/unavailable.
-    """
-    want_wandb = bool(cfg.get("wandb", True))
-    offline = bool(cfg.get("wandb_offline", False))
+    want_wandb = cfg.get("wandb")
+    offline = cfg.get("wandb_offline")
     if not want_wandb or not is_main_process:
         return None
-    project = cfg.get("wandb_project", "jetformer-laion-pop")
+    project = cfg.get("wandb_project")
     run_name = cfg.get("wandb_run_name")
     run_id = cfg.get("wandb_run_id")
     resume_from = cfg.get("resume_from")
-    tags = cfg.get("wandb_tags", [])
+    tags = cfg.get("wandb_tags")
     try:
-        if offline:
+        if bool(offline):
             os.environ["WANDB_MODE"] = "offline"
-        # Only resume W&B when BOTH a checkpoint path and a run_id are provided.
         if run_id and isinstance(resume_from, str) and os.path.exists(resume_from):
             os.environ.setdefault("WANDB_RESUME", "allow")
             os.environ["WANDB_RUN_ID"] = str(run_id)
         else:
-            # Ensure a fresh run even if the same name is reused.
             os.environ.pop("WANDB_RESUME", None)
             os.environ.pop("WANDB_RUN_ID", None)
-        return wandb.init(project=project, name=run_name, config=cfg, tags=tags)
+        return wandb.init(project=project, name=run_name, config=cfg, tags=(tags or []))
     except Exception as e:
         try:
             os.environ["WANDB_MODE"] = "offline"
-            return wandb.init(project=project, name=run_name, config=cfg, tags=(tags + ["offline_fallback"]))
+            off_tags = (tags or []) + ["offline_fallback"]
+            return wandb.init(project=project, name=run_name, config=cfg, tags=off_tags)
         except Exception:
             logger.warning(f"W&B init failed ({e}). Proceeding without W&B.")
             return None
 
 
-def build_model_from_config(config: SimpleNamespace, device: torch.device) -> JetFormerTrain:
-    """Construct JetFormerTrain from the config namespace on the given device.
-
-    Applies dataset-aware defaults (e.g., rgb_sigma_final, inferred num_classes) and returns the model.
-    """
-    dataset_choice = getattr(config, 'dataset', 'laion_pop')
-    default_sigma_final = 0.0 if str(dataset_choice).lower() == 'imagenet64_kaggle' else 3.0
-    inferred_num_classes = 1000 if str(dataset_choice).lower() == 'imagenet64_kaggle' else None
-
-    model = JetFormerTrain(
-        vocab_size=config.get('vocab_size'),
-        d_model=config.get('d_model'),
-        n_heads=config.get('n_heads'),
-        n_kv_heads=config.get('n_kv_heads', 1),
-        n_layers=config.get('n_layers'),
-        d_ff=config.get('d_ff'),
-        max_seq_len=config.get('max_seq_len'),
-        num_mixtures=config.get('num_mixtures'),
-        dropout=config.get('dropout'),
-        input_size=tuple(config.get('input_size', (256, 256))),
-        jet_depth=config.get('jet_depth'),
-        jet_block_depth=config.get('jet_block_depth'),
-        jet_emb_dim=config.get('jet_emb_dim'),
-        jet_num_heads=config.get('jet_num_heads'),
-        patch_size=config.get('patch_size'),
-        image_ar_dim=config.get('image_ar_dim'),
-        use_bfloat16_img_head=config.get('use_bfloat16_img_head', True),
-        num_classes=(config.get('num_classes') if config.get('num_classes') is not None else inferred_num_classes),
-        class_token_length=config.get('class_token_length', 16),
-        latent_projection=config.get('latent_projection', None),
-        latent_proj_matrix_path=config.get('latent_proj_matrix_path', None),
-        pre_latent_projection=config.get('pre_latent_projection', None),
-        pre_latent_proj_matrix_path=config.get('pre_latent_proj_matrix_path', None),
-        pre_factor_dim=config.get('pre_factor_dim'),
-        flow_actnorm=bool(config.get('flow_actnorm', False)),
-        flow_invertible_dense=bool(config.get('flow_invertible_dense', False)),
-        text_loss_weight=float(config.get('text_loss_weight', 0.0025)),
-        image_loss_weight=float(config.get('image_loss_weight', 1.0)),
-        rgb_sigma0=float(config.get('rgb_sigma0', 64.0)),
-        rgb_sigma_final=float(config.get('rgb_sigma_final', default_sigma_final)),
-        latent_noise_std=float(config.get('latent_noise_std', 0.3)),
-        cfg_drop_prob=float(config.get('cfg_drop_prob', 0.1)),
-        total_steps=1,
-        grad_checkpoint_transformer=bool(config.get('grad_checkpoint_transformer', False)),
-        flow_grad_checkpoint=bool(config.get('flow_grad_checkpoint', False)),
-    ).to(device)
+def build_model_from_config(config: SimpleNamespace, device: torch.device) -> JetFormer:
+    cfg_get = getattr(config, 'get', None)
+    def _get(key: str):
+        try:
+            return cfg_get(key) if cfg_get is not None else getattr(config, key)
+        except Exception:
+            return None
+    param_names = [
+        'vocab_size','d_model','n_heads','n_kv_heads','n_layers','d_ff','max_seq_len','num_mixtures','dropout',
+        'jet_depth','jet_block_depth','jet_emb_dim','jet_num_heads','patch_size','image_ar_dim','use_bfloat16_img_head',
+        'num_classes','class_token_length','latent_projection','latent_proj_matrix_path','pre_latent_projection',
+        'pre_latent_proj_matrix_path','pre_factor_dim','flow_actnorm','flow_invertible_dense',
+        'grad_checkpoint_transformer','flow_grad_checkpoint'
+    ]
+    kwargs: Dict[str, Any] = {}
+    for name in param_names:
+        val = _get(name)
+        if val is not None:
+            kwargs[name] = val
+    inp = _get('input_size')
+    if inp is not None:
+        kwargs['input_size'] = tuple(inp)
+    model = JetFormer(**kwargs).to(device)
     return model
 
 
 def count_model_parameters(model: torch.nn.Module) -> Tuple[int, int, int]:
-    """Return (total_params, jet_params, transformer_params)."""
     total_params = sum(p.numel() for p in model.parameters())
     jet_params = sum(p.numel() for p in model.jet.parameters()) if hasattr(model, 'jet') else 0
     transformer_params = total_params - jet_params
@@ -169,10 +129,6 @@ def count_model_parameters(model: torch.nn.Module) -> Tuple[int, int, int]:
 
 
 def load_checkpoint_if_exists(model: torch.nn.Module, resume_from_path: Optional[str], device: torch.device) -> Tuple[int, Optional[Dict[str, Any]]]:
-    """Load model/epoch from checkpoint if a path is provided and exists.
-
-    Returns (start_epoch, loaded_ckpt_dict_or_None). start_epoch is 0 when nothing loaded.
-    """
     start_epoch = 0
     ckpt = None
     if isinstance(resume_from_path, str) and os.path.exists(resume_from_path):
@@ -206,10 +162,11 @@ def set_model_total_steps(model: torch.nn.Module, total_steps: int) -> None:
 
 
 def create_optimizer(model: torch.nn.Module, config: SimpleNamespace, total_steps: int = None):
-    """Use central optimizer utils; returns (optimizer, scheduler)."""
     cfg_map = dict(vars(config)) if hasattr(config, '__dict__') else dict(config)
     if total_steps is None:
-        total_steps = int(cfg_map.get('total_steps', 0) or 0)
+        if cfg_map.get('total_steps') is None:
+            raise KeyError('total_steps must be specified')
+        total_steps = int(cfg_map.get('total_steps'))
     return get_opt_sched(model, cfg_map, total_steps)
 
 
@@ -222,12 +179,11 @@ def initialize_step_from_ckpt(model: torch.nn.Module, steps_per_epoch: int, star
 
 
 @torch.no_grad()
-def evaluate_one_epoch(model_obj: torch.nn.Module, loader: DataLoader, accelerator, eval_no_rgb_noise: bool = True) -> Tuple[float, float, float, float]:
+def evaluate_one_epoch(model_obj: torch.nn.Module, loader: DataLoader, accelerator, eval_no_rgb_noise: bool) -> Tuple[float, float, float, float]:
     return unified_eval(model_obj, loader, accelerator, mode="ar_flow", eval_no_rgb_noise=bool(eval_no_rgb_noise))
 
 
 def persist_wandb_run_id(cfg: Dict[str, Any], wb_run) -> None:
-    """Persist W&B run ID to a sidecar to allow resume-by-name in future runs."""
     if wb_run is None:
         return
     try:
@@ -248,9 +204,8 @@ def unwrap_model(model_or_ddp):
 
 
 def image_bits_per_dim(gmm_dist, target_flat, log_det, residual_nll, image_shape):
-    """Compute image bits/dim from AR GMM, Gaussian residuals, and flow logdet."""
     B = log_det.shape[0]
-    gmm_nll_flat = -gmm_dist.log_prob(target_flat)  # [B*N]
+    gmm_nll_flat = -gmm_dist.log_prob(target_flat)
     N = gmm_nll_flat.shape[0] // B
     gmm_nll = gmm_nll_flat.view(B, N).sum(dim=1)
     total_nll = gmm_nll + residual_nll - log_det
@@ -273,9 +228,8 @@ def generate_and_log_samples(base_model,
                              cfg_mode: str,
                              step: int,
                              stage_label: str,
-                             num_samples: int = 3,
+                             num_samples: int,
                              batch_idx: Optional[int] = None) -> None:
-    """Generate samples (text or class-conditional) and log them to W&B with a table and image list."""
     dataset_choice_l = str(dataset_choice).lower() if dataset_choice is not None else ''
     if dataset_choice_l in ('imagenet64_kaggle', 'imagenet21k_folder'):
         class_ids = [0, 250, 500, 750]
@@ -305,7 +259,6 @@ def generate_and_log_samples(base_model,
     try:
         wandb.log({"generation/samples_table": table, **image_dict, "samples": wandb_images, "generation/step": step}, step=int(step))
     except Exception:
-        # Fall back to default step if explicit step fails
         try:
             wandb.log({"generation/samples_table": table, **image_dict, "samples": wandb_images, "generation/step": step})
         except Exception:
@@ -322,10 +275,6 @@ def save_checkpoint(model: torch.nn.Module,
                     extra_fields: Optional[Dict[str, Any]] = None) -> None:
     return save_checkpoint_util(model, optimizer, scheduler, epoch, ckpt_path, wb_run, config_dict, extra_fields)
 
-
-# ----------------------------
-# FID / IS utilities
-# ----------------------------
 
 def _ensure_dir(path: str) -> None:
     try:
@@ -356,9 +305,7 @@ def _save_real_images_from_loader(val_loader, out_dir: str, target_count: int) -
         images = batch.get("image") if isinstance(batch, dict) else None
         if images is None:
             continue
-        # Expect CHW tensors in either uint8 [0,255] or float [-1,1] / [0,1]
         if images.dtype != torch.uint8:
-            # Assume [-1,1] or [0,1]
             img = images
             if img.min() < 0.0:
                 img = (img + 1.0) * 0.5
@@ -385,7 +332,6 @@ def _compute_fid_and_is(generated_dir: str,
                         want_fid: bool,
                         want_is: bool) -> Dict[str, float]:
     metrics: Dict[str, float] = {}
-    # FID via clean-fid first, fallback to torch-fidelity
     if want_fid:
         fid_score = None
         try:
@@ -422,7 +368,6 @@ def _compute_fid_and_is(generated_dir: str,
                 kid=False,
                 fid=False,
             )
-            # torch-fidelity uses these keys
             is_mean = float(tm.get('inception_score_mean', tm.get('isc_mean', None)))
             is_std = float(tm.get('inception_score_std', tm.get('isc_std', None)))
         except Exception:
@@ -447,13 +392,10 @@ def compute_and_log_fid_is(
     compute_is: bool,
     step: int,
     epoch: int,
-    cfg_strength: float = 4.0,
-    cfg_mode: str = "reject",
+    cfg_strength: float,
+    cfg_mode: str,
 ) -> Dict[str, float]:
-    """Generate samples, gather real images, compute FID/IS, and log to W&B.
-
-    Returns a dict of computed metrics.
-    """
+    
     if (not compute_fid) and (not compute_is):
         return {}
 
@@ -463,7 +405,6 @@ def compute_and_log_fid_is(
     _ensure_dir(gen_dir)
     _ensure_dir(real_dir)
 
-    # Generate images from the model (class-conditional or T2I depending on dataset)
     samples = generate_text_to_image_samples_cfg(
         base_model,
         dataset,
@@ -476,12 +417,10 @@ def compute_and_log_fid_is(
     gen_images = [s.get('image') for s in samples if isinstance(s, dict) and s.get('image') is not None]
     _save_pil_images_to_dir(gen_images, gen_dir, prefix="gen")
 
-    # Collect real images from validation loader
     _save_real_images_from_loader(val_loader, real_dir, int(num_samples))
 
     metrics = _compute_fid_and_is(gen_dir, (real_dir if compute_fid else None), want_fid=compute_fid, want_is=compute_is)
 
-    # Log to W&B if available
     log_payload: Dict[str, Any] = {"metrics/epoch": epoch + 1, "metrics/num_samples": int(num_samples)}
     if "fid" in metrics:
         log_payload["metrics/fid"] = metrics["fid"]
@@ -496,4 +435,34 @@ def compute_and_log_fid_is(
         pass
 
     return metrics
+
+
+def train_step(model: torch.nn.Module,
+               batch: Dict[str, Any],
+               step: int,
+               total_steps: int,
+               config: SimpleNamespace) -> Dict[str, Any]:
+    rgb_sigma0 = float(getattr(config, 'rgb_sigma0'))
+    rgb_sigma_final = float(getattr(config, 'rgb_sigma_final'))
+    latent_noise_std = float(getattr(config, 'latent_noise_std'))
+    cfg_drop_prob = float(getattr(config, 'cfg_drop_prob'))
+    text_loss_weight = float(getattr(config, 'text_loss_weight'))
+    image_loss_weight = float(getattr(config, 'image_loss_weight'))
+    eval_no_rgb_noise = bool(batch.get('no_rgb_noise'))
+
+    from src.losses import compute_jetformer_loss
+    out = compute_jetformer_loss(
+        model,
+        batch,
+        step,
+        total_steps,
+        rgb_sigma0=rgb_sigma0,
+        rgb_sigma_final=rgb_sigma_final,
+        latent_noise_std=latent_noise_std,
+        cfg_drop_prob=cfg_drop_prob,
+        eval_no_rgb_noise=eval_no_rgb_noise,
+    )
+    total = (text_loss_weight * out["text_loss"]) + (image_loss_weight * out["image_loss"])
+    out["loss"] = total
+    return out
 
