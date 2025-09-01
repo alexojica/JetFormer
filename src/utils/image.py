@@ -49,22 +49,13 @@ def compute_image_bpd(gmm_nll_nats: torch.Tensor,
                       residual_nll_nats: torch.Tensor,
                       flow_logdet: torch.Tensor,
                       image_shape_chw: Tuple[int, int, int]) -> torch.Tensor:
-    """Compute total image bits/dim from decomposed likelihood terms.
+    """Deprecated: use src.losses.bits_per_dim_ar for a centralized implementation.
 
-    Args:
-        gmm_nll_nats: per-sample NLL of AR terms, shape [B]
-        residual_nll_nats: per-sample NLL of Gaussian residual dims, shape [B]
-        flow_logdet: per-sample log|det df/dx|, shape [B]
-        image_shape_chw: (C, H, W)
-    Returns:
-        total_bpd: per-sample bits-per-dim, shape [B]
+    This function forwards to losses.bits_per_dim_ar and returns the total_bpd.
     """
-    C, H, W = image_shape_chw
-    denom = (H * W * C) * math.log(2.0)
-    # Discrete dequantization constant (+ ln 256 per dimension)
-    const = (H * W * C) * math.log(256.0)
-    total_nll = gmm_nll_nats + residual_nll_nats - flow_logdet + const
-    return total_nll / denom
+    from src.losses import bits_per_dim_ar
+    total_bpd, _, _ = bits_per_dim_ar(gmm_nll_nats, residual_nll_nats, flow_logdet, image_shape_chw, reduce=False)
+    return total_bpd
 
 
 

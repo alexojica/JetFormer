@@ -7,7 +7,15 @@ import numpy as np
 import math
 from PIL import Image
 import torchvision.transforms as transforms
+import platform
+import os
+import pathlib
+import tensorflow_datasets as tfds
+import torchvision
+import numpy as np
+from PIL import Image
 from typing import Optional, Tuple, Dict, Any, List
+from types import SimpleNamespace
 import json
 from pathlib import Path
 import wandb
@@ -26,6 +34,7 @@ from src.utils.logging import get_logger
 logger = get_logger(__name__)
 from sentencepiece import SentencePieceProcessor
 from src.tokenizer import download_sentencepiece_model
+import kagglehub
 
 class LAIONPOPTextImageDataset(Dataset): # tokenizer: gs://t5-data/vocabs/cc_en.32000/sentencepiece.model
     def _download_tokenizer_model(self, tokenizer_path):
@@ -542,3 +551,346 @@ class TinyStoriesDataset(Dataset):
             'raw_text': text,
             'key': key,
         }
+
+
+# ---- Centralized image dataset implementations (moved from src/flow/dataset.py) ----
+
+class TFDSImagenet(Dataset):
+    """A PyTorch Dataset for TFDS downsampled_imagenet datasets (32x32 or 64x64)."""
+
+    def __init__(self,
+                 split: str = 'train',
+                 resolution: int = 64,
+                 max_samples: Optional[int] = None,
+                 data_dir: str = None,
+                 manual_tar_dir: str = None):
+        super().__init__()
+        self.resolution = resolution
+        if resolution not in {32, 64}:
+            raise ValueError("Resolution must be 32 or 64 for TFDSImagenet.")
+        dataset_name = f'downsampled_imagenet/{resolution}x{resolution}'
+
+        if manual_tar_dir is not None:
+            if platform.system() == "Windows":
+                manual_tar_dir = str(pathlib.Path(manual_tar_dir).resolve())
+            tfds.download.manual_dir = manual_tar_dir
+
+        builder = tfds.builder(dataset_name, data_dir=data_dir)
+        builder.download_and_prepare()
+        ds = builder.as_dataset(split=split, shuffle_files=False)
+        if max_samples is not None:
+            ds = ds.take(max_samples)
+        self.tfds = ds
+        self._length = int(max_samples) if max_samples is not None else builder.info.splits[split.split('[')[0]].num_examples
+
+        self._prepare_list()
+
+    def _prepare_list(self):
+        self._images = []
+        self._labels = []
+        count = 0
+        for example in tfds.as_numpy(self.tfds):
+            img_uint8 = example['image']
+            lbl = example['label']
+            self._images.append(img_uint8)
+            self._labels.append(int(lbl))
+            count += 1
+            if self._length is not None and count >= self._length:
+                break
+        self._length = count
+
+    def __len__(self):
+        return self._length
+
+    def __getitem__(self, idx):
+        img_np = self._images[idx]
+        lbl = self._labels[idx]
+        img_tensor = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()
+        label_tensor = torch.tensor(lbl, dtype=torch.long)
+        return {"image": img_tensor, "label": label_tensor}
+
+
+class TFDSImagenet64(TFDSImagenet):
+    def __init__(self, **kwargs):
+        super().__init__(resolution=64, **kwargs)
+
+
+class TFDSImagenet32(TFDSImagenet):
+    def __init__(self, **kwargs):
+        super().__init__(resolution=32, **kwargs)
+
+
+class TorchvisionCIFAR10(Dataset):
+    """Wrapper around torchvision CIFAR-10 to return uint8 CHW images."""
+    def __init__(self, split: str = 'train', download: bool = True):
+        super().__init__()
+        train = (split == 'train')
+        self.ds = torchvision.datasets.CIFAR10(
+            root="./data/cifar10",
+            train=train,
+            download=download,
+            transform=None,
+            target_transform=None,
+        )
+
+    def __len__(self):
+        return len(self.ds)
+
+    def __getitem__(self, idx: int):
+        img, label = self.ds[idx]
+        img_np = np.array(img, dtype=np.uint8)
+        img_tensor = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()
+        label_tensor = torch.tensor(label, dtype=torch.long)
+        return {"image": img_tensor, "label": label_tensor}
+
+
+_IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tif', '.tiff'}
+
+
+class KaggleImageFolderImagenet(Dataset):
+    """ImageNet-style folder dataset downloaded via kagglehub.
+
+    Splits are expected to be 'train' or 'val'. Class subfolders will be used if present.
+    """
+
+    def __init__(self,
+                 split: str = 'train',
+                 resolution: int = 64,
+                 kaggle_dataset_id: str = "ayaroshevskiy/downsampled-imagenet-64x64",
+                 max_samples: Optional[int] = None,
+                 random_subset_seed: Optional[int] = None,
+                 random_flip_prob: float = 0.5):
+        super().__init__()
+        if split not in {"train", "val", "validation"}:
+            raise ValueError("split must be 'train' or 'val'.")
+        if split == "validation":
+            split = "val"
+        self.split = split
+        self.resolution = resolution
+        self.kaggle_dataset_id = kaggle_dataset_id
+        self.max_samples = max_samples
+        self.random_subset_seed = random_subset_seed
+        self.random_flip_prob = float(random_flip_prob)
+
+        self.samples: List[Tuple[pathlib.Path, int]] = []
+        self.classes: List[str] = []
+        self.class_to_idx: Dict[str, int] = {}
+
+        self._download_and_scan()
+        if not self.samples:
+            raise RuntimeError(f"No images found for split '{self.split}' in Kaggle dataset '{self.kaggle_dataset_id}'.")
+        if self.max_samples is not None:
+            if self.random_subset_seed is not None:
+                import random
+                random.Random(self.random_subset_seed).shuffle(self.samples)
+            self.samples = self.samples[: self.max_samples]
+
+    def _download_and_scan(self):
+        download_root = pathlib.Path(kagglehub.dataset_download(self.kaggle_dataset_id))
+        candidate_split_dirs: List[pathlib.Path] = []
+        candidate_split_dirs.append(download_root / self.split)
+        dataset_slug = self.kaggle_dataset_id.split('/')[-1]
+        candidate_split_dirs.append(download_root / dataset_slug / self.split)
+        if self.split == 'val':
+            candidate_split_dirs.append(download_root / 'validation')
+            candidate_split_dirs.append(download_root / dataset_slug / 'validation')
+
+        split_dir = None
+        for cand in candidate_split_dirs:
+            if cand.is_dir() and any(p.is_dir() for p in cand.iterdir()):
+                split_dir = cand
+                break
+        if split_dir is None:
+            possible_dirs = [d for d in download_root.rglob('*') if d.is_dir() and self.split in d.name.lower()]
+            for cand in possible_dirs:
+                has_images = any(p.suffix.lower() in _IMAGE_EXTS for p in cand.rglob('*'))
+                if has_images:
+                    split_dir = cand
+                    break
+        if split_dir is None:
+            raise FileNotFoundError(f"Could not locate '{self.split}' split under {download_root}")
+
+        subdirs = [d for d in split_dir.iterdir() if d.is_dir()]
+        if subdirs and all(any((p.suffix.lower() in _IMAGE_EXTS) for p in sd.rglob('*')) for sd in subdirs):
+            self.classes = sorted([d.name for d in subdirs])
+            self.class_to_idx = {cls_name: i for i, cls_name in enumerate(self.classes)}
+            for cls_name in self.classes:
+                cls_dir = split_dir / cls_name
+                cls_idx = self.class_to_idx[cls_name]
+                for img_path in cls_dir.rglob('*'):
+                    if img_path.suffix.lower() in _IMAGE_EXTS:
+                        self.samples.append((img_path, cls_idx))
+        else:
+            self.classes = ['unknown']
+            self.class_to_idx = {'unknown': 0}
+            for img_path in split_dir.rglob('*'):
+                if img_path.suffix.lower() in _IMAGE_EXTS:
+                    self.samples.append((img_path, 0))
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        img_path, target_class_idx = self.samples[idx]
+        try:
+            img = Image.open(img_path).convert('RGB')
+        except Exception:
+            img_tensor = torch.zeros((3, self.resolution, self.resolution), dtype=torch.uint8)
+            label_tensor = torch.tensor(-1, dtype=torch.long)
+            return {"image": img_tensor, "label": label_tensor}
+
+        from src.utils.image import aspect_preserving_resize_and_center_crop
+        img = aspect_preserving_resize_and_center_crop(img, self.resolution)
+        if self.split == 'train' and (np.random.rand() < self.random_flip_prob):
+            img = img.transpose(Image.FLIP_LEFT_RIGHT)
+        img_np = np.array(img, dtype=np.uint8)
+        img_tensor = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()
+        label_tensor = torch.tensor(target_class_idx, dtype=torch.long)
+        return {"image": img_tensor, "label": label_tensor}
+
+
+class ImageNet21kFolder(Dataset):
+    """Generic ImageNet-21k style folder loader with class subfolders."""
+
+    def __init__(self, root_dir: str, split: str = 'train', resolution: int = 64, max_samples: Optional[int] = None, random_subset_seed: Optional[int] = None):
+        super().__init__()
+        self.root_dir = pathlib.Path(root_dir)
+        if split not in {"train", "val", "validation"}:
+            raise ValueError("split must be 'train' or 'val'.")
+        if split == "validation":
+            split = "val"
+        self.split = split
+        self.resolution = resolution
+        self.max_samples = max_samples
+        self.random_subset_seed = random_subset_seed
+
+        split_dir = self.root_dir / self.split
+        if not split_dir.exists():
+            raise FileNotFoundError(f"Split directory not found: {split_dir}")
+
+        self.samples: List[Tuple[pathlib.Path, int]] = []
+        self.classes: List[str] = []
+        self.class_to_idx: Dict[str, int] = {}
+
+        subdirs = [d for d in split_dir.iterdir() if d.is_dir()]
+        if subdirs and all(any((p.suffix.lower() in _IMAGE_EXTS) for p in sd.rglob('*')) for sd in subdirs):
+            self.classes = sorted([d.name for d in subdirs])
+            self.class_to_idx = {cls_name: i for i, cls_name in enumerate(self.classes)}
+            for cls_name in self.classes:
+                cls_dir = split_dir / cls_name
+                cls_idx = self.class_to_idx[cls_name]
+                for img_path in cls_dir.rglob('*'):
+                    if img_path.suffix.lower() in _IMAGE_EXTS:
+                        self.samples.append((img_path, cls_idx))
+        else:
+            # Flat directory: all images belong to class 0
+            self.classes = ['unknown']
+            self.class_to_idx = {'unknown': 0}
+            for img_path in split_dir.rglob('*'):
+                if img_path.suffix.lower() in _IMAGE_EXTS:
+                    self.samples.append((img_path, 0))
+
+        if not self.samples:
+            raise RuntimeError(f"No images found under {split_dir}")
+
+        if self.max_samples is not None:
+            if self.random_subset_seed is not None:
+                import random
+                random.Random(self.random_subset_seed).shuffle(self.samples)
+            self.samples = self.samples[: self.max_samples]
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        img_path, target_class_idx = self.samples[idx]
+        try:
+            img = Image.open(img_path).convert('RGB')
+        except Exception:
+            img_tensor = torch.zeros((3, self.resolution, self.resolution), dtype=torch.uint8)
+            label_tensor = torch.tensor(-1, dtype=torch.long)
+            return {"image": img_tensor, "label": label_tensor}
+
+        from src.utils.image import aspect_preserving_resize_and_center_crop
+        img = aspect_preserving_resize_and_center_crop(img, self.resolution)
+        img_np = np.array(img, dtype=np.uint8)
+        img_tensor = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()
+        label_tensor = torch.tensor(target_class_idx, dtype=torch.long)
+        return {"image": img_tensor, "label": label_tensor}
+
+
+def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[Any, Any, DataLoader, DataLoader]:
+    """Create dataset, val_dataset and corresponding data loaders based on config and accelerator.
+
+    Returns (dataset, val_dataset, dataloader, val_loader).
+    """
+    # All dataset classes are defined in this module; avoid cross-module shim imports
+
+    dataset_choice = getattr(config, 'dataset', 'laion_pop')
+    if str(dataset_choice).lower() == 'imagenet64_kaggle':
+        H, W = tuple(getattr(config, 'input_size', (256, 256)))
+        res = int(H)
+        dataset = KaggleImageFolderImagenet(
+            split='train',
+            resolution=res,
+            kaggle_dataset_id=getattr(config, 'kaggle_dataset_id', 'ayaroshevskiy/downsampled-imagenet-64x64'),
+            max_samples=getattr(config, 'max_samples', None),
+            random_flip_prob=float(getattr(config, 'random_flip_prob', 0.5))
+        )
+        val_dataset = KaggleImageFolderImagenet(
+            split='val', resolution=res,
+            kaggle_dataset_id=getattr(config, 'kaggle_dataset_id', 'ayaroshevskiy/downsampled-imagenet-64x64'),
+            random_flip_prob=0.0
+        )
+    elif str(dataset_choice).lower() == 'imagenet21k_folder':
+        root = getattr(config, 'imagenet21k_root', None)
+        if not root:
+            raise ValueError("--imagenet21k_root must be provided for imagenet21k_folder dataset")
+        H, W = tuple(getattr(config, 'input_size', (256, 256)))
+        res = int(H)
+        dataset = ImageNet21kFolder(root_dir=root, split='train', resolution=res, max_samples=getattr(config, 'max_samples', None))
+        val_dataset = ImageNet21kFolder(root_dir=root, split='val', resolution=res)
+    else:
+        dataset = LAIONPOPTextImageDataset(
+            vocab_size=getattr(config, 'vocab_size', 32000),
+            tokenizer_path=getattr(config, 'tokenizer_path', "gs://t5-data/vocabs/cc_en.32000/sentencepiece.model"),
+            max_text_len=getattr(config, 'max_seq_len', 64),
+            image_size=tuple(getattr(config, 'input_size', (256, 256))),
+            cache_dir=getattr(config, 'cache_dir', "./laion_pop_cache"),
+            max_samples=getattr(config, 'max_samples', None),
+            use_cogvlm_captions=getattr(config, 'use_cogvlm_captions', True),
+            min_resolution=getattr(config, 'min_resolution', 512),
+            num_workers=getattr(config, 'num_workers', 4),
+            ignore_pad=getattr(config, 'ignore_pad', False)
+        )
+        # No explicit val set; reuse train dataset for a quick sanity val (not ideal)
+        val_dataset = dataset
+
+    train_sampler, val_sampler = accelerator.build_samplers(dataset, val_dataset)
+    pin_mem = True if accelerator.device.type == 'cuda' else False
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=config.batch_size,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
+        num_workers=int(getattr(config, 'num_workers', 8) or 8),
+        prefetch_factor=4,
+        persistent_workers=True,
+        drop_last=True,
+        pin_memory=pin_mem
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config.batch_size,
+        shuffle=False,
+        sampler=val_sampler,
+        num_workers=int(getattr(config, 'num_workers', 8) or 8),
+        prefetch_factor=4,
+        persistent_workers=True,
+        drop_last=False,
+        pin_memory=pin_mem
+    )
+
+    return dataset, val_dataset, dataloader, val_loader

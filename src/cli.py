@@ -23,7 +23,7 @@ def main():
         sys.argv = [sys.argv[0]] + rest
         flow_main()
     elif args.cmd == "eval":
-        from src.eval.run_eval import main as eval_main
+        from src.run_eval import main as eval_main
         sys.argv = [sys.argv[0]] + rest
         eval_main()
     elif args.cmd == "ablation":

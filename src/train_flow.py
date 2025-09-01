@@ -12,7 +12,7 @@ import numpy as np
 import math
 import time # For timing steps/epochs
 import random
-from .jet_flow import FlowCore
+from .flow.jet_flow import FlowCore
 from src.utils.dataset import TFDSImagenet64, TFDSImagenet32, TorchvisionCIFAR10, ImageNet21kFolder, KaggleImageFolderImagenet
 from tqdm import tqdm
 import wandb

@@ -1,15 +1,13 @@
 import os
 import argparse
 import torch
-import yaml
 from pathlib import Path
-from PIL import Image
 from src.utils.logging import get_logger
-import numpy as np
 
 from src.jetformer import JetFormer
-from src.sampling import generate_text_to_image_samples_cfg, generate_class_conditional_samples
+from src.sampling import generate_text_to_image_samples_cfg, generate_class_conditional_samples, build_sentencepiece_tokenizer_dataset
 from src.accelerators import GPUAccelerator, TPUAccelerator, HAS_TPU as _HAS_TPU
+from src.utils.eval import compute_fid as _compute_fid
 
 
 def _load_checkpoint(ckpt_path: str, device: torch.device):
@@ -22,94 +20,47 @@ def _load_checkpoint(ckpt_path: str, device: torch.device):
 
 
 def _build_model_from_cfg(cfg: dict, device: torch.device) -> JetFormer:
-    model = JetFormer(
-        vocab_size=cfg.get('vocab_size', 32000),
-        d_model=cfg.get('d_model', 768),
-        n_heads=cfg.get('n_heads', 12),
-        n_kv_heads=cfg.get('n_kv_heads', 1),
-        n_layers=cfg.get('n_layers', 12),
-        d_ff=cfg.get('d_ff', 3072),
-        max_seq_len=cfg.get('max_seq_len', 64),
-        num_mixtures=cfg.get('num_mixtures', 1024),
-        dropout=cfg.get('dropout', 0.1),
-        jet_depth=cfg.get('jet_depth', 8),
-        jet_block_depth=cfg.get('jet_block_depth', 2),
-        jet_emb_dim=cfg.get('jet_emb_dim', 512),
-        jet_num_heads=cfg.get('jet_num_heads', 8),
-        patch_size=cfg.get('patch_size', 16),
-        input_size=tuple(cfg.get('input_size', (256, 256))),
-        use_bfloat16_img_head=cfg.get('use_bfloat16_img_head', True),
-        image_ar_dim=cfg.get('image_ar_dim', 128),
-        num_classes=cfg.get('num_classes', None),
-        class_token_length=cfg.get('class_token_length', 16),
-        latent_projection=cfg.get('latent_projection', None),
-        latent_proj_matrix_path=cfg.get('latent_proj_matrix_path', None),
-    ).to(device)
-    return model
+    from src.utils.model_factory import build_jetformer_from_config
+    return build_jetformer_from_config(cfg, device)
 
 
 @torch.no_grad()
-def _sample_t2i_cfg(model: JetFormer, prompts, device: torch.device, out_dir: Path, cfg_strength: float, num_images: int):
+def _save_t2i_samples(model: JetFormer, prompts, device: torch.device, out_dir: Path, cfg_strength: float, num_images: int, cfg_mode: str):
     os.makedirs(out_dir, exist_ok=True)
-    # Minimal tokenizer wrapper used by sampling.py
-    from sentencepiece import SentencePieceProcessor
-    from src.tokenizer import download_sentencepiece_model
-    spm_path = download_sentencepiece_model()
-    sp = SentencePieceProcessor(); sp.Load(spm_path)
-    class _TokDS:
-        def tokenize_text(self, text: str):
-            ids = sp.EncodeAsIds(text)
-            ids = ids + [1]
-            max_len = 64
-            ids = ids[:max_len] + [0] * max(0, max_len - len(ids))
-            mask = [1 if i < len(ids) and ids[i] != 0 else 0 for i in range(max_len)]
-            return {
-                'tokens': torch.tensor(ids, dtype=torch.long),
-                'text_mask': torch.tensor(mask, dtype=torch.bool),
-            }
-    ds = _TokDS()
-    for i, prompt in enumerate(prompts[:num_images]):
+    ds = build_sentencepiece_tokenizer_dataset(max_length=64)
+    try:
+        samples = generate_text_to_image_samples_cfg(
+            model,
+            ds,
+            device,
+            num_samples=int(num_images),
+            cfg_strength=float(cfg_strength),
+            cfg_mode=str(cfg_mode),
+            prompts=list(prompts),
+        )
+    except Exception:
+        samples = []
+    for i, s in enumerate(samples[:num_images]):
         try:
-            s = generate_text_to_image_samples_cfg(model, ds, device, num_samples=1, cfg_strength=cfg_strength)
-            if len(s) > 0:
-                img = s[0]['image']
-                img.save(out_dir / f"sample_{i:05d}.png")
+            img = s['image']
+            img.save(out_dir / f"sample_{i:05d}.png")
         except Exception:
-            try:
-                print(f"Failed to generate sample for prompt {i}: '{prompt}'")
-            except Exception:
-                pass
+            continue
 
 
 @torch.no_grad()
-def _sample_class_cond(model: JetFormer, device: torch.device, out_dir: Path, num_images: int, cfg_strength: float = 4.0, cfg_mode: str = "reject"):
+def _save_class_cond_samples(model: JetFormer, device: torch.device, out_dir: Path, num_images: int, cfg_strength: float = 4.0, cfg_mode: str = "reject"):
     os.makedirs(out_dir, exist_ok=True)
     num_classes = getattr(model, 'num_classes', None) or 1000
     classes = list(range(num_classes))
     total = min(num_images, len(classes))
-    from src.sampling import generate_class_conditional_samples
     samples = generate_class_conditional_samples(model, device, classes[:total], cfg_strength=cfg_strength, cfg_mode=str(cfg_mode))
     for i, s in enumerate(samples):
-        img = s['image']
-        img.save(out_dir / f"class_{i:04d}.png")
-
-
-def _compute_fid(generated_dir: Path, ref_dir: Path = None, ref_stats: Path = None) -> float:
-    score = None
-    try:
-        import cleanfid
-        if ref_stats is not None and Path(ref_stats).exists():
-            score = cleanfid.compute_fid(generated_dir, None, dataset_name=None, dataset_split=None, mode='clean', fdir=ref_stats)
-        elif ref_dir is not None and Path(ref_dir).exists():
-            score = cleanfid.compute_fid(generated_dir, ref_dir, mode='clean')
-    except Exception:
         try:
-            from torch_fidelity import calculate_metrics
-            metrics = calculate_metrics(str(generated_dir), str(ref_dir) if ref_dir else None, cuda=torch.cuda.is_available(), isc=False, kid=False, fid=True)
-            score = float(metrics.get('frechet_inception_distance', None))
+            img = s['image']
+            img.save(out_dir / f"class_{i:04d}.png")
         except Exception:
-            score = None
-    return score
+            continue
 
 
 def main():
@@ -160,16 +111,16 @@ def main():
                 prompts = [line.strip() for line in f if line.strip()]
         else:
             prompts = ["a car", "a cat", "a dog", "a house", "a mountain", "a city" ]
-        _sample_t2i_cfg(model, prompts, device, out_dir, args.cfg_strength, args.num_images)
+        _save_t2i_samples(model, prompts, device, out_dir, args.cfg_strength, args.num_images, args.cfg_mode)
         logger.info(f"Saved {args.num_images} samples to {out_dir}")
     elif args.task == 'class_cond':
-        _sample_class_cond(model, device, out_dir, args.num_images, args.cfg_strength, args.cfg_mode)
+        _save_class_cond_samples(model, device, out_dir, args.num_images, args.cfg_strength, args.cfg_mode)
         logger.info(f"Saved class-conditional samples to {out_dir}")
     elif args.task == 'fid':
         # Expect images already generated under out_dir, or generate from prompts file
         if len(list(out_dir.glob('*.png'))) == 0:
             prompts = ["a photo of a %d" % i for i in range(args.num_images)]
-            _sample_t2i_cfg(model, prompts, device, out_dir, args.cfg_strength, args.num_images)
+            _save_t2i_samples(model, prompts, device, out_dir, args.cfg_strength, args.num_images, args.cfg_mode)
         fid = _compute_fid(out_dir, Path(args.ref_dir) if args.ref_dir else None, Path(args.ref_stats) if args.ref_stats else None)
         if fid is None:
             logger.warning("FID computation unavailable; please install clean-fid or torch-fidelity, or provide ref_dir/ref_stats.")

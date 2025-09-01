@@ -218,16 +218,16 @@ def compute_jetformer_loss(model,
         sigma_t = torch.tensor(0.0, device=device)
     else:
         # Compute schedule
-        from src.utils.train_utils import compute_rgb_noise_sigma
+        from src.utils.schedules import rgb_cosine_sigma
         step_tensor = torch.tensor(int(step), device=device, dtype=torch.float32)
         total_steps_tensor = torch.tensor(int(max(1, total_steps)), device=device, dtype=torch.float32)
         nts = getattr(model, 'noise_total_steps', None)
-        sigma_t = compute_rgb_noise_sigma(step_tensor, total_steps_tensor, float(rgb_sigma0), float(rgb_sigma_final), nts)
+        sigma_t = rgb_cosine_sigma(step_tensor, total_steps_tensor, float(rgb_sigma0), float(rgb_sigma_final), nts)
     gaussian = torch.randn_like(images01) * (sigma_t / 255.0)
     images01_noisy = images01 + u + gaussian
 
     # Flow encode via utility
-    from src.utils.train_utils import flow_encode_images01_to_tokens
+    from src.utils.training_helpers import flow_encode_images01_to_tokens
     log_det, tokens_full = flow_encode_images01_to_tokens(model, images01_noisy)
     hat_tokens, residual_tokens = model.factor_tokens(tokens_full)
     hat_tokens_noisy = hat_tokens + torch.randn_like(hat_tokens) * float(latent_noise_std)

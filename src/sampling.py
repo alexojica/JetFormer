@@ -368,3 +368,34 @@ def sample_flow_images(flow_model, device: torch.device, num_images: int, image_
         pil_images.append(Image.fromarray(img.numpy()))
     return pil_images
 
+
+def build_sentencepiece_tokenizer_dataset(max_length: int = 64):
+    """Create a minimal dataset-like object with tokenize_text(text: str) using SentencePiece.
+
+    Returned object exposes:
+      - tokens: LongTensor[max_length]
+      - text_mask: BoolTensor[max_length]
+    """
+    try:
+        from sentencepiece import SentencePieceProcessor
+        from src.tokenizer import download_sentencepiece_model
+    except Exception as exc:
+        raise RuntimeError("SentencePiece is required for text tokenization. Please install sentencepiece.") from exc
+
+    spm_path = download_sentencepiece_model()
+    sp = SentencePieceProcessor(); sp.Load(spm_path)
+
+    class _SentencePieceDataset:
+        def tokenize_text(self, text: str):
+            ids = sp.EncodeAsIds(text)
+            # Append EOS token id=1 to align with training convention
+            ids = ids + [1]
+            ids = ids[:max_length] + [0] * max(0, max_length - len(ids))
+            mask = [1 if (i < len(ids) and ids[i] != 0) else 0 for i in range(max_length)]
+            return {
+                'tokens': torch.tensor(ids, dtype=torch.long),
+                'text_mask': torch.tensor(mask, dtype=torch.bool),
+            }
+
+    return _SentencePieceDataset()
+

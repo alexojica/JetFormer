@@ -66,7 +66,8 @@ class JetFormer(nn.Module):
         self.image_token_dim = 3 * patch_size * patch_size 
         self.image_ar_dim = image_ar_dim if image_ar_dim is not None else self.image_token_dim
         self.pre_factor_dim = pre_factor_dim
-        assert self.image_ar_dim <= self.pre_factor_dim, "image ar dim must be at most pre factor dim"
+        if self.pre_factor_dim is not None:
+            assert self.image_ar_dim <= self.pre_factor_dim, "image ar dim must be at most pre factor dim"
         
         assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
         head_dim = d_model // n_heads
@@ -394,7 +395,7 @@ class JetFormer(nn.Module):
         tokens = self._patchify(z_nhwc)
         return log_det, tokens
 
-    # flow_from_x01 removed: moved to src/utils/train_utils.flow_encode_images01_to_tokens
+    # flow_from_x01 removed: moved to src/training_helpers.flow_encode_images01_to_tokens
 
     @torch.no_grad()
     def decode_tokens_to_image01(self, tokens_full: torch.Tensor) -> torch.Tensor:
@@ -440,7 +441,3 @@ class JetFormer(nn.Module):
         x_nhwc = self._unpatchify(tokens_px_orig, H, W)
         x_chw = torch.clamp(x_nhwc.permute(0, 3, 1, 2), 0.0, 1.0)
         return x_chw
-
-
-class JetFormerTrain(JetFormer):
-    pass

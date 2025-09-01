@@ -128,6 +128,8 @@ class GPUAccelerator:
                 'decode_tokens_to_image01',
                 'compute_image_hidden',
                 'sample_from_hidden_mixture_first',
+                'training_step',
+                'configure_noise_schedule',
             ]
             passthrough_attrs = [
                 'image_ar_dim', 'image_token_dim', 'image_seq_len', 'num_mixtures', 'class_token_length'
@@ -312,4 +314,30 @@ class TPUAccelerator:
     def cleanup(self):
         pass
 
+
+
+def build_accelerator(config: dict):
+    """Factory that returns TPUAccelerator (when requested/available) or GPUAccelerator.
+
+    Mirrors previous helper in training_helpers to keep a single source of truth.
+    """
+    accelerator_choice = config.get('accelerator')
+    accelerator_choice = str(accelerator_choice).lower() if accelerator_choice is not None else None
+    if accelerator_choice is None:
+        raise KeyError("accelerator must be specified")
+    if accelerator_choice == 'tpu' or (accelerator_choice == 'auto' and HAS_TPU):
+        if TPUAccelerator is None:
+            raise RuntimeError("TPU accelerator requested but torch_xla is not available.")
+        return TPUAccelerator(config)
+    return GPUAccelerator(config)
+
+
+def broadcast_parameters(module: torch.nn.Module, src_rank: int = 0) -> None:
+    """Broadcast parameters of a module when running under DDP.
+
+    Falls back silently when dist is not initialized.
+    """
+    if dist.is_available() and dist.is_initialized():
+        for p in module.parameters():
+            dist.broadcast(p.data, src=src_rank)
 

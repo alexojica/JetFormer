@@ -1,51 +1,20 @@
 import os
-import math
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-import numpy as np
-from PIL import Image
 import wandb
 from src.utils.logging import get_logger
 logger = get_logger(__name__)
-from src.accelerators import GPUAccelerator, TPUAccelerator, HAS_TPU as _HAS_TPU
 from src.jetformer import JetFormer
-from src.dataset import LAIONPOPTextImageDataset
-from src.datasets import KaggleImageFolderImagenet, ImageNet21kFolder
-from src.utils.dataset_utils import create_datasets_and_loaders as create_datasets_and_loaders_util
 from src.utils.image import to_x01, dequantize01
-from src.utils.train_utils import (
-    initialize_actnorm_if_needed as initialize_actnorm_if_needed_util,
-    broadcast_flow_params_if_ddp as broadcast_flow_params_if_ddp_util,
-    set_model_total_steps as set_model_total_steps_util,
-    resume_optimizer_from_ckpt as resume_optimizer_from_ckpt_util,
-    initialize_step_from_ckpt as initialize_step_from_ckpt_util,
-    unwrap_model as unwrap_model_util,
-    save_checkpoint as save_checkpoint_util,
-)
-from src.utils.optim import get_optimizer_and_scheduler as get_opt_sched
-from src.utils.train_eval import evaluate_one_epoch as unified_eval
 from src.sampling import (
     generate_text_to_image_samples_cfg,
     generate_class_conditional_samples,
 )
-
-
-def build_accelerator(cfg: Dict[str, Any]):
-    accelerator_choice = cfg.get('accelerator')
-    accelerator_choice = str(accelerator_choice).lower() if accelerator_choice is not None else None
-    if accelerator_choice is None:
-        raise KeyError("accelerator must be specified")
-    if accelerator_choice == 'tpu' or (accelerator_choice == 'auto' and _HAS_TPU):
-        if TPUAccelerator is None:
-            raise RuntimeError("TPU accelerator requested but torch_xla is not available.")
-        return TPUAccelerator(cfg)
-    return GPUAccelerator(cfg)
 
 
 def resolve_wandb_resume_by_name(cfg: Dict[str, Any]) -> None:
@@ -144,43 +113,80 @@ def load_checkpoint_if_exists(model: torch.nn.Module, resume_from_path: Optional
     return start_epoch, ckpt
 
 
-def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[Any, Any, DataLoader, DataLoader]:
-    return create_datasets_and_loaders_util(config, accelerator)
-
-
 @torch.no_grad()
-def initialize_actnorm_if_needed(model: torch.nn.Module, dataloader: DataLoader, accelerator, device: torch.device, has_loaded_ckpt: bool) -> None:
-    return initialize_actnorm_if_needed_util(model, dataloader, accelerator, device, has_loaded_ckpt)
+def initialize_actnorm_if_needed(model: torch.nn.Module,
+                                 dataloader: DataLoader,
+                                 accelerator,
+                                 device: torch.device,
+                                 has_loaded_ckpt: bool) -> None:
+    if accelerator.is_main_process and not has_loaded_ckpt:
+        try:
+            init_batch = next(iter(dataloader))
+            images = init_batch['image'].to(device, non_blocking=True)
+            images01 = to_x01(images)
+            x01 = torch.clamp(dequantize01(images01), 0.0, 1.0)
+            x_nhwc = x01.permute(0, 2, 3, 1).contiguous()
+            base = model.module if hasattr(model, 'module') else model
+            if getattr(base, 'pre_factor_dim', None) is not None:
+                H, W = base.input_size
+                ps = base.patch_size
+                d = int(base.pre_factor_dim)
+                tokens_px = base._patchify(x_nhwc)
+                if base.pre_latent_projection is not None and base.pre_proj is not None:
+                    tokens_px, _ = base.pre_proj(tokens_px)
+                tokens_hat_in = tokens_px[..., :d]
+                H_patch = H // ps
+                W_patch = W // ps
+                tokens_hat_grid = tokens_hat_in.transpose(1, 2).contiguous().view(x_nhwc.shape[0], d, H_patch, W_patch).permute(0, 2, 3, 1).contiguous()
+                base.jet.initialize_with_batch(tokens_hat_grid)
+            else:
+                base.jet.initialize_with_batch(x_nhwc)
+        except Exception:
+            # Non-fatal; model will attempt implicit init on first forward
+            pass
 
 
 def broadcast_flow_params_if_ddp(model: torch.nn.Module) -> None:
-    return broadcast_flow_params_if_ddp_util(model)
+    if dist.is_available() and dist.is_initialized():
+        base = model.module if hasattr(model, 'module') else model
+        for p in base.jet.parameters():
+            dist.broadcast(p.data, src=0)
 
 
 def set_model_total_steps(model: torch.nn.Module, total_steps: int) -> None:
-    return set_model_total_steps_util(model, total_steps)
-
-
-def create_optimizer(model: torch.nn.Module, config: SimpleNamespace, total_steps: int = None):
-    cfg_map = dict(vars(config)) if hasattr(config, '__dict__') else dict(config)
-    if total_steps is None:
-        if cfg_map.get('total_steps') is None:
-            raise KeyError('total_steps must be specified')
-        total_steps = int(cfg_map.get('total_steps'))
-    return get_opt_sched(model, cfg_map, total_steps)
+    try:
+        base_model = model.module if hasattr(model, 'module') else model
+        if hasattr(base_model, 'total_steps'):
+            base_model.total_steps = int(total_steps)
+    except Exception:
+        pass
 
 
 def resume_optimizer_from_ckpt(optimizer: torch.optim.Optimizer, ckpt: Optional[Dict[str, Any]]) -> None:
-    return resume_optimizer_from_ckpt_util(optimizer, ckpt)
+    if ckpt is None:
+        return
+    try:
+        if 'optimizer_state_dict' in ckpt:
+            optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+    except Exception:
+        pass
 
 
-def initialize_step_from_ckpt(model: torch.nn.Module, steps_per_epoch: int, start_epoch: int, device: torch.device, ckpt: Optional[Dict[str, Any]]) -> int:
-    return initialize_step_from_ckpt_util(model, steps_per_epoch, start_epoch, device, ckpt)
-
-
-@torch.no_grad()
-def evaluate_one_epoch(model_obj: torch.nn.Module, loader: DataLoader, accelerator, eval_no_rgb_noise: bool) -> Tuple[float, float, float, float]:
-    return unified_eval(model_obj, loader, accelerator, mode="ar_flow", eval_no_rgb_noise=bool(eval_no_rgb_noise))
+def initialize_step_from_ckpt(model: torch.nn.Module,
+                              steps_per_epoch: int,
+                              start_epoch: int,
+                              device: torch.device,
+                              ckpt: Optional[Dict[str, Any]]) -> int:
+    step = 0
+    if ckpt is not None:
+        try:
+            step = max(0, int(start_epoch)) * int(steps_per_epoch)
+            base_model = model.module if hasattr(model, 'module') else model
+            if hasattr(base_model, '_step'):
+                base_model._step = torch.tensor(step, dtype=torch.long, device=device)
+        except Exception:
+            pass
+    return step
 
 
 def persist_wandb_run_id(cfg: Dict[str, Any], wb_run) -> None:
@@ -199,25 +205,11 @@ def persist_wandb_run_id(cfg: Dict[str, Any], wb_run) -> None:
         pass
 
 
-def unwrap_model(model_or_ddp):
-    return unwrap_model_util(model_or_ddp)
-
-
-def image_bits_per_dim(gmm_dist, target_flat, log_det, residual_nll, image_shape):
-    B = log_det.shape[0]
-    gmm_nll_flat = -gmm_dist.log_prob(target_flat)
-    N = gmm_nll_flat.shape[0] // B
-    gmm_nll = gmm_nll_flat.view(B, N).sum(dim=1)
-    total_nll = gmm_nll + residual_nll - log_det
-    C, H, W = image_shape
-    denom = (H * W * C) * math.log(2.0)
-    return total_nll / denom
-
-
-    
-
-
-    
+def unwrap_model(model_or_ddp: torch.nn.Module) -> torch.nn.Module:
+    base = model_or_ddp
+    if hasattr(base, 'module'):
+        base = base.module
+    return base
 
 
 def generate_and_log_samples(base_model,
@@ -273,169 +265,81 @@ def save_checkpoint(model: torch.nn.Module,
                     wb_run,
                     config_dict: Dict[str, Any],
                     extra_fields: Optional[Dict[str, Any]] = None) -> None:
-    return save_checkpoint_util(model, optimizer, scheduler, epoch, ckpt_path, wb_run, config_dict, extra_fields)
-
-
-def _ensure_dir(path: str) -> None:
+    model_to_save = unwrap_model(model)
     try:
-        os.makedirs(path, exist_ok=True)
+        dirn = os.path.dirname(ckpt_path)
+        if dirn:
+            os.makedirs(dirn, exist_ok=True)
     except Exception:
         pass
-
-
-def _save_pil_images_to_dir(images: List[Image.Image], out_dir: str, prefix: str = "img") -> int:
-    _ensure_dir(out_dir)
-    count = 0
-    for i, img in enumerate(images):
+    checkpoint = {
+        'model_state_dict': model_to_save.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': (scheduler.state_dict() if scheduler is not None else {}),
+        'epoch': epoch,
+        'config': config_dict,
+        'wandb_run_id': (getattr(wb_run, 'id', None) if wb_run is not None else None),
+        'wandb_run_name': config_dict.get('wandb_run_name', None) if isinstance(config_dict, dict) else None,
+    }
+    if extra_fields:
+        checkpoint.update(extra_fields)
+    torch.save(checkpoint, ckpt_path)
+    if wb_run is not None:
         try:
-            img.save(os.path.join(out_dir, f"{prefix}_{i:05d}.png"))
-            count += 1
+            import wandb
+            wandb.save(ckpt_path)
         except Exception:
-            continue
-    return count
+            pass
 
 
 @torch.no_grad()
-def _save_real_images_from_loader(val_loader, out_dir: str, target_count: int) -> int:
-    _ensure_dir(out_dir)
-    saved = 0
-    for batch in val_loader:
-        if saved >= target_count:
-            break
-        images = batch.get("image") if isinstance(batch, dict) else None
-        if images is None:
-            continue
-        if images.dtype != torch.uint8:
-            img = images
-            if img.min() < 0.0:
-                img = (img + 1.0) * 0.5
-            img = (img * 255.0).clamp(0, 255).to(torch.uint8)
-        else:
-            img = images
-        img = img.cpu()
-        b = img.shape[0]
-        for i in range(b):
-            if saved >= target_count:
-                break
-            try:
-                chw = img[i]
-                hwc = chw.permute(1, 2, 0).contiguous().numpy()
-                Image.fromarray(hwc).save(os.path.join(out_dir, f"real_{saved:05d}.png"))
-                saved += 1
-            except Exception:
-                continue
-    return saved
+def flow_encode_images01_to_tokens(model, images01: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    if images01.dim() != 4 or images01.size(1) != 3:
+        raise ValueError("images01 must be [B,3,H,W]")
+    H, W = model.input_size
+    ps = model.patch_size
+    B = images01.size(0)
+    x_nhwc = images01.permute(0, 2, 3, 1).contiguous()
 
+    if getattr(model, 'pre_factor_dim', None) is None:
+        pre_logdet = 0.0
+        if getattr(model, 'pre_latent_projection', None) is not None and getattr(model, 'pre_proj', None) is not None:
+            tokens_px = model._patchify(x_nhwc)
+            tokens_px, pre_logdet = model.pre_proj(tokens_px)
+            x_nhwc = model._unpatchify(tokens_px, H, W)
+        z_nhwc, log_det = model.jet(x_nhwc)
+        tokens = model._patchify(z_nhwc)
+        if getattr(model, 'latent_projection', None) is not None:
+            tokens, proj_logdet = model.proj(tokens)
+            N_patches = tokens.shape[1]
+            log_det = log_det + proj_logdet.expand(B) * N_patches
+        if getattr(model, 'pre_latent_projection', None) is not None:
+            N_patches = tokens.shape[1]
+            log_det = log_det + torch.as_tensor(pre_logdet, device=log_det.device).expand(B) * N_patches
+        return log_det, tokens
 
-def _compute_fid_and_is(generated_dir: str,
-                        ref_dir: Optional[str],
-                        want_fid: bool,
-                        want_is: bool) -> Dict[str, float]:
-    metrics: Dict[str, float] = {}
-    if want_fid:
-        fid_score = None
-        try:
-            import cleanfid
-            if ref_dir is not None and os.path.isdir(ref_dir):
-                fid_score = cleanfid.compute_fid(generated_dir, ref_dir, mode='clean')
-        except Exception:
-            try:
-                from torch_fidelity import calculate_metrics
-                tm = calculate_metrics(
-                    generated_dir,
-                    ref_dir if (ref_dir and os.path.isdir(ref_dir)) else None,
-                    cuda=torch.cuda.is_available(),
-                    isc=False,
-                    kid=False,
-                    fid=True,
-                )
-                fid_score = float(tm.get('frechet_inception_distance', tm.get('fid', None)))
-            except Exception:
-                fid_score = None
-        if fid_score is not None:
-            metrics["fid"] = float(fid_score)
+    tokens_px = model._patchify(x_nhwc)
+    pre_logdet = 0.0
+    if getattr(model, 'pre_latent_projection', None) is not None and getattr(model, 'pre_proj', None) is not None:
+        tokens_px, pre_logdet = model.pre_proj(tokens_px)
+    d = int(model.pre_factor_dim)
+    N = tokens_px.shape[1]
+    tokens_hat_in = tokens_px[..., :d]
+    tokens_tilde = tokens_px[..., d:]
+    H_patch = H // ps
+    W_patch = W // ps
+    tokens_hat_grid = tokens_hat_in.transpose(1, 2).contiguous().view(B, d, H_patch, W_patch).permute(0, 2, 3, 1).contiguous()
+    z_hat_grid, log_det_flow = model.jet(tokens_hat_grid)
+    tokens_hat_latents = z_hat_grid.permute(0, 3, 1, 2).contiguous().view(B, d, N).transpose(1, 2).contiguous()
+    tokens_full = torch.cat([tokens_hat_latents, tokens_tilde], dim=-1)
 
-    if want_is:
-        is_mean = None
-        is_std = None
-        try:
-            from torch_fidelity import calculate_metrics
-            tm = calculate_metrics(
-                generated_dir,
-                None,
-                cuda=torch.cuda.is_available(),
-                isc=True,
-                kid=False,
-                fid=False,
-            )
-            is_mean = float(tm.get('inception_score_mean', tm.get('isc_mean', None)))
-            is_std = float(tm.get('inception_score_std', tm.get('isc_std', None)))
-        except Exception:
-            is_mean = None
-            is_std = None
-        if is_mean is not None:
-            metrics["is_mean"] = is_mean
-        if is_std is not None:
-            metrics["is_std"] = is_std
-
-    return metrics
-
-
-@torch.no_grad()
-def compute_and_log_fid_is(
-    base_model,
-    dataset,
-    val_loader,
-    device: torch.device,
-    num_samples: int,
-    compute_fid: bool,
-    compute_is: bool,
-    step: int,
-    epoch: int,
-    cfg_strength: float,
-    cfg_mode: str,
-) -> Dict[str, float]:
-    
-    if (not compute_fid) and (not compute_is):
-        return {}
-
-    gen_root = os.path.join("eval_metrics", f"epoch_{epoch+1:04d}")
-    gen_dir = os.path.join(gen_root, "generated")
-    real_dir = os.path.join(gen_root, "real")
-    _ensure_dir(gen_dir)
-    _ensure_dir(real_dir)
-
-    samples = generate_text_to_image_samples_cfg(
-        base_model,
-        dataset,
-        device,
-        num_samples=int(num_samples),
-        cfg_strength=float(cfg_strength),
-        cfg_mode=str(cfg_mode),
-        prompts=None,
-    )
-    gen_images = [s.get('image') for s in samples if isinstance(s, dict) and s.get('image') is not None]
-    _save_pil_images_to_dir(gen_images, gen_dir, prefix="gen")
-
-    _save_real_images_from_loader(val_loader, real_dir, int(num_samples))
-
-    metrics = _compute_fid_and_is(gen_dir, (real_dir if compute_fid else None), want_fid=compute_fid, want_is=compute_is)
-
-    log_payload: Dict[str, Any] = {"metrics/epoch": epoch + 1, "metrics/num_samples": int(num_samples)}
-    if "fid" in metrics:
-        log_payload["metrics/fid"] = metrics["fid"]
-    if "is_mean" in metrics:
-        log_payload["metrics/is_mean"] = metrics["is_mean"]
-    if "is_std" in metrics:
-        log_payload["metrics/is_std"] = metrics["is_std"]
-    try:
-        if len(log_payload) > 0:
-            wandb.log(log_payload, step=step)
-    except Exception:
-        pass
-
-    return metrics
-
+    log_det = log_det_flow
+    if getattr(model, 'latent_projection', None) is not None:
+        tokens_full, proj_logdet = model.proj(tokens_full)
+        log_det = log_det + proj_logdet.expand(B) * N
+    if getattr(model, 'pre_latent_projection', None) is not None:
+        log_det = log_det + torch.as_tensor(pre_logdet, device=log_det.device).expand(B) * N
+    return log_det, tokens_full
 
 def train_step(model: torch.nn.Module,
                batch: Dict[str, Any],

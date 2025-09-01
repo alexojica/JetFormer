@@ -1,6 +1,6 @@
 import torch
 
-from src.flow.nn_modules import ActNorm, Invertible1x1Conv
+from src.flow.jet_flow import ActNorm, Invertible1x1Conv
 
 
 def test_actnorm_trainable_after_init():

@@ -12,7 +12,7 @@ import numpy as np
 from torch.utils.data import DataLoader, Dataset
 import torch.distributed as dist
  
-from src.wandb_utils import WBLogger
+from src.utils.logging import WBLogger
 from src.utils.optim import get_optimizer_and_scheduler as get_opt_sched
 from src.utils.config import normalize_config_keys
 from src.jetformer import JetFormer
@@ -20,27 +20,24 @@ from PIL import Image
 import torchvision.transforms as transforms
 from types import SimpleNamespace
 from tqdm import tqdm
-from src.training_helpers import (
-    build_accelerator,
+from src.utils.training_helpers import (
     init_wandb as helpers_init_wandb,
     build_model_from_config,
     count_model_parameters,
     load_checkpoint_if_exists,
-    create_datasets_and_loaders,
     initialize_actnorm_if_needed,
     broadcast_flow_params_if_ddp,
     set_model_total_steps,
-    create_optimizer,
     resume_optimizer_from_ckpt,
     initialize_step_from_ckpt,
-    evaluate_one_epoch,
     persist_wandb_run_id,
     unwrap_model as unwrap_base_model,
     generate_and_log_samples,
     save_checkpoint,
-    compute_and_log_fid_is,
 )
-import src.training_helpers as training_helpers
+from src.dataset import create_datasets_and_loaders
+from src.utils.eval import evaluate_one_epoch, compute_and_log_fid_is
+import src.utils.training_helpers as training_helpers
 
 # Prefer CUDA graphs when using torch.compile reduce-overhead
 try:
@@ -67,7 +64,8 @@ def train_from_config(config_dict: dict):
     cfg_raw.setdefault('precision', 'bf16')
     cfg_raw.setdefault('distributed', False)
 
-    accelerator = build_accelerator(cfg_raw)
+    from src.accelerators import build_accelerator as _build_accel
+    accelerator = _build_accel(cfg_raw)
 
     device_obj = accelerator.device
     is_main_process = accelerator.is_main_process
@@ -93,7 +91,8 @@ def train_from_config(config_dict: dict):
     # Resolve resume path: only resume when explicitly provided via --resume_from
     resume_from_path = cfg_raw.get('resume_from', None)
 
-    model = build_model_from_config(config, device_obj)
+    from src.utils.model_factory import build_jetformer_from_config
+    model = build_jetformer_from_config(config, device_obj)
     # If resuming, load model weights before optional compile/wrap
     start_epoch = 0
     _loaded_ckpt = None

@@ -6,6 +6,23 @@ import itertools
 import math
 from typing import Sequence, Tuple, Optional, Callable
 import torch.utils.checkpoint as checkpoint
+from src.losses import bits_per_dim_flow
+
+
+def xavier_uniform_init(tensor):
+    """Initializes a tensor with Xavier uniform distribution."""
+    nn.init.xavier_uniform_(tensor)
+
+def normal_init(stddev):
+    """Returns a function that initializes a tensor with a normal distribution of a given stddev."""
+    def init_fn(tensor):
+        nn.init.normal_(tensor, std=stddev)
+    return init_fn
+
+def zeros_init(tensor):
+    """Initializes a tensor with zeros."""
+    nn.init.zeros_(tensor)
+
 class ActNorm(nn.Module):
     """An activation normalization layer that normalizes inputs using data-dependent initialization of scale and bias."""
     def __init__(self, num_features: int, eps: float = 1e-6):
@@ -33,6 +50,7 @@ class ActNorm(nn.Module):
             self.log_scale.data.copy_(-torch.log(std + self.eps))
             self.bias.data.copy_(-mean)
             self.initialized = True
+            print(f"ActNorm initialized for {self.num_features} features.")
 
     def forward(self, x: torch.Tensor):
         """Applies activation normalization and returns the transformed output and log-determinant."""
@@ -110,21 +128,6 @@ class Invertible1x1Conv(nn.Module):
         logdet_W = torch.sum(torch.log(torch.abs(torch.diagonal(self.U))))
         inv_logdet = -Hs * Ws * logdet_W
         return x, inv_logdet.expand(B).clone()
-
-
-def xavier_uniform_init(tensor):
-    """Initializes a tensor with Xavier uniform distribution."""
-    nn.init.xavier_uniform_(tensor)
-
-def normal_init(stddev):
-    """Returns a function that initializes a tensor with a normal distribution of a given stddev."""
-    def init_fn(tensor):
-        nn.init.normal_(tensor, std=stddev)
-    return init_fn
-
-def zeros_init(tensor):
-    """Initializes a tensor with zeros."""
-    nn.init.zeros_(tensor)
 
 class MlpBlock(nn.Module):
     """A standard Transformer MLP block with two linear layers, GELU activation, and dropout."""
@@ -698,6 +701,12 @@ class FlowCore(nn.Module):
         self.backbone = backbone.lower()
         self.masking_mode = masking_mode
 
+        # Training-step state and RGB noise schedule defaults
+        self.register_buffer("_train_step", torch.zeros((), dtype=torch.long), persistent=False)
+        self.noise_total_steps: int = 1
+        self.rgb_sigma0: float = 64.0
+        self.rgb_sigma_final: float = 0.0
+
         # Create a seeded generator for deterministic random permutations
         self.rng = None
         if seed is not None:
@@ -844,6 +853,49 @@ class FlowCore(nn.Module):
         """
         _ = self.forward(x_nhwc, context=context)
         return None
+
+    def configure_noise_schedule(self, total_steps: int, sigma0: float = 64.0, sigma_final: float = 0.0) -> None:
+        """Configure cosine RGB noise schedule used during training_step.
+
+        Args:
+            total_steps: Total number of optimizer steps for full curriculum.
+            sigma0: Initial RGB noise std in 8-bit space.
+            sigma_final: Final minimum RGB noise std in 8-bit space.
+        """
+        self.noise_total_steps = int(max(1, total_steps))
+        self.rgb_sigma0 = float(sigma0)
+        self.rgb_sigma_final = float(sigma_final)
+
+    def training_step(self, images_uint8_chw: torch.Tensor):
+        """Performs the flow-only training step on uint8 CHW images.
+
+        Returns a dict with keys: loss, bpd, nll_bpd, logdet_bpd.
+        """
+        # Uniform dequantization and normalization to [0,1]
+        images_float = images_uint8_chw.float()
+        noise_u = torch.rand_like(images_float)
+        images01 = (images_float + noise_u) / 256.0
+
+        # Cosine RGB noise curriculum; do not clamp after adding Gaussian noise
+        step_val = self._train_step.to(dtype=torch.float32)
+        t_prog = torch.clamp(step_val / max(1, self.noise_total_steps), min=0.0, max=1.0)
+        sigma_t = torch.tensor(self.rgb_sigma0, device=images01.device) * (1.0 + math.cos(math.pi * t_prog)) * 0.5
+        sigma_t = torch.clamp_min(sigma_t, float(self.rgb_sigma_final))
+        gaussian = torch.randn_like(images01) * (sigma_t / 255.0)
+        images01 = images01 + gaussian
+
+        # NHWC for flow core
+        x_nhwc = images01.permute(0, 2, 3, 1).contiguous()
+        z, logdet = self.forward(x_nhwc)
+
+        loss_bpd, nll_bpd, logdet_bpd = bits_per_dim_flow(z.float(), logdet.float(), self.input_img_shape_hwc, reduce=True)
+        self._train_step = self._train_step + 1
+        return {
+            "loss": loss_bpd,
+            "bpd": loss_bpd,
+            "nll_bpd": nll_bpd,
+            "logdet_bpd": logdet_bpd,
+        }
 
 
 def load_params_from_flax_checkpoint(pytorch_model, flax_params_dict):
