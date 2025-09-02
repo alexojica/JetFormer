@@ -35,7 +35,7 @@ from src.utils.training_helpers import (
     generate_and_log_samples,
     save_checkpoint,
 )
-from src.dataset import create_datasets_and_loaders
+from src.utils.dataset import create_datasets_and_loaders
 from src.utils.eval import evaluate_one_epoch, compute_and_log_fid_is
 import src.utils.training_helpers as training_helpers
 
@@ -48,7 +48,7 @@ except Exception:
     pass
 
 # Use shared accelerators from src/accelerators.py
-from src.accelerators import GPUAccelerator, TPUAccelerator, HAS_TPU as _HAS_TPU
+from src.utils.accelerators import GPUAccelerator, TPUAccelerator, HAS_TPU as _HAS_TPU
 
 IMAGE_SIZE = (256, 256, 3)
 
@@ -64,7 +64,7 @@ def train_from_config(config_dict: dict):
     cfg_raw.setdefault('precision', 'bf16')
     cfg_raw.setdefault('distributed', False)
 
-    from src.accelerators import build_accelerator as _build_accel
+    from src.utils.accelerators import build_accelerator as _build_accel
     accelerator = _build_accel(cfg_raw)
 
     device_obj = accelerator.device

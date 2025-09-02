@@ -11,7 +11,7 @@ from src.utils.logging import get_logger
 logger = get_logger(__name__)
 from src.jetformer import JetFormer
 from src.utils.image import to_x01, dequantize01
-from src.sampling import (
+from src.utils.sampling import (
     generate_text_to_image_samples_cfg,
     generate_class_conditional_samples,
 )

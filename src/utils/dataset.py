@@ -33,7 +33,7 @@ warnings.filterwarnings('ignore')
 from src.utils.logging import get_logger
 logger = get_logger(__name__)
 from sentencepiece import SentencePieceProcessor
-from src.tokenizer import download_sentencepiece_model
+from src.utils.tokenizer import download_sentencepiece_model
 import kagglehub
 
 class LAIONPOPTextImageDataset(Dataset): # tokenizer: gs://t5-data/vocabs/cc_en.32000/sentencepiece.model

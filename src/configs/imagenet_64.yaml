@@ -6,6 +6,7 @@ patch_size: 8                 # seq length (16 image tokens); keeps 3*p^2 = 768 
 image_ar_dim: 112              # d = 128 (paper-consistent at this p)
 num_mixtures: 1024             # k = 1024 (paper); drop to 256 only if you must save mem
 use_bfloat16_img_head: true
+channel_repeat: 0
 
 # Flow (Jet) — post-flow factoring, channel-wise only
 jet_depth: 32

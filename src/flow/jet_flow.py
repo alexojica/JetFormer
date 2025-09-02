@@ -6,7 +6,7 @@ import itertools
 import math
 from typing import Sequence, Tuple, Optional, Callable
 import torch.utils.checkpoint as checkpoint
-from src.losses import bits_per_dim_flow
+from src.utils.losses import bits_per_dim_flow
 
 
 def xavier_uniform_init(tensor):

@@ -3,7 +3,7 @@ from typing import Any, Dict, List
 import torch
 from PIL import Image
 
-from src.losses import gmm_params
+from src.utils.losses import gmm_params
 
 
 @torch.no_grad()
