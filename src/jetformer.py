@@ -63,10 +63,28 @@ class JetFormer(nn.Module):
         self.image_seq_len = n_patches_h * n_patches_w
         self.patch_size = patch_size
         self.image_token_dim = 3 * patch_size * patch_size 
-        self.image_ar_dim = image_ar_dim if image_ar_dim is not None else self.image_token_dim
-        self.pre_factor_dim = pre_factor_dim
+        self.image_ar_dim = int(image_ar_dim) if image_ar_dim is not None else self.image_token_dim
+        # Coerce pre_factor_dim to int or None and validate
+        _pfd = pre_factor_dim
+        if isinstance(_pfd, str):
+            _pfd_l = _pfd.strip().lower()
+            if _pfd_l in {"none", "null", "false", ""}:
+                _pfd = None
+            else:
+                try:
+                    _pfd = int(_pfd)
+                except Exception:
+                    _pfd = None
+        if isinstance(_pfd, (float,)):
+            try:
+                _pfd = int(_pfd)
+            except Exception:
+                _pfd = None
+        if isinstance(_pfd, int) and _pfd <= 0:
+            _pfd = None
+        self.pre_factor_dim = _pfd
         if self.pre_factor_dim is not None:
-            assert self.image_ar_dim <= self.pre_factor_dim, "image ar dim must be at most pre factor dim"
+            assert int(self.image_ar_dim) <= int(self.pre_factor_dim), "image ar dim must be at most pre factor dim"
         
         assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
         head_dim = d_model // n_heads

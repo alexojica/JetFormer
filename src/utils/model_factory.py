@@ -30,7 +30,27 @@ def build_jetformer_from_config(config: SimpleNamespace | Dict[str, Any], device
     kwargs: Dict[str, Any] = {}
     for name in param_names:
         val = _get_from_ns_or_dict(config, name, None)
-        if val is not None:
+        if name == 'pre_factor_dim':
+            v = val
+            if isinstance(v, str):
+                vl = v.strip().lower()
+                if vl in {"none", "null", "false", ""}:
+                    v = None
+                else:
+                    try:
+                        v = int(v)
+                    except Exception:
+                        v = None
+            elif isinstance(v, float):
+                try:
+                    v = int(v)
+                except Exception:
+                    v = None
+            if isinstance(v, int) and v <= 0:
+                v = None
+            if v is not None:
+                kwargs[name] = v
+        elif val is not None:
             kwargs[name] = val
     inp = _get_from_ns_or_dict(config, 'input_size', None)
     if inp is not None:
