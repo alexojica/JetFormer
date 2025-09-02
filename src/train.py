@@ -400,7 +400,7 @@ def train_from_config(config_dict: dict):
                         ema.apply_to(model)
                     base = unwrap_base_model(model)
                     num_eval_samples = int(getattr(config, 'fid_is_num_samples'))
-                    compute_and_log_fid_is(
+                    fid_is_metrics = compute_and_log_fid_is(
                         base_model=base,
                         dataset=dataset,
                         val_loader=val_loader,
@@ -413,6 +413,21 @@ def train_from_config(config_dict: dict):
                         cfg_strength=float(getattr(config, 'cfg_strength')),
                         cfg_mode=str(getattr(config, 'cfg_mode')),
                     )
+                    try:
+                        if do_fid:
+                            if isinstance(fid_is_metrics, dict) and 'fid' in fid_is_metrics:
+                                print(f"Epoch {epoch+1}: FID = {float(fid_is_metrics['fid']):.4f}")
+                            else:
+                                print("Error: FID requested but not returned by evaluation.")
+                        if do_is:
+                            if isinstance(fid_is_metrics, dict) and 'is_mean' in fid_is_metrics:
+                                is_mean = float(fid_is_metrics['is_mean'])
+                                is_std = float(fid_is_metrics.get('is_std', 0.0))
+                                print(f"Epoch {epoch+1}: Inception Score = {is_mean:.4f} ± {is_std:.4f}")
+                            else:
+                                print("Error: Inception Score requested but not returned by evaluation.")
+                    except Exception as _e:
+                        print(f"Error printing FID/IS after evaluation: {_e}")
             except Exception as e:
                 print(f"FID/IS computation failed: {e}")
             finally:

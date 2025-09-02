@@ -79,7 +79,7 @@ def evaluate_one_epoch(model_obj: torch.nn.Module,
                 noise = torch.rand_like(images_float)
                 images01 = (images_float + noise) / 256.0
                 z, logdet = model_obj(images01.permute(0, 2, 3, 1))
-                from src.losses import bits_per_dim_flow
+                from src.utils.losses import bits_per_dim_flow
                 loss_bpd, nll_bpd, logdet_bpd = bits_per_dim_flow(z.float(), logdet.float(), (images_uint8.shape[2], images_uint8.shape[3], images_uint8.shape[1]), reduce=True)
                 out = {"loss": loss_bpd, "bpd": loss_bpd, "nll_bpd": nll_bpd, "logdet_bpd": logdet_bpd}
             sum_total += float(out.get('bpd', out.get('loss', 0.0))) * bsz
@@ -150,11 +150,13 @@ def _compute_fid_and_is(generated_dir: str,
     metrics: Dict[str, float] = {}
     if want_fid:
         fid_score = None
+        fid_errors: List[str] = []
         try:
             import cleanfid
             if ref_dir is not None and os.path.isdir(ref_dir):
                 fid_score = cleanfid.compute_fid(generated_dir, ref_dir, mode='clean')
-        except Exception:
+        except Exception as e:
+            fid_errors.append(f"cleanfid: {e!r}")
             try:
                 from torch_fidelity import calculate_metrics
                 tm = calculate_metrics(
@@ -166,14 +168,19 @@ def _compute_fid_and_is(generated_dir: str,
                     fid=True,
                 )
                 fid_score = float(tm.get('frechet_inception_distance', tm.get('fid', None)))
-            except Exception:
+            except Exception as e2:
+                fid_errors.append(f"torch-fidelity: {e2!r}")
                 fid_score = None
         if fid_score is not None:
             metrics["fid"] = float(fid_score)
+        else:
+            if len(fid_errors) > 0:
+                print(f"Error: FID computation failed — {' | '.join(fid_errors)} | generated_dir={generated_dir} ref_dir={ref_dir}")
 
     if want_is:
         is_mean = None
         is_std = None
+        is_errors: List[str] = []
         try:
             from torch_fidelity import calculate_metrics
             tm = calculate_metrics(
@@ -186,13 +193,17 @@ def _compute_fid_and_is(generated_dir: str,
             )
             is_mean = float(tm.get('inception_score_mean', tm.get('isc_mean', None)))
             is_std = float(tm.get('inception_score_std', tm.get('isc_std', None)))
-        except Exception:
+        except Exception as e:
+            is_errors.append(f"torch-fidelity: {e!r}")
             is_mean = None
             is_std = None
         if is_mean is not None:
             metrics["is_mean"] = is_mean
         if is_std is not None:
             metrics["is_std"] = is_std
+        if is_mean is None:
+            if len(is_errors) > 0:
+                print(f"Error: Inception Score computation failed — {' | '.join(is_errors)} | generated_dir={generated_dir}")
 
     return metrics
 
@@ -211,7 +222,7 @@ def compute_and_log_fid_is(
     cfg_strength: float,
     cfg_mode: str,
 ) -> Dict[str, float]:
-    from src.sampling import generate_text_to_image_samples_cfg
+    from src.utils.sampling import generate_text_to_image_samples_cfg
     if (not compute_fid) and (not compute_is):
         return {}
 
@@ -237,6 +248,24 @@ def compute_and_log_fid_is(
 
     metrics = _compute_fid_and_is(gen_dir, (real_dir if compute_fid else None), want_fid=compute_fid, want_is=compute_is)
 
+    # Print computed metrics
+    try:
+        if compute_fid:
+            if "fid" in metrics:
+                print(f"Computed FID: {metrics['fid']:.4f}")
+            else:
+                print("Error: FID was requested but not computed.")
+        if compute_is:
+            if "is_mean" in metrics:
+                if "is_std" in metrics:
+                    print(f"Computed Inception Score: {metrics['is_mean']:.4f} ± {metrics.get('is_std', 0.0):.4f}")
+                else:
+                    print(f"Computed Inception Score (mean): {metrics['is_mean']:.4f}")
+            else:
+                print("Error: Inception Score was requested but not computed.")
+    except Exception as e:
+        print(f"Error printing FID/IS results: {e}")
+
     log_payload: Dict[str, Any] = {"metrics/epoch": epoch + 1, "metrics/num_samples": int(num_samples)}
     if "fid" in metrics:
         log_payload["metrics/fid"] = metrics["fid"]
@@ -247,8 +276,9 @@ def compute_and_log_fid_is(
     try:
         if len(log_payload) > 0:
             wandb.log(log_payload, step=step)
-    except Exception:
-        pass
+            print("Logged FID/IS metrics to W&B.")
+    except Exception as e:
+        print(f"Error: W&B logging for FID/IS failed: {e}")
 
     return metrics
 
