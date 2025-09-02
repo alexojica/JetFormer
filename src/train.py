@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 from torch.utils.data import DataLoader, Dataset
 import torch.distributed as dist
+from contextlib import nullcontext
  
 from src.utils.logging import WBLogger
 from src.utils.optim import get_optimizer_and_scheduler as get_opt_sched
@@ -262,24 +263,32 @@ def train_from_config(config_dict: dict):
             if (batch_idx % max(1, grad_accum_steps)) == 0:
                 optimizer.zero_grad(set_to_none=True)
             autocast_ctx = accelerator.autocast(enabled=True) if hasattr(accelerator, 'autocast') else torch.amp.autocast(device_obj.type, enabled=False)
-            with autocast_ctx:
-                # Mark beginning of a new cudagraph step to avoid overwriting captured outputs
-                try:
-                    torch.compiler.cudagraph_mark_step_begin()
-                except Exception:
-                    pass
-                base = unwrap_base_model(model)
-                out = training_helpers.train_step(base, batch, step, total_opt_steps, config)
-                loss = out["loss"]
 
-            # Normalize loss for gradient accumulation
-            loss_to_backward = loss / float(max(1, grad_accum_steps))
-            scaler.scale(loss_to_backward).backward()
-            if hasattr(scaler, 'unscale_'):
-                scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), float(getattr(config, 'grad_clip_norm')))
+            is_accum_boundary = ((batch_idx + 1) % max(1, grad_accum_steps)) == 0 or (batch_idx == (len(dataloader) - 1))
+            # Use DDP no_sync on non-final microbatches of an accumulation window
+            sync_ctx = (model.no_sync() if (hasattr(model, 'no_sync') and not is_accum_boundary) else nullcontext())
+            with sync_ctx:
+                with autocast_ctx:
+                    # Mark beginning of a new cudagraph step to avoid overwriting captured outputs
+                    try:
+                        torch.compiler.cudagraph_mark_step_begin()
+                    except Exception:
+                        pass
+                    base = unwrap_base_model(model)
+                    out = training_helpers.train_step(base, batch, step, total_opt_steps, config)
+                    loss = out["loss"]
+
+                # Normalize loss for gradient accumulation
+                loss_to_backward = loss / float(max(1, grad_accum_steps))
+                scaler.scale(loss_to_backward).backward()
+
             took_step = False
-            if ((batch_idx + 1) % max(1, grad_accum_steps)) == 0:
+            if is_accum_boundary:
+                # Unscale (noop for bf16/fp32) and clip once per optimizer step
+                if hasattr(scaler, 'unscale_'):
+                    scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), float(getattr(config, 'grad_clip_norm')))
+
                 if hasattr(accelerator, 'step'):
                     accelerator.step(optimizer, scaler, scheduler)
                 else:

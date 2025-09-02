@@ -292,7 +292,6 @@ def save_checkpoint(model: torch.nn.Module,
             pass
 
 
-@torch.no_grad()
 def flow_encode_images01_to_tokens(model, images01: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     if images01.dim() != 4 or images01.size(1) != 3:
         raise ValueError("images01 must be [B,3,H,W]")
