@@ -39,21 +39,33 @@ def build_cosine_scheduler(optimizer: torch.optim.Optimizer,
 
 
 def get_optimizer_and_scheduler(model: torch.nn.Module, cfg: Dict[str, Any], total_steps: int):
-    """Central entry to create optimizer and scheduler from a config mapping.
+    """Create optimizer and scheduler strictly from config/CLI without code-level defaults."""
+    if 'learning_rate' in cfg:
+        lr = float(cfg['learning_rate'])
+    elif 'lr' in cfg:
+        lr = float(cfg['lr'])
+    else:
+        raise KeyError('learning_rate (or lr) must be provided')
 
-    Recognized keys:
-      - learning_rate or lr
-      - weight_decay or wd
-      - opt_b2
-      - warmup_percent
-      - use_cosine
-    """
-    lr = float(cfg.get('learning_rate', cfg.get('lr', 3e-4)))
-    wd = float(cfg.get('weight_decay', cfg.get('wd', 1e-4)))
-    beta1 = float(cfg.get('opt_b1', 0.9))
-    beta2 = float(cfg.get('opt_b2', 0.95))
-    warmup_percent = float(cfg.get('warmup_percent', 0.0))
-    use_cosine = bool(cfg.get('use_cosine', True))
+    if 'weight_decay' in cfg:
+        wd = float(cfg['weight_decay'])
+    elif 'wd' in cfg:
+        wd = float(cfg['wd'])
+    else:
+        raise KeyError('weight_decay (or wd) must be provided')
+
+    if 'opt_b1' not in cfg or 'opt_b2' not in cfg:
+        raise KeyError('opt_b1 and opt_b2 must be provided')
+    beta1 = float(cfg['opt_b1'])
+    beta2 = float(cfg['opt_b2'])
+
+    if 'warmup_percent' not in cfg:
+        raise KeyError('warmup_percent must be provided')
+    warmup_percent = float(cfg['warmup_percent'])
+
+    if 'use_cosine' not in cfg:
+        raise KeyError('use_cosine must be provided')
+    use_cosine = bool(cfg['use_cosine'])
 
     optimizer = create_adamw(model, lr=lr, wd=wd, beta1=beta1, beta2=beta2)
     scheduler = build_cosine_scheduler(optimizer, total_steps=total_steps, warmup_percent=warmup_percent, use_cosine=use_cosine)

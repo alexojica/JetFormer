@@ -15,6 +15,8 @@ jet_num_heads: 4
 flow_actnorm: true
 flow_invertible_dense: true
 pre_factor_dim: null       # post-flow factoring (paper main)
+channel_repeat: 0
+
 
 # AR Transformer (Gemma-style)
 d_model: 384

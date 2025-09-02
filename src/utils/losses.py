@@ -278,9 +278,15 @@ def compute_jetformer_loss(model,
             text_loss_unmasked = (ce_all * text_loss_mask.float()).sum() / text_loss_mask.float().sum().clamp_min(1.0)
 
     return {
-        "loss": image_loss + 0.0 * text_loss,  # unweighted; caller applies weights
-        "text_loss": text_loss.detach(),
-        "image_loss": image_loss.detach(),
+        # Differentiable components for training
+        "loss": image_loss + 0.0 * text_loss,  # keep graph for image_loss; text_loss used via weights in caller
+        "text_loss": text_loss,  # do not detach here; caller will weight and backprop as needed
+        "image_loss": image_loss,
+        # Raw per-sample bpd components (retain graph for potential weighting)
+        "image_bpd_total_raw": image_bpd_per_sample,  # [B]
+        "ar_bpd_raw": ar_bpd_per_sample,              # [B]
+        "flow_bpd_raw": flow_bpd_per_sample,          # [B]
+        # Detached metrics for logging only
         "image_loss_masked": image_loss.detach(),
         "text_loss_masked": text_loss.detach(),
         "text_loss_unmasked": text_loss_unmasked.detach(),

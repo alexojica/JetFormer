@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 import time
+import sys
 import wandb
 import argparse
 import yaml
@@ -59,10 +60,6 @@ IMAGE_SIZE = (256, 256, 3)
 def train_from_config(config_dict: dict):
     # Accelerator + process setup
     cfg_raw = dict(config_dict or {})
-    cfg_raw.setdefault('accelerator', 'auto')
-    cfg_raw.setdefault('device', 'auto')
-    cfg_raw.setdefault('precision', 'bf16')
-    cfg_raw.setdefault('distributed', False)
 
     from src.utils.accelerators import build_accelerator as _build_accel
     accelerator = _build_accel(cfg_raw)
@@ -86,7 +83,7 @@ def train_from_config(config_dict: dict):
     print(f"Using device: {device_obj}")
     
     # total_steps set later after dataloader creation
-    dataset_choice = getattr(config, 'dataset', 'laion_pop')
+    dataset_choice = getattr(config, 'dataset')
 
     # Resolve resume path: only resume when explicitly provided via --resume_from
     resume_from_path = cfg_raw.get('resume_from', None)
@@ -120,7 +117,7 @@ def train_from_config(config_dict: dict):
         'transformer': transformer_params,
     })
 
-    compiled_enabled = config.get('torch_compile', False)
+    compiled_enabled = bool(getattr(config, 'torch_compile'))
     if compiled_enabled:
         model = torch.compile(model, mode="reduce-overhead")
         print("Model compiled with torch.compile")
@@ -141,12 +138,12 @@ def train_from_config(config_dict: dict):
     
     # Now that dataloader is ready, update total_steps in the model for schedules
     # Account for gradient accumulation in total steps
-    grad_accum_steps = int(getattr(config, 'grad_accum_steps', 1) or 1)
+    grad_accum_steps = int(getattr(config, 'grad_accum_steps'))
     total_opt_steps = (len(dataloader) * int(config.num_epochs) + (grad_accum_steps - 1)) // max(1, grad_accum_steps)
     set_model_total_steps(model, total_opt_steps)
     # Also expose a separate noise curriculum window in steps
     try:
-        noise_epochs = int(getattr(config, 'noise_curriculum_epochs', 0) or 0)
+        noise_epochs = int(getattr(config, 'noise_curriculum_epochs'))
         noise_steps = (len(dataloader) * noise_epochs + (grad_accum_steps - 1)) // max(1, grad_accum_steps)
     except Exception:
         noise_steps = 0
@@ -213,7 +210,7 @@ def train_from_config(config_dict: dict):
     # Initial validation before training starts
     best_val_loss = float('inf')
     if is_main_process:
-        v_total, v_text, v_img, v_flow = evaluate_one_epoch(model, val_loader, accelerator, eval_no_rgb_noise=bool(getattr(config, 'eval_no_rgb_noise', True)))
+        v_total, v_text, v_img, v_flow = evaluate_one_epoch(model, val_loader, accelerator, eval_no_rgb_noise=bool(getattr(config, 'eval_no_rgb_noise')), config=config)
         print(f"Initial Val — total: {v_total:.4f} | text: {v_text:.4f} | img: {v_img:.4f}")
         if wb_run is not None:
             wb_logger.log_validation_epoch(model, v_total, v_text, v_img, v_flow, epoch=0, step=0)
@@ -227,8 +224,8 @@ def train_from_config(config_dict: dict):
                     dataset=dataset,
                     device=device_obj,
                     dataset_choice=dataset_choice,
-                    cfg_strength=float(config.get('cfg_strength', 4.0)),
-                    cfg_mode=str(config.get('cfg_mode', 'reject')),
+                    cfg_strength=float(getattr(config, 'cfg_strength')),
+                    cfg_mode=str(getattr(config, 'cfg_mode')),
                     step=0,
                     stage_label="init_val",
                     num_samples=4,
@@ -280,7 +277,7 @@ def train_from_config(config_dict: dict):
             scaler.scale(loss_to_backward).backward()
             if hasattr(scaler, 'unscale_'):
                 scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), float(getattr(config, 'grad_clip_norm', 1.0)))
+            torch.nn.utils.clip_grad_norm_(model.parameters(), float(getattr(config, 'grad_clip_norm')))
             took_step = False
             if ((batch_idx + 1) % max(1, grad_accum_steps)) == 0:
                 if hasattr(accelerator, 'step'):
@@ -312,12 +309,12 @@ def train_from_config(config_dict: dict):
                     pass
             
             # Log on a per-batch cadence for smoother curves, independent of grad accumulation
-            if is_main_process and wb_run is not None and (batch_idx % int(getattr(config, 'log_every_batches', 10)) == 0):
+            if is_main_process and wb_run is not None and (batch_idx % int(getattr(config, 'log_every_batches')) == 0):
                 wb_logger.log_train_step(model, optimizer, out, step, epoch, time.time() - start_time)
             
             # If an epoch-level sampling schedule is configured, it overrides per-batch sampling
             sample_every_epochs = int(getattr(config, 'sample_every_epochs', 0) or 0)
-            sample_every = int(getattr(config, 'sample_every_batches', 100)) if sample_every_epochs <= 0 else 0
+            sample_every = int(getattr(config, 'sample_every_batches', 0)) if sample_every_epochs <= 0 else 0
             if is_main_process and wb_run is not None and sample_every > 0 and (batch_idx % sample_every == 0):
                 print(f"Epoch {epoch+1}/{config.num_epochs}, "
                         f"Batch {batch_idx}/{len(dataloader)}, "
@@ -335,8 +332,8 @@ def train_from_config(config_dict: dict):
                         dataset=dataset,
                         device=device_obj,
                         dataset_choice=dataset_choice,
-                        cfg_strength=float(config.get('cfg_strength', 4.0)),
-                        cfg_mode=str(config.get('cfg_mode', 'reject')),
+                        cfg_strength=float(getattr(config, 'cfg_strength')),
+                        cfg_mode=str(getattr(config, 'cfg_mode')),
                         step=step,
                         stage_label=f"epoch{epoch+1}_batch{batch_idx}",
                         num_samples=3,
@@ -365,7 +362,7 @@ def train_from_config(config_dict: dict):
             vee = int(getattr(config, 'val_every_epochs'))
             run_val_this_epoch = (vee <= 1) or (((epoch + 1) % max(1, vee)) == 0)
         if is_main_process and run_val_this_epoch:
-            v_total, v_text, v_img, v_flow = evaluate_one_epoch(model, val_loader, accelerator, eval_no_rgb_noise=bool(getattr(config, 'eval_no_rgb_noise', True)))
+            v_total, v_text, v_img, v_flow = evaluate_one_epoch(model, val_loader, accelerator, eval_no_rgb_noise=bool(getattr(config, 'eval_no_rgb_noise')), config=config)
             print(f"Val Epoch {epoch+1} — total: {v_total:.4f} | text: {v_text:.4f} | img: {v_img:.4f}")
             if wb_run is not None:
                 wb_logger.log_validation_epoch(model, v_total, v_text, v_img, v_flow, epoch=epoch+1, step=step)
@@ -381,8 +378,8 @@ def train_from_config(config_dict: dict):
                             dataset=dataset,
                             device=device_obj,
                             dataset_choice=dataset_choice,
-                            cfg_strength=float(config.get('cfg_strength', 4.0)),
-                            cfg_mode=str(config.get('cfg_mode', 'reject')),
+                            cfg_strength=float(getattr(config, 'cfg_strength')),
+                            cfg_mode=str(getattr(config, 'cfg_mode')),
                             step=step,
                             stage_label=f"val_epoch_{epoch+1}",
                             num_samples=3,
@@ -402,7 +399,7 @@ def train_from_config(config_dict: dict):
                     if ema_enabled and ema is not None:
                         ema.apply_to(model)
                     base = unwrap_base_model(model)
-                    num_eval_samples = int(getattr(config, 'fid_is_num_samples', 2048) or 2048)
+                    num_eval_samples = int(getattr(config, 'fid_is_num_samples'))
                     compute_and_log_fid_is(
                         base_model=base,
                         dataset=dataset,
@@ -413,8 +410,8 @@ def train_from_config(config_dict: dict):
                         compute_is=do_is,
                         step=step,
                         epoch=epoch,
-                        cfg_strength=float(getattr(config, 'cfg_strength', 4.0)),
-                        cfg_mode=str(getattr(config, 'cfg_mode', 'reject')),
+                        cfg_strength=float(getattr(config, 'cfg_strength')),
+                        cfg_mode=str(getattr(config, 'cfg_mode')),
                     )
             except Exception as e:
                 print(f"FID/IS computation failed: {e}")
@@ -477,70 +474,87 @@ def train_from_config(config_dict: dict):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train JetFormer model (YAML + CLI overrides)')
     parser.add_argument('--config', type=str, default=None, help='Path to YAML config file')
-    # Model
-    for name, typ in [
-        ('vocab_size', int), ('d_model', int), ('n_heads', int), ('n_kv_heads', int), ('n_layers', int), ('d_ff', int),
-        ('max_seq_len', int), ('num_mixtures', int), ('dropout', float), ('jet_depth', int), ('jet_block_depth', int),
-        ('jet_emb_dim', int), ('jet_num_heads', int), ('patch_size', int), ('image_ar_dim', int)]:
-        parser.add_argument(f'--{name}', type=typ, default=None)
-    parser.add_argument('--input_size', type=int, nargs=2, default=None, metavar=('H','W'))
-    parser.add_argument('--num_classes', type=int, default=None)
-    parser.add_argument('--class_token_length', type=int, default=None)
+    # Model (JetFormer-B ImageNet class-conditional defaults)
+    for name, typ, default in [
+        ('vocab_size', int, 32000),
+        ('d_model', int, 1024),
+        ('n_heads', int, 16),
+        ('n_kv_heads', int, 1),
+        ('n_layers', int, 24),
+        ('d_ff', int, 4096),
+        ('max_seq_len', int, 64),
+        ('num_mixtures', int, 1024),
+        ('dropout', float, 0.1),
+        ('jet_depth', int, 32),
+        ('jet_block_depth', int, 4),
+        ('jet_emb_dim', int, 512),
+        ('jet_num_heads', int, 8),
+        ('patch_size', int, 16),
+        ('image_ar_dim', int, 128)]:
+        parser.add_argument(f'--{name}', type=typ, default=default)
+    parser.add_argument('--input_size', type=int, nargs=2, default=[256, 256], metavar=('H','W'))
+    parser.add_argument('--num_classes', type=int, default=1000)
+    parser.add_argument('--class_token_length', type=int, default=16)
     parser.add_argument('--latent_projection', type=str, default=None, choices=['learned','pca_frozen','none'])
     parser.add_argument('--latent_proj_matrix_path', type=str, default=None)
+    parser.add_argument('--pre_latent_projection', type=str, default='none', choices=['learned','pca_frozen','none'])
+    parser.add_argument('--pre_latent_proj_matrix_path', type=str, default=None)
     # Flow ablations
-    parser.add_argument('--flow_actnorm', type=str, default=None, choices=['true','false'])
-    parser.add_argument('--flow_invertible_dense', type=str, default=None, choices=['true','false'])
+    parser.add_argument('--flow_actnorm', type=str, default='true', choices=['true','false'])
+    parser.add_argument('--flow_invertible_dense', type=str, default='true', choices=['true','false'])
     # Pre-flow factoring
     parser.add_argument('--pre_factor_dim', type=int, default=None, help='Keep d channels per patch before flow; remaining modeled as Gaussian')
-    parser.add_argument('--use_bfloat16_img_head', type=str, default=None, choices=['true','false'])
+    parser.add_argument('--use_bfloat16_img_head', type=str, default='true', choices=['true','false'])
     # Training
     parser.add_argument('--batch_size', type=int, default=None)
-    parser.add_argument('--learning_rate', type=float, default=None)
-    parser.add_argument('--weight_decay', type=float, default=None)
-    parser.add_argument('--opt_b1', type=float, default=None)
-    parser.add_argument('--opt_b2', type=float, default=None)
-    parser.add_argument('--num_epochs', type=int, default=None)
-    parser.add_argument('--val_every_epochs', type=int, default=None)
-    parser.add_argument('--sample_every_epochs', type=int, default=None)
-    parser.add_argument('--noise_curriculum_epochs', type=int, default=None)
-    parser.add_argument('--torch_compile', type=str, default=None, choices=['true','false'])
-    parser.add_argument('--grad_checkpoint_transformer', type=str, default=None, choices=['true','false'])
-    parser.add_argument('--flow_grad_checkpoint', type=str, default=None, choices=['true','false'])
-    parser.add_argument('--device', type=str, default=None, choices=['auto','cpu','cuda','mps'])
-    parser.add_argument('--accelerator', type=str, default=None, choices=['auto','gpu','tpu'])
-    parser.add_argument('--distributed', type=str, default=None, choices=['true','false'])
+    parser.add_argument('--learning_rate', type=float, default=0.001)
+    parser.add_argument('--weight_decay', type=float, default=0.0001)
+    parser.add_argument('--opt_b1', type=float, default=0.9)
+    parser.add_argument('--opt_b2', type=float, default=0.95)
+    parser.add_argument('--num_epochs', type=int, default=100)
+    parser.add_argument('--val_every_epochs', type=int, default=3)
+    parser.add_argument('--sample_every_epochs', type=int, default=3)
+    parser.add_argument('--noise_curriculum_epochs', type=int, default=100)
+    parser.add_argument('--torch_compile', type=str, default='false', choices=['true','false'])
+    parser.add_argument('--grad_checkpoint_transformer', type=str, default='false', choices=['true','false'])
+    parser.add_argument('--flow_grad_checkpoint', type=str, default='false', choices=['true','false'])
+    parser.add_argument('--device', type=str, default='auto', choices=['auto','cpu','cuda','mps'])
+    parser.add_argument('--accelerator', type=str, default='auto', choices=['auto','gpu','tpu'])
+    parser.add_argument('--distributed', type=str, default='false', choices=['true','false'])
     parser.add_argument('--precision', type=str, default='bf16', choices=['auto','fp32','fp16','bf16','tf32'])
-    parser.add_argument('--grad_accum_steps', type=int, default=None)
+    parser.add_argument('--grad_accum_steps', type=int, default=1)
+    parser.add_argument('--grad_clip_norm', type=float, default=1.0)
     # Dataset
-    parser.add_argument('--dataset', type=str, default=None, choices=['laion_pop','imagenet64_kaggle','imagenet21k_folder'])
-    parser.add_argument('--kaggle_dataset_id', type=str, default=None)
+    parser.add_argument('--dataset', type=str, default='imagenet64_kaggle', choices=['laion_pop','imagenet64_kaggle','imagenet21k_folder'])
+    parser.add_argument('--kaggle_dataset_id', type=str, default='ayaroshevskiy/downsampled-imagenet-64x64')
     parser.add_argument('--imagenet21k_root', type=str, default=None)
     parser.add_argument('--max_samples', type=int, default=None)
-    parser.add_argument('--use_cogvlm_captions', type=str, default=None, choices=['true','false'])
-    parser.add_argument('--min_resolution', type=int, default=None)
-    parser.add_argument('--num_workers', type=int, default=None)
-    parser.add_argument('--ignore_pad', type=str, default=None, choices=['true','false'])
-    parser.add_argument('--tokenizer_path', type=str, default=None)
-    parser.add_argument('--cache_dir', type=str, default=None)
+    parser.add_argument('--use_cogvlm_captions', type=str, default='true', choices=['true','false'])
+    parser.add_argument('--min_resolution', type=int, default=512)
+    parser.add_argument('--num_workers', type=int, default=8)
+    parser.add_argument('--ignore_pad', type=str, default='false', choices=['true','false'])
+    parser.add_argument('--tokenizer_path', type=str, default='gs://t5-data/vocabs/cc_en.32000/sentencepiece.model')
+    parser.add_argument('--cache_dir', type=str, default='./laion_pop_cache')
     # Schedules / logs
-    parser.add_argument('--rgb_sigma0', type=float, default=None)
-    parser.add_argument('--rgb_sigma_final', type=float, default=None)
-    parser.add_argument('--latent_noise_std', type=float, default=None)
-    parser.add_argument('--text_loss_weight', type=float, default=None)
-    parser.add_argument('--image_loss_weight', type=float, default=None)
-    parser.add_argument('--cfg_drop_prob', type=float, default=None)
-    parser.add_argument('--cfg_strength', type=float, default=None)
-    parser.add_argument('--cfg_mode', type=str, default=None, choices=['reject','interp'])
-    parser.add_argument('--log_every_batches', type=int, default=None)
-    parser.add_argument('--sample_every_batches', type=int, default=None)
+    parser.add_argument('--rgb_sigma0', type=float, default=64.0)
+    parser.add_argument('--rgb_sigma_final', type=float, default=0.0)
+    parser.add_argument('--latent_noise_std', type=float, default=0.3)
+    parser.add_argument('--text_loss_weight', type=float, default=0.0)
+    parser.add_argument('--image_loss_weight', type=float, default=1.0)
+    parser.add_argument('--cfg_drop_prob', type=float, default=0.1)
+    parser.add_argument('--cfg_strength', type=float, default=4.0)
+    parser.add_argument('--cfg_mode', type=str, default='reject', choices=['reject','interp'])
+    parser.add_argument('--log_every_batches', type=int, default=10)
+    parser.add_argument('--sample_every_batches', type=int, default=100)
+    parser.add_argument('--warmup_percent', type=float, default=0.0)
+    parser.add_argument('--use_cosine', type=str, default='true', choices=['true','false'])
     # FID / IS
-    parser.add_argument('--fid_every_epochs', type=int, default=None)
-    parser.add_argument('--is_every_epochs', type=int, default=None)
-    parser.add_argument('--fid_is_num_samples', type=int, default=None)
+    parser.add_argument('--fid_every_epochs', type=int, default=5)
+    parser.add_argument('--is_every_epochs', type=int, default=5)
+    parser.add_argument('--fid_is_num_samples', type=int, default=500)
     # Eval/data flags
-    parser.add_argument('--eval_no_rgb_noise', type=str, default=None, choices=['true','false'])
-    parser.add_argument('--random_flip_prob', type=float, default=None)
+    parser.add_argument('--eval_no_rgb_noise', type=str, default='true', choices=['true','false'])
+    parser.add_argument('--random_flip_prob', type=float, default=0.5)
     # W&B
     parser.add_argument('--wandb', type=str, default=None, choices=['true','false'])
     parser.add_argument('--wandb_offline', type=str, default=None, choices=['true','false'])
@@ -557,14 +571,45 @@ if __name__ == "__main__":
     if args.config and Path(args.config).exists():
         with open(args.config, 'r') as f:
             cfg = yaml.safe_load(f) or {}
-    # Overlay CLI overrides (non-None)
-    for k, v in vars(args).items():
-        if k == 'config' or v is None:
+
+    # Determine which CLI flags were explicitly provided
+    provided_cli_keys = set()
+    for tok in sys.argv[1:]:
+        if tok.startswith('--'):
+            key = tok[2:].split('=')[0]
+            provided_cli_keys.add(key)
+
+    # Build defaults map from parser
+    defaults = {}
+    for action in parser._actions:
+        if not action.option_strings:
             continue
+        defaults[action.dest] = action.default
+
+    # Merge YAML + CLI: explicit CLI overrides YAML; otherwise CLI default fills only if YAML missing
+    merged = dict(cfg)
+    args_dict = vars(args)
+    for k, default_v in defaults.items():
+        if k in ('config', 'help'):
+            continue
+        v = args_dict.get(k, None)
+        # Normalize boolean-like strings
         if isinstance(v, str) and v.lower() in ('true','false'):
             v = (v.lower() == 'true')
-        if k == 'latent_projection' and isinstance(v, str) and v.lower() == 'none':
-            v = None
-        cfg[k] = v
+        if k in provided_cli_keys:
+            if k == 'latent_projection' and isinstance(v, str) and v.lower() == 'none':
+                v = None
+            merged[k] = v
+        else:
+            # Fill when YAML lacks the key or explicitly set it to null/None
+            if (k not in merged or merged.get(k) is None) and default_v is not None:
+                dv = default_v
+                if isinstance(dv, str) and dv.lower() in ('true','false'):
+                    dv = (dv.lower() == 'true')
+                merged[k] = dv
 
-    model = train_from_config(cfg)
+    # Normalize 'latent_projection' if present as string "none"
+    if isinstance(merged.get('latent_projection', None), str) and merged['latent_projection'].lower() == 'none':
+        merged['latent_projection'] = None
+
+    model = train_from_config(merged)

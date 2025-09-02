@@ -112,6 +112,8 @@ def main():
     parser.add_argument("--precision", type=str, choices=["auto", "fp32", "fp16", "bf16", "tf32"], default="tf32", help="Numerical precision mode for autocast/TF32")
     parser.add_argument("--warmup_percent", type=float, default=0.0, help="Warmup percent of total steps (0 disables)")
     parser.add_argument("--use_cosine", type=str2bool, default=True, help="Use cosine decay after warmup (false keeps constant lr)")
+    parser.add_argument("--rgb_sigma0", type=float, default=64.0, help="Initial RGB noise std in 8-bit space")
+    parser.add_argument("--rgb_sigma_final", type=float, default=0.0, help="Final RGB noise std in 8-bit space")
 
     # Model hyperparameters (paper-consistent names with backward-compatible aliases)
     parser.add_argument("--N", "--model_depth", dest="N", type=int, default=32, help="Number of coupling layers (N)")
@@ -138,6 +140,7 @@ def main():
     parser.add_argument("--imagenet21k_root", type=str, default=None, help="Root folder for ImageNet-21k (train/val under it)")
     parser.add_argument("--dataset_subset_size", type=int, default=None, help="Use a random subset of training data of this size")
     parser.add_argument("--num_workers", type=int, default=os.cpu_count(), help="DataLoader workers")
+    parser.add_argument("--random_flip_prob", type=float, default=0.5, help="Horizontal flip probability for training images")
     # parser.add_argument("--manual_tar_dir", type=str, default="./local_imagenet64_tars/", help="Manual tar dir for TFDS")
 
     # WandB parameters
@@ -267,7 +270,8 @@ def main():
                 resolution=resolution,
                 kaggle_dataset_id=kaggle_dataset_id,
                 max_samples=config["dataset_subset_size"],
-                random_subset_seed=config["seed"] if config["dataset_subset_size"] is not None else None
+                random_subset_seed=config["seed"] if config["dataset_subset_size"] is not None else None,
+                random_flip_prob=float(config.get("random_flip_prob", 0.5))
             )
             va_ds = KaggleImageFolderImagenet(
                 split='val',
@@ -398,18 +402,9 @@ def main():
     # OPTIMIZER & SCHEDULER
     # -----------------------
     total_steps_per_epoch = len(train_loader)
-    epochs_cfg = int(config["total_epochs"])
-    # Apply dataset-specific defaults only when the user hasn't overridden epochs
-    if config.get("dataset") == "imagenet64_kaggle" and epochs_cfg == 40:
-        logger.info("Setting epochs to 200 for ImageNet-1k (paper default). Override with --total_epochs if desired.")
-        epochs_cfg = 200
-    if config.get("dataset") == "imagenet21k_folder" and epochs_cfg == 40:
-        logger.info("Setting epochs to 50 for ImageNet-21k (paper default). Override with --total_epochs if desired.")
-        epochs_cfg = 50
-    total_epochs = epochs_cfg
+    total_epochs = int(config["total_epochs"])
     total_steps = total_steps_per_epoch * total_epochs
-    from src.utils.constants import SIGMA_RGB_FINAL_IMAGENET as sigma_final
-    core.configure_noise_schedule(total_steps, sigma0=float(config.get("rgb_sigma0", 64.0)), sigma_final=sigma_final)
+    core.configure_noise_schedule(total_steps, sigma0=float(config.get("rgb_sigma0")), sigma_final=float(config.get("rgb_sigma_final")))
     model = accelerator.wrap_model(core)
     optimizer, scheduler = get_optimizer_and_scheduler(model, config, total_steps)
     

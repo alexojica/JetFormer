@@ -826,42 +826,42 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
     """
     # All dataset classes are defined in this module; avoid cross-module shim imports
 
-    dataset_choice = getattr(config, 'dataset', 'laion_pop')
+    dataset_choice = getattr(config, 'dataset')
     if str(dataset_choice).lower() == 'imagenet64_kaggle':
-        H, W = tuple(getattr(config, 'input_size', (256, 256)))
+        H, W = tuple(getattr(config, 'input_size'))
         res = int(H)
         dataset = KaggleImageFolderImagenet(
             split='train',
             resolution=res,
-            kaggle_dataset_id=getattr(config, 'kaggle_dataset_id', 'ayaroshevskiy/downsampled-imagenet-64x64'),
-            max_samples=getattr(config, 'max_samples', None),
-            random_flip_prob=float(getattr(config, 'random_flip_prob', 0.5))
+            kaggle_dataset_id=getattr(config, 'kaggle_dataset_id'),
+            max_samples=getattr(config, 'max_samples'),
+            random_flip_prob=float(getattr(config, 'random_flip_prob'))
         )
         val_dataset = KaggleImageFolderImagenet(
             split='val', resolution=res,
-            kaggle_dataset_id=getattr(config, 'kaggle_dataset_id', 'ayaroshevskiy/downsampled-imagenet-64x64'),
+            kaggle_dataset_id=getattr(config, 'kaggle_dataset_id'),
             random_flip_prob=0.0
         )
     elif str(dataset_choice).lower() == 'imagenet21k_folder':
         root = getattr(config, 'imagenet21k_root', None)
         if not root:
             raise ValueError("--imagenet21k_root must be provided for imagenet21k_folder dataset")
-        H, W = tuple(getattr(config, 'input_size', (256, 256)))
+        H, W = tuple(getattr(config, 'input_size'))
         res = int(H)
         dataset = ImageNet21kFolder(root_dir=root, split='train', resolution=res, max_samples=getattr(config, 'max_samples', None))
         val_dataset = ImageNet21kFolder(root_dir=root, split='val', resolution=res)
     else:
         dataset = LAIONPOPTextImageDataset(
-            vocab_size=getattr(config, 'vocab_size', 32000),
-            tokenizer_path=getattr(config, 'tokenizer_path', "gs://t5-data/vocabs/cc_en.32000/sentencepiece.model"),
-            max_text_len=getattr(config, 'max_seq_len', 64),
-            image_size=tuple(getattr(config, 'input_size', (256, 256))),
-            cache_dir=getattr(config, 'cache_dir', "./laion_pop_cache"),
-            max_samples=getattr(config, 'max_samples', None),
-            use_cogvlm_captions=getattr(config, 'use_cogvlm_captions', True),
-            min_resolution=getattr(config, 'min_resolution', 512),
-            num_workers=getattr(config, 'num_workers', 4),
-            ignore_pad=getattr(config, 'ignore_pad', False)
+            vocab_size=getattr(config, 'vocab_size'),
+            tokenizer_path=getattr(config, 'tokenizer_path'),
+            max_text_len=getattr(config, 'max_seq_len'),
+            image_size=tuple(getattr(config, 'input_size')),
+            cache_dir=getattr(config, 'cache_dir'),
+            max_samples=getattr(config, 'max_samples'),
+            use_cogvlm_captions=getattr(config, 'use_cogvlm_captions'),
+            min_resolution=getattr(config, 'min_resolution'),
+            num_workers=getattr(config, 'num_workers'),
+            ignore_pad=getattr(config, 'ignore_pad')
         )
         # No explicit val set; reuse train dataset for a quick sanity val (not ideal)
         val_dataset = dataset
@@ -874,7 +874,7 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
         batch_size=config.batch_size,
         shuffle=(train_sampler is None),
         sampler=train_sampler,
-        num_workers=int(getattr(config, 'num_workers', 8) or 8),
+        num_workers=int(getattr(config, 'num_workers')),
         prefetch_factor=4,
         persistent_workers=True,
         drop_last=True,
@@ -886,7 +886,7 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
         batch_size=config.batch_size,
         shuffle=False,
         sampler=val_sampler,
-        num_workers=int(getattr(config, 'num_workers', 8) or 8),
+        num_workers=int(getattr(config, 'num_workers')),
         prefetch_factor=4,
         persistent_workers=True,
         drop_last=False,

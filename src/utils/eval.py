@@ -7,6 +7,7 @@ import wandb
 
 import torch
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 
 @torch.no_grad()
@@ -14,7 +15,8 @@ def evaluate_one_epoch(model_obj: torch.nn.Module,
                        loader: DataLoader,
                        accelerator,
                        mode: str = "ar_flow",
-                       eval_no_rgb_noise: bool = True) -> Tuple[float, float, float, float]:
+                       eval_no_rgb_noise: bool = True,
+                       config: Optional[Any] = None) -> Tuple[float, float, float, float]:
     """Unified evaluation loop.
 
     Args:
@@ -33,20 +35,27 @@ def evaluate_one_epoch(model_obj: torch.nn.Module,
     sum_flow = 0.0
     count = 0
     iterable = accelerator.wrap_dataloader(loader, is_train=False) if hasattr(accelerator, 'wrap_dataloader') else loader
-    for batch in iterable:
+    is_main = getattr(accelerator, 'is_main_process', True) if accelerator is not None else True
+    iterator = tqdm(iterable, desc="Validation", total=len(loader), leave=True) if is_main else iterable
+    for batch in iterator:
         try:
             torch.compiler.cudagraph_mark_step_begin()
         except Exception:
             pass
         bsz = None
         if kind == "ar_flow":
+            # Use training_helpers.train_step to compute losses from batch+config
             # Signal to disable RGB noise during eval for reproducibility
             try:
                 batch = dict(batch)
                 batch['no_rgb_noise'] = bool(eval_no_rgb_noise)
             except Exception:
                 pass
-            out = model_obj(batch)
+            base = model_obj.module if hasattr(model_obj, 'module') else model_obj
+            # Defer import to avoid circulars
+            from src.utils.training_helpers import train_step as _train_step
+            # step/total_steps unused when eval_no_rgb_noise=True; pass minimal values
+            out = _train_step(base, batch, step=0, total_steps=1, config=config)
             bsz = batch['image'].size(0)
             sum_total += float(out.get('loss', 0.0)) * bsz
             sum_text += float(out.get('text_loss', 0.0)) * bsz
