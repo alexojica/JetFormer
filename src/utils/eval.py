@@ -152,16 +152,16 @@ def _compute_fid_and_is(generated_dir: str,
         fid_score = None
         fid_errors: List[str] = []
         try:
-            import cleanfid
+            from cleanfid import fid as cfid
             if ref_dir is not None and os.path.isdir(ref_dir):
-                fid_score = cleanfid.compute_fid(generated_dir, ref_dir, mode='clean')
+                fid_score = cfid.compute_fid(generated_dir, ref_dir, mode='clean')
         except Exception as e:
             fid_errors.append(f"cleanfid: {e!r}")
             try:
                 from torch_fidelity import calculate_metrics
                 tm = calculate_metrics(
-                    generated_dir,
-                    ref_dir if (ref_dir and os.path.isdir(ref_dir)) else None,
+                    input1=generated_dir,
+                    input2=(ref_dir if (ref_dir and os.path.isdir(ref_dir)) else None),
                     cuda=torch.cuda.is_available(),
                     isc=False,
                     kid=False,
@@ -184,8 +184,8 @@ def _compute_fid_and_is(generated_dir: str,
         try:
             from torch_fidelity import calculate_metrics
             tm = calculate_metrics(
-                generated_dir,
-                None,
+                input1=generated_dir,
+                input2=None,
                 cuda=torch.cuda.is_available(),
                 isc=True,
                 kid=False,
@@ -294,16 +294,14 @@ def compute_fid(generated_dir: Path | str, ref_dir: Path | str | None = None, re
     rstats = Path(ref_stats) if ref_stats is not None else None
     score: Optional[float] = None
     try:
-        import cleanfid
-        if rstats is not None and rstats.exists():
-            score = cleanfid.compute_fid(gdir, None, dataset_name=None, dataset_split=None, mode='clean', fdir=str(rstats))
-        elif rdir is not None and rdir.exists():
-            score = cleanfid.compute_fid(gdir, rdir, mode='clean')
+        from cleanfid import fid as cfid
+        if rdir is not None and rdir.exists():
+            score = cfid.compute_fid(str(gdir), str(rdir), mode='clean')
     except Exception:
         try:
             from torch_fidelity import calculate_metrics
-            metrics = calculate_metrics(str(gdir), str(rdir) if rdir else None, cuda=torch.cuda.is_available(), isc=False, kid=False, fid=True)
-            score = float(metrics.get('frechet_inception_distance', None))
+            metrics = calculate_metrics(input1=str(gdir), input2=(str(rdir) if rdir else None), cuda=torch.cuda.is_available(), isc=False, kid=False, fid=True)
+            score = float(metrics.get('frechet_inception_distance', metrics.get('fid', None)))
         except Exception:
             score = None
     return score
