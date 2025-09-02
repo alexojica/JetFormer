@@ -319,7 +319,9 @@ def train_from_config(config_dict: dict):
             
             # Log on a per-batch cadence for smoother curves, independent of grad accumulation
             if is_main_process and wb_run is not None and (batch_idx % int(getattr(config, 'log_every_batches')) == 0):
-                wb_logger.log_train_step(model, optimizer, out, step, epoch, time.time() - start_time)
+                # Only compute gradient metrics on accumulation boundaries to avoid extra all-reduces in DDP
+                log_grads = bool(is_accum_boundary)
+                wb_logger.log_train_step(model, optimizer, out, step, epoch, time.time() - start_time, log_grads=log_grads)
             
             # If an epoch-level sampling schedule is configured, it overrides per-batch sampling
             sample_every_epochs = int(getattr(config, 'sample_every_epochs', 0) or 0)

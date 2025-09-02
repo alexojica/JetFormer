@@ -53,11 +53,30 @@ class WBLogger:
         except Exception:
             return float('nan')
 
-    def log_train_step(self, model, optimizer, out: dict, step: int, epoch: int, batch_time: float):
+    def log_train_step(self, model, optimizer, out: dict, step: int, epoch: int, batch_time: float, log_grads: bool = False):
         if not self.enabled:
             return
         text_ce = float(out.get('text_loss', 0.0))
         text_ppl = float(math.exp(min(30.0, text_ce))) if text_ce > 0 else 0.0
+        # Resolve base module for submodule-specific grad norms (computed only when requested)
+        grad_metrics = {}
+        if log_grads:
+            base = model
+            if hasattr(base, 'module'):
+                base = base.module
+            try:
+                grad_norm_transformer = self._grad_norm(base.transformer) if hasattr(base, 'transformer') else float('nan')
+            except Exception:
+                grad_norm_transformer = float('nan')
+            try:
+                grad_norm_jet = self._grad_norm(base.jet) if hasattr(base, 'jet') else float('nan')
+            except Exception:
+                grad_norm_jet = float('nan')
+            grad_metrics = {
+                "train/grad_norm": self._grad_norm(model),
+                "train/grad_norm_transformer": grad_norm_transformer,
+                "train/grad_norm_jet": grad_norm_jet,
+            }
         # Prefer explicit NLL (nats) if provided; otherwise derive from BPD if possible
         payload = {
             # Core likelihood metrics
@@ -88,7 +107,6 @@ class WBLogger:
             "train/cfg_drop_prob": float(getattr(self.cfg, 'cfg_drop_prob', 0.1)),
             # Optimization / dynamics
             "train/lr": optimizer.param_groups[0]['lr'] if hasattr(optimizer, 'param_groups') else 0.0,
-            "train/grad_norm": self._grad_norm(model),
             "train/optimizer_beta2": optimizer.param_groups[0].get('betas', (None, 0.95))[1] if hasattr(optimizer, 'param_groups') else 0.95,
             "train/weight_decay": optimizer.param_groups[0].get('weight_decay', 1e-4) if hasattr(optimizer, 'param_groups') else 1e-4,
             "train/dropout": float(getattr(self.cfg, 'dropout', 0.1)),
@@ -100,6 +118,8 @@ class WBLogger:
             # Sanity
             "sanity/gmm_small_scales_rate": float(out.get('gmm_small_scales_rate', 0.0)),
         }
+        if log_grads and grad_metrics:
+            payload.update(grad_metrics)
         try:
             # Use explicit step so W&B curves are aligned with optimizer steps
             self.wb.log(payload, step=int(step))
