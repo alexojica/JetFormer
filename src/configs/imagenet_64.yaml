@@ -2,8 +2,8 @@ vocab_size: 32000
 
 # Image/tokenization
 input_size: [64, 64]
-patch_size: 8                 
-image_ar_dim: 112             
+patch_size: 16                 
+image_ar_dim: 128             
 num_mixtures: 1024             
 use_bfloat16_img_head: true
 channel_repeat: 0
@@ -21,7 +21,7 @@ pre_factor_dim: None              # keep POST-flow factoring (paper’s main set
 d_model: 512
 n_heads: 8
 n_layers: 14
-d_ff: 2560
+d_ff: 2048
 n_kv_heads: 1
 dropout: 0.1
 max_seq_len: 96                # 16 class + 16 image tokens fits comfortably
