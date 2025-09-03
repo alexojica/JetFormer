@@ -39,7 +39,7 @@ kaggle_dataset_id: "ayaroshevskiy/downsampled-imagenet-64x64"
 
 # Optimization / curriculum
 batch_size: 768
-learning_rate: 0.001           # AdamW w/ decoupled WD assumed
+learning_rate: 0.001          
 weight_decay: 0.0001
 opt_b1: 0.9
 opt_b2: 0.95
@@ -51,8 +51,8 @@ grad_checkpoint_transformer: false
 flow_grad_checkpoint: false
 
 rgb_sigma0: 64.0
-rgb_sigma_final: 0.0           # ImageNet: decay to zero
-noise_curriculum_epochs: 100   # front-load the decay so σ≈0 by ~epoch 20
+rgb_sigma_final: 0.0          
+noise_curriculum_epochs: 100   
 latent_noise_std: 0.3
 text_loss_weight: 0.0
 image_loss_weight: 1.0
@@ -60,7 +60,7 @@ grad_accum_steps: 1
 
 # Epoch-level schedules
 sample_every_epochs: 3
-val_every_epochs: 3            # see progress every epoch
+val_every_epochs: 3            
 
 # Evaluation controls
 eval_no_rgb_noise: true        # ensure σ=0 at validation to see “true” NLL/BPD

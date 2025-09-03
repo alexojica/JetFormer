@@ -400,53 +400,7 @@ def train_from_config(config_dict: dict):
                 finally:
                     if see > 0 and ((epoch + 1) % see == 0) and (ema_enabled and ema is not None):
                         ema.restore(model)
-            # Periodic FID/IS computation after validation (EMA weights) based on flags
-            try:
-                fid_every = int(getattr(config, 'fid_every_epochs', 0) or 0)
-                is_every = int(getattr(config, 'is_every_epochs', 0) or 0)
-                do_fid = fid_every > 0 and (((epoch + 1) % fid_every) == 0)
-                do_is = is_every > 0 and (((epoch + 1) % is_every) == 0)
-                if (do_fid or do_is) and wb_run is not None:
-                    if ema_enabled and ema is not None:
-                        ema.apply_to(model)
-                    base = unwrap_base_model(model)
-                    num_eval_samples = int(getattr(config, 'fid_is_num_samples'))
-                    fid_is_metrics = compute_and_log_fid_is(
-                        base_model=base,
-                        dataset=dataset,
-                        val_loader=val_loader,
-                        device=device_obj,
-                        num_samples=num_eval_samples,
-                        compute_fid=do_fid,
-                        compute_is=do_is,
-                        step=step,
-                        epoch=epoch,
-                        cfg_strength=float(getattr(config, 'cfg_strength')),
-                        cfg_mode=str(getattr(config, 'cfg_mode')),
-                    )
-                    try:
-                        if do_fid:
-                            if isinstance(fid_is_metrics, dict) and 'fid' in fid_is_metrics:
-                                print(f"Epoch {epoch+1}: FID = {float(fid_is_metrics['fid']):.4f}")
-                            else:
-                                print("Error: FID requested but not returned by evaluation.")
-                        if do_is:
-                            if isinstance(fid_is_metrics, dict) and 'is_mean' in fid_is_metrics:
-                                is_mean = float(fid_is_metrics['is_mean'])
-                                is_std = float(fid_is_metrics.get('is_std', 0.0))
-                                print(f"Epoch {epoch+1}: Inception Score = {is_mean:.4f} ± {is_std:.4f}")
-                            else:
-                                print("Error: Inception Score requested but not returned by evaluation.")
-                    except Exception as _e:
-                        print(f"Error printing FID/IS after evaluation: {_e}")
-            except Exception as e:
-                print(f"FID/IS computation failed: {e}")
-            finally:
-                try:
-                    if ema_enabled and ema is not None:
-                        ema.restore(model)
-                except Exception:
-                    pass
+            # (moved) FID/IS computation now happens independently of validation cadence
 
             # Save checkpoint every 5 epochs if validation improves
             improved = v_total < best_val_loss
@@ -472,6 +426,59 @@ def train_from_config(config_dict: dict):
                         else {'best_val_loss': best_val_loss}
                     ),
                 )
+
+        # Periodic FID/IS computation after epoch (EMA weights) based solely on epoch cadence
+        try:
+            fid_every = int(getattr(config, 'fid_every_epochs', 0) or 0)
+            is_every = int(getattr(config, 'is_every_epochs', 0) or 0)
+            do_fid = fid_every > 0 and (((epoch + 1) % fid_every) == 0)
+            do_is = is_every > 0 and (((epoch + 1) % is_every) == 0)
+        except Exception:
+            do_fid = False
+            do_is = False
+
+        if (do_fid or do_is) and is_main_process:
+            try:
+                if ema_enabled and ema is not None:
+                    ema.apply_to(model)
+                base = unwrap_base_model(model)
+                num_eval_samples = int(getattr(config, 'fid_is_num_samples'))
+                fid_is_metrics = compute_and_log_fid_is(
+                    base_model=base,
+                    dataset=dataset,
+                    val_loader=val_loader,
+                    device=device_obj,
+                    num_samples=num_eval_samples,
+                    compute_fid=do_fid,
+                    compute_is=do_is,
+                    step=step,
+                    epoch=epoch,
+                    cfg_strength=float(getattr(config, 'cfg_strength')),
+                    cfg_mode=str(getattr(config, 'cfg_mode')),
+                )
+                try:
+                    if do_fid:
+                        if isinstance(fid_is_metrics, dict) and 'fid' in fid_is_metrics:
+                            print(f"Epoch {epoch+1}: FID = {float(fid_is_metrics['fid']):.4f}")
+                        else:
+                            print("Error: FID requested but not returned by evaluation.")
+                    if do_is:
+                        if isinstance(fid_is_metrics, dict) and 'is_mean' in fid_is_metrics:
+                            is_mean = float(fid_is_metrics['is_mean'])
+                            is_std = float(fid_is_metrics.get('is_std', 0.0))
+                            print(f"Epoch {epoch+1}: Inception Score = {is_mean:.4f} ± {is_std:.4f}")
+                        else:
+                            print("Error: Inception Score requested but not returned by evaluation.")
+                except Exception as _e:
+                    print(f"Error printing FID/IS after evaluation: {_e}")
+            except Exception as e:
+                print(f"FID/IS computation failed: {e}")
+            finally:
+                try:
+                    if ema_enabled and ema is not None:
+                        ema.restore(model)
+                except Exception:
+                    pass
 
         # Always save/overwrite rolling last checkpoint at end of each epoch
         if is_main_process:
