@@ -840,6 +840,7 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
         val_dataset = KaggleImageFolderImagenet(
             split='val', resolution=res,
             kaggle_dataset_id=getattr(config, 'kaggle_dataset_id'),
+            max_samples=getattr(config, 'max_samples', None),
             random_flip_prob=0.0
         )
     elif str(dataset_choice).lower() == 'imagenet21k_folder':
@@ -849,7 +850,7 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
         H, W = tuple(getattr(config, 'input_size'))
         res = int(H)
         dataset = ImageNet21kFolder(root_dir=root, split='train', resolution=res, max_samples=getattr(config, 'max_samples', None))
-        val_dataset = ImageNet21kFolder(root_dir=root, split='val', resolution=res)
+        val_dataset = ImageNet21kFolder(root_dir=root, split='val', resolution=res, max_samples=getattr(config, 'max_samples', None))
     else:
         dataset = LAIONPOPTextImageDataset(
             vocab_size=getattr(config, 'vocab_size'),

@@ -377,29 +377,6 @@ def train_from_config(config_dict: dict):
             print(f"Val Epoch {epoch+1} — total: {v_total:.4f} | text: {v_text:.4f} | img: {v_img:.4f}")
             if wb_run is not None:
                 wb_logger.log_validation_epoch(model, v_total, v_text, v_img, v_flow, epoch=epoch+1, step=step)
-                # Optional sampling at epoch granularity
-                try:
-                    see = int(getattr(config, 'sample_every_epochs', 0) or 0)
-                    if see > 0 and ((epoch + 1) % see == 0):
-                        if ema_enabled and ema is not None:
-                            ema.apply_to(model)
-                        base = unwrap_base_model(model)
-                        generate_and_log_samples(
-                            base_model=base,
-                            dataset=dataset,
-                            device=device_obj,
-                            dataset_choice=dataset_choice,
-                            cfg_strength=float(getattr(config, 'cfg_strength')),
-                            cfg_mode=str(getattr(config, 'cfg_mode')),
-                            step=step,
-                            stage_label=f"val_epoch_{epoch+1}",
-                            num_samples=3,
-                        )
-                except Exception as e:
-                    print(f"Sampling at validation failed: {e}")
-                finally:
-                    if see > 0 and ((epoch + 1) % see == 0) and (ema_enabled and ema is not None):
-                        ema.restore(model)
             # (moved) FID/IS computation now happens independently of validation cadence
 
             # Save checkpoint every 5 epochs if validation improves
@@ -479,6 +456,36 @@ def train_from_config(config_dict: dict):
                         ema.restore(model)
                 except Exception:
                     pass
+
+        # Epoch-level sampling independent of validation cadence
+        try:
+            see = int(getattr(config, 'sample_every_epochs', 0) or 0)
+        except Exception:
+            see = 0
+        if is_main_process and see > 0 and (((epoch + 1) % see) == 0):
+            try:
+                if ema_enabled and ema is not None:
+                    ema.apply_to(model)
+                base = unwrap_base_model(model)
+                generate_and_log_samples(
+                    base_model=base,
+                    dataset=dataset,
+                    device=device_obj,
+                    dataset_choice=dataset_choice,
+                    cfg_strength=float(getattr(config, 'cfg_strength')),
+                    cfg_mode=str(getattr(config, 'cfg_mode')),
+                    step=step,
+                    stage_label=f"epoch_{epoch+1}",
+                    num_samples=3,
+                )
+            except Exception as e:
+                print(f"Sampling at epoch boundary failed: {e}")
+            finally:
+                if ema_enabled and ema is not None:
+                    try:
+                        ema.restore(model)
+                    except Exception:
+                        pass
 
         # Always save/overwrite rolling last checkpoint at end of each epoch
         if is_main_process:
