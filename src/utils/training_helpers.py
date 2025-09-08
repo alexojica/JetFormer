@@ -224,7 +224,32 @@ def generate_and_log_samples(base_model,
                              batch_idx: Optional[int] = None) -> None:
     dataset_choice_l = str(dataset_choice).lower() if dataset_choice is not None else ''
     if dataset_choice_l in ('imagenet64_kaggle', 'imagenet21k_folder'):
-        class_ids = [0, 250, 500, 750]
+        # Pick top-frequency classes actually present in the (possibly truncated) train subset
+        class_ids = None
+        try:
+            ds = dataset
+            # KaggleImageFolderImagenet / ImageNet21kFolder expose `samples: List[(path, class_idx)]`
+            if hasattr(ds, 'samples') and isinstance(ds.samples, (list, tuple)) and len(ds.samples) > 0:
+                from collections import Counter
+                counts = Counter()
+                for item in ds.samples:
+                    try:
+                        if isinstance(item, (tuple, list)) and len(item) >= 2:
+                            counts[int(item[1])] += 1
+                    except Exception:
+                        continue
+                if len(counts) > 0:
+                    class_ids = [cid for cid, _ in counts.most_common(4)]
+            # Fallback: derive evenly spaced ids from available classes
+            if (not class_ids) and hasattr(ds, 'classes') and isinstance(ds.classes, list) and len(ds.classes) > 0:
+                n = len(ds.classes)
+                picks = [0, max(0, n // 3), max(0, (2 * n) // 3), n - 1]
+                class_ids = sorted(set(int(p) for p in picks if 0 <= p < n))
+        except Exception:
+            class_ids = None
+        if not class_ids or len(class_ids) == 0:
+            # Final fallback to legacy fixed ids
+            class_ids = [0, 250, 500, 750]
         samples = generate_class_conditional_samples(
             base_model, device, class_ids,
             cfg_strength=float(cfg_strength), cfg_mode=str(cfg_mode)

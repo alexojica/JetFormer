@@ -65,7 +65,7 @@ grad_accum_steps: 1
 
 # Epoch-level schedules
 sample_every_epochs: 5
-val_every_epochs: 2
+val_every_epochs: 5
 
 # Evaluation controls
 eval_no_rgb_noise: true
