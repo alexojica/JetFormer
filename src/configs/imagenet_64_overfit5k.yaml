@@ -3,7 +3,8 @@ vocab_size: 32000
 # Image/tokenization
 input_size: [64, 64]
 patch_size: 16
-image_ar_dim: 128            # higher AR capacity to fit training set
+# Use full token dimensionality for AR (3*ps^2 = 3*16*16 = 768)
+image_ar_dim: 768            # maximize AR capacity to drive overfit and improve samples
 num_mixtures: 512            # richer mixture head for memorization
 use_bfloat16_img_head: true
 channel_repeat: 0
