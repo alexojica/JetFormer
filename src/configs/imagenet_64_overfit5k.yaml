@@ -44,7 +44,7 @@ learning_rate: 0.0005
 weight_decay: 0.0            # remove L2 to allow memorization
 opt_b1: 0.9
 opt_b2: 0.999
-grad_clip_norm: 1.0
+grad_clip_norm: 10.0
 num_epochs: 200
 precision: bf16
 torch_compile: false

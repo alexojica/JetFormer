@@ -209,22 +209,22 @@ def compute_jetformer_loss(model,
         text_first_mask = torch.bernoulli(torch.ones(B, device=device) * 0.5).bool()
     text_second_mask = ~text_first_mask
 
-    # Uniform dequant + RGB noise schedule to [0,1]
-    from src.utils.image import to_x01, dequantize01
-    images01 = to_x01(images)
-    u = torch.rand_like(images01) / 256.0
+    # Uniform dequantization to [0,1] matching FlowCore.training_step and the paper:
+    # x01 = (I + U) / 256, then add Gaussian RGB noise with sigma_t/255.
+    images_float = images.float()
+    u_uint8 = torch.rand_like(images_float)
+    images01 = (images_float + u_uint8) / 256.0
     no_rgb_noise = bool(batch.get('no_rgb_noise', False) or eval_no_rgb_noise)
     if no_rgb_noise:
         sigma_t = torch.tensor(0.0, device=device)
     else:
-        # Compute schedule
         from src.utils.schedules import rgb_cosine_sigma
         step_tensor = torch.tensor(int(step), device=device, dtype=torch.float32)
         total_steps_tensor = torch.tensor(int(max(1, total_steps)), device=device, dtype=torch.float32)
         nts = getattr(model, 'noise_total_steps', None)
         sigma_t = rgb_cosine_sigma(step_tensor, total_steps_tensor, float(rgb_sigma0), float(rgb_sigma_final), nts)
     gaussian = torch.randn_like(images01) * (sigma_t / 255.0)
-    images01_noisy = images01 + u + gaussian
+    images01_noisy = images01 + gaussian
 
     # Flow encode via utility
     from src.utils.training_helpers import flow_encode_images01_to_tokens

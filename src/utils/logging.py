@@ -150,11 +150,13 @@ class WBLogger:
             # Alias matching paper terminology
             'val/nll_bpd': v_img_bpd,
             'val/flow_bpd': v_flow_bpd,
-            'val/ar_bpd': max(0.0, v_img_bpd - v_flow_bpd),
+            # Paper-consistent decomposition: total_bpd = ar_bpd + flow_bpd, where flow_bpd = (-logdet)/(ln2*D)
+            'val/ar_bpd': (v_img_bpd - v_flow_bpd),
             # NLL (nats)
             'val/total_nll_nats': val_total_nll,
             'val/ar_nll_nats': val_ar_nll,
             'val/nll_nats': val_total_nll,
+            # Positive contribution from -logdet (nats)
             'val/flow_neg_logdet_nats': val_flow_neg_logdet,
             # Text
             'val/text_ce': v_text,
