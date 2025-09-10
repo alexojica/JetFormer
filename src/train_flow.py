@@ -13,7 +13,7 @@ import math
 import time # For timing steps/epochs
 import random
 from .flow.jet_flow import FlowCore
-from src.utils.dataset import TFDSImagenet64, TFDSImagenet32, TorchvisionCIFAR10, ImageNet21kFolder, KaggleImageFolderImagenet
+from src.utils.dataset import TFDSImagenet64, TFDSImagenet32, TorchvisionCIFAR10, ImageNet21kFolder
 from tqdm import tqdm
 import wandb
 from src.utils.logging import get_logger
@@ -135,8 +135,7 @@ def main():
     parser.add_argument("--grad_checkpoint", "--model_grad_checkpoint", dest="grad_checkpoint", type=str2bool, default=False, help="Use gradient checkpointing to save memory")
 
     # Dataset parameters
-    parser.add_argument("--dataset", choices=["imagenet64_kaggle", "imagenet32_tfds", "imagenet21k_folder", "cifar10"], default="imagenet64_kaggle", help="Dataset to use")
-    parser.add_argument("--kaggle_dataset_id", type=str, default="ayaroshevskiy/downsampled-imagenet-64x64", help="Kaggle dataset ID for ImageNet64")
+    parser.add_argument("--dataset", choices=["imagenet64_tfds", "imagenet32_tfds", "imagenet21k_folder", "cifar10"], default="imagenet64_tfds", help="Dataset to use")
     parser.add_argument("--imagenet21k_root", type=str, default=None, help="Root folder for ImageNet-21k (train/val under it)")
     parser.add_argument("--dataset_subset_size", type=int, default=None, help="Use a random subset of training data of this size")
     parser.add_argument("--num_workers", type=int, default=os.cpu_count(), help="DataLoader workers")
@@ -258,25 +257,19 @@ def main():
     # -----------------------
     if is_main_process:
         logger.info("Loading datasets...")
-    dataset_choice = config.get("dataset", "imagenet64_kaggle")
+    dataset_choice = config.get("dataset", "imagenet64_tfds")
     resolution = int(config["resolution"]) if "resolution" in config else (64 if dataset_choice != "imagenet32_tfds" else 32)
 
     def _build_datasets():
-        if dataset_choice == "imagenet64_kaggle":
-            kaggle_dataset_id = config.get("kaggle_dataset_id", "ayaroshevskiy/downsampled-imagenet-64x64")
-            logger.info(f"Using KaggleImageFolder dataset loader for {resolution}x{resolution} resolution.")
-            tr_ds = KaggleImageFolderImagenet(
+        if dataset_choice == "imagenet64_tfds":
+            logger.info(f"Using TFDS imagenet_resized/64x64 dataset loader.")
+            from src.utils.dataset import TFDSImagenetResized64
+            tr_ds = TFDSImagenetResized64(
                 split='train',
-                resolution=resolution,
-                kaggle_dataset_id=kaggle_dataset_id,
-                max_samples=config["dataset_subset_size"],
-                random_subset_seed=config["seed"] if config["dataset_subset_size"] is not None else None,
-                random_flip_prob=float(config.get("random_flip_prob", 0.5))
+                max_samples=config["dataset_subset_size"]
             )
-            va_ds = KaggleImageFolderImagenet(
-                split='val',
-                resolution=resolution,
-                kaggle_dataset_id=kaggle_dataset_id,
+            va_ds = TFDSImagenetResized64(
+                split='validation',
             )
             return tr_ds, va_ds
         elif dataset_choice == "imagenet32_tfds":

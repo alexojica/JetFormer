@@ -33,8 +33,7 @@ cfg_strength: 4.0              # used at sampling
 cfg_mode: "reject"
 
 # Dataset / training target
-dataset: imagenet64_kaggle
-kaggle_dataset_id: "ayaroshevskiy/downsampled-imagenet-64x64"
+dataset: imagenet64_tfds
 
 # Optimization / curriculum
 batch_size: 768

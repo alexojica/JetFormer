@@ -34,7 +34,6 @@ from src.utils.logging import get_logger
 logger = get_logger(__name__)
 from sentencepiece import SentencePieceProcessor
 from src.utils.tokenizer import download_sentencepiece_model
-import kagglehub
 
 class LAIONPOPTextImageDataset(Dataset): # tokenizer: gs://t5-data/vocabs/cc_en.32000/sentencepiece.model
     def _download_tokenizer_model(self, tokenizer_path):
@@ -620,6 +619,58 @@ class TFDSImagenet32(TFDSImagenet):
         super().__init__(resolution=32, **kwargs)
 
 
+class TFDSImagenetResized(Dataset):
+    """TFDS imagenet_resized/64x64 wrapper returning {image:uint8 CHW, label}."""
+
+    def __init__(self,
+                 split: str = 'train',
+                 resolution: int = 64,
+                 max_samples: Optional[int] = None,
+                 data_dir: str = None):
+        super().__init__()
+        if resolution != 64:
+            raise ValueError("TFDSImagenetResized currently supports only 64x64 resolution.")
+        if split == 'val':
+            split = 'validation'
+        builder = tfds.builder('imagenet_resized/64x64', data_dir=data_dir)
+        builder.download_and_prepare()
+        ds = builder.as_dataset(split=split, shuffle_files=False)
+        if max_samples is not None:
+            ds = ds.take(max_samples)
+        self.tfds = ds
+        self._length = int(max_samples) if max_samples is not None else builder.info.splits[split].num_examples
+        self._prepare_list()
+
+    def _prepare_list(self):
+        self._images: List[np.ndarray] = []
+        self._labels: List[int] = []
+        # Provide class-like attributes for compatibility with helpers
+        self.classes = list(range(1000))
+        count = 0
+        for example in tfds.as_numpy(self.tfds):
+            self._images.append(example['image'])
+            self._labels.append(int(example['label']))
+            count += 1
+            if self._length is not None and count >= self._length:
+                break
+        self._length = count
+        self.samples = [(i, self._labels[i]) for i in range(self._length)]
+
+    def __len__(self):
+        return self._length
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        img_np = self._images[idx]
+        lbl = self._labels[idx]
+        img_tensor = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()
+        label_tensor = torch.tensor(lbl, dtype=torch.long)
+        return {"image": img_tensor, "label": label_tensor}
+
+
+class TFDSImagenetResized64(TFDSImagenetResized):
+    def __init__(self, **kwargs):
+        super().__init__(resolution=64, **kwargs)
+
 class TorchvisionCIFAR10(Dataset):
     """Wrapper around torchvision CIFAR-10 to return uint8 CHW images."""
     def __init__(self, split: str = 'train', download: bool = True):
@@ -648,105 +699,9 @@ _IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tif', '.tiff'}
 
 
 class KaggleImageFolderImagenet(Dataset):
-    """ImageNet-style folder dataset downloaded via kagglehub.
-
-    Splits are expected to be 'train' or 'val'. Class subfolders will be used if present.
-    """
-
-    def __init__(self,
-                 split: str = 'train',
-                 resolution: int = 64,
-                 kaggle_dataset_id: str = "ayaroshevskiy/downsampled-imagenet-64x64",
-                 max_samples: Optional[int] = None,
-                 random_subset_seed: Optional[int] = None,
-                 random_flip_prob: float = 0.5):
-        super().__init__()
-        if split not in {"train", "val", "validation"}:
-            raise ValueError("split must be 'train' or 'val'.")
-        if split == "validation":
-            split = "val"
-        self.split = split
-        self.resolution = resolution
-        self.kaggle_dataset_id = kaggle_dataset_id
-        self.max_samples = max_samples
-        self.random_subset_seed = random_subset_seed
-        self.random_flip_prob = float(random_flip_prob)
-
-        self.samples: List[Tuple[pathlib.Path, int]] = []
-        self.classes: List[str] = []
-        self.class_to_idx: Dict[str, int] = {}
-
-        self._download_and_scan()
-        if not self.samples:
-            raise RuntimeError(f"No images found for split '{self.split}' in Kaggle dataset '{self.kaggle_dataset_id}'.")
-        if self.max_samples is not None:
-            if self.random_subset_seed is not None:
-                import random
-                random.Random(self.random_subset_seed).shuffle(self.samples)
-            self.samples = self.samples[: self.max_samples]
-
-    def _download_and_scan(self):
-        download_root = pathlib.Path(kagglehub.dataset_download(self.kaggle_dataset_id))
-        candidate_split_dirs: List[pathlib.Path] = []
-        candidate_split_dirs.append(download_root / self.split)
-        dataset_slug = self.kaggle_dataset_id.split('/')[-1]
-        candidate_split_dirs.append(download_root / dataset_slug / self.split)
-        if self.split == 'val':
-            candidate_split_dirs.append(download_root / 'validation')
-            candidate_split_dirs.append(download_root / dataset_slug / 'validation')
-
-        split_dir = None
-        for cand in candidate_split_dirs:
-            if cand.is_dir() and any(p.is_dir() for p in cand.iterdir()):
-                split_dir = cand
-                break
-        if split_dir is None:
-            possible_dirs = [d for d in download_root.rglob('*') if d.is_dir() and self.split in d.name.lower()]
-            for cand in possible_dirs:
-                has_images = any(p.suffix.lower() in _IMAGE_EXTS for p in cand.rglob('*'))
-                if has_images:
-                    split_dir = cand
-                    break
-        if split_dir is None:
-            raise FileNotFoundError(f"Could not locate '{self.split}' split under {download_root}")
-
-        subdirs = [d for d in split_dir.iterdir() if d.is_dir()]
-        if subdirs and all(any((p.suffix.lower() in _IMAGE_EXTS) for p in sd.rglob('*')) for sd in subdirs):
-            self.classes = sorted([d.name for d in subdirs])
-            self.class_to_idx = {cls_name: i for i, cls_name in enumerate(self.classes)}
-            for cls_name in self.classes:
-                cls_dir = split_dir / cls_name
-                cls_idx = self.class_to_idx[cls_name]
-                for img_path in cls_dir.rglob('*'):
-                    if img_path.suffix.lower() in _IMAGE_EXTS:
-                        self.samples.append((img_path, cls_idx))
-        else:
-            self.classes = ['unknown']
-            self.class_to_idx = {'unknown': 0}
-            for img_path in split_dir.rglob('*'):
-                if img_path.suffix.lower() in _IMAGE_EXTS:
-                    self.samples.append((img_path, 0))
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx: int) -> Dict[str, Any]:
-        img_path, target_class_idx = self.samples[idx]
-        try:
-            img = Image.open(img_path).convert('RGB')
-        except Exception:
-            img_tensor = torch.zeros((3, self.resolution, self.resolution), dtype=torch.uint8)
-            label_tensor = torch.tensor(-1, dtype=torch.long)
-            return {"image": img_tensor, "label": label_tensor}
-
-        from src.utils.image import aspect_preserving_resize_and_center_crop
-        img = aspect_preserving_resize_and_center_crop(img, self.resolution)
-        if self.split == 'train' and (np.random.rand() < self.random_flip_prob):
-            img = img.transpose(Image.FLIP_LEFT_RIGHT)
-        img_np = np.array(img, dtype=np.uint8)
-        img_tensor = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()
-        label_tensor = torch.tensor(target_class_idx, dtype=torch.long)
-        return {"image": img_tensor, "label": label_tensor}
+    """Deprecated. Use TFDSImagenetResized64 instead."""
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("KaggleImageFolderImagenet is deprecated. Use TFDSImagenetResized64 / imagenet64_tfds.")
 
 
 class ImageNet21kFolder(Dataset):
@@ -827,22 +782,13 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
     # All dataset classes are defined in this module; avoid cross-module shim imports
 
     dataset_choice = getattr(config, 'dataset')
-    if str(dataset_choice).lower() == 'imagenet64_kaggle':
+    if str(dataset_choice).lower() == 'imagenet64_tfds':
         H, W = tuple(getattr(config, 'input_size'))
         res = int(H)
-        dataset = KaggleImageFolderImagenet(
-            split='train',
-            resolution=res,
-            kaggle_dataset_id=getattr(config, 'kaggle_dataset_id'),
-            max_samples=getattr(config, 'max_samples'),
-            random_flip_prob=float(getattr(config, 'random_flip_prob'))
-        )
-        val_dataset = KaggleImageFolderImagenet(
-            split='val', resolution=res,
-            kaggle_dataset_id=getattr(config, 'kaggle_dataset_id'),
-            max_samples=getattr(config, 'max_samples', None),
-            random_flip_prob=0.0
-        )
+        if res != 64 or res != int(W):
+            raise ValueError("imagenet64_tfds requires input_size [64, 64]")
+        dataset = TFDSImagenetResized64(split='train', max_samples=getattr(config, 'max_samples', None))
+        val_dataset = TFDSImagenetResized64(split='validation', max_samples=getattr(config, 'max_samples', None))
     elif str(dataset_choice).lower() == 'imagenet21k_folder':
         root = getattr(config, 'imagenet21k_root', None)
         if not root:

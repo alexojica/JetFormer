@@ -223,12 +223,12 @@ def generate_and_log_samples(base_model,
                              num_samples: int,
                              batch_idx: Optional[int] = None) -> None:
     dataset_choice_l = str(dataset_choice).lower() if dataset_choice is not None else ''
-    if dataset_choice_l in ('imagenet64_kaggle', 'imagenet21k_folder'):
+    if dataset_choice_l in ('imagenet64_tfds', 'imagenet21k_folder'):
         # Pick top-frequency classes actually present in the (possibly truncated) train subset
         class_ids = None
         try:
             ds = dataset
-            # KaggleImageFolderImagenet / ImageNet21kFolder expose `samples: List[(path, class_idx)]`
+            # TFDSImagenetResized64 / ImageNet21kFolder expose `samples: List[(index_or_path, class_idx)]`
             if hasattr(ds, 'samples') and isinstance(ds.samples, (list, tuple)) and len(ds.samples) > 0:
                 from collections import Counter
                 counts = Counter()

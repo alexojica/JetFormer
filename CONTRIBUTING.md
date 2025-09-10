@@ -12,7 +12,7 @@ pip install -r requirements.txt
 ## Running
 - Single-GPU training example:
 ```bash
-python -m flow.train --dataset imagenet64_kaggle --resolution 64 --accelerator gpu --device cuda
+python -m flow.train --dataset imagenet64_tfds --resolution 64 --accelerator gpu --device cuda
 ```
 - Ablation sweep:
 ```bash

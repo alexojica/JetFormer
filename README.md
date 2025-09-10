@@ -130,7 +130,7 @@ python eval/run_eval.py --task class_cond \
 ### Jet Flow (standalone) quick tests
 ImageNet64 via Kaggle (tiny subset):
 ```bash
-python -m flow.train --dataset imagenet64_kaggle --resolution 64 \
+python -m flow.train --dataset imagenet64_tfds --resolution 64 \
   --total_epochs 1 --batch_size 64 --dataset_subset_size 2000 \
   --accelerator gpu --device cuda --wandb false
 ```
