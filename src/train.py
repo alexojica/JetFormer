@@ -567,6 +567,7 @@ if __name__ == "__main__":
     # Dataset
     parser.add_argument('--dataset', type=str, default='imagenet64_tfds', choices=['laion_pop','imagenet64_tfds','imagenet21k_folder'])
     parser.add_argument('--imagenet21k_root', type=str, default=None)
+    parser.add_argument('--class_subset', type=str, default=None, help='Restrict to this class if that class has fewer images than max_samples')
     parser.add_argument('--max_samples', type=int, default=None)
     parser.add_argument('--use_cogvlm_captions', type=str, default='true', choices=['true','false'])
     parser.add_argument('--min_resolution', type=int, default=512)

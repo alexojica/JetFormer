@@ -14,7 +14,7 @@ import tensorflow_datasets as tfds
 import torchvision
 import numpy as np
 from PIL import Image
-from typing import Optional, Tuple, Dict, Any, List
+from typing import Optional, Tuple, Dict, Any, List, Union
 from types import SimpleNamespace
 import json
 from pathlib import Path
@@ -626,19 +626,24 @@ class TFDSImagenetResized(Dataset):
                  split: str = 'train',
                  resolution: int = 64,
                  max_samples: Optional[int] = None,
-                 data_dir: str = None):
+                 data_dir: str = None,
+                 class_subset: Optional[Union[int, str]] = None):
         super().__init__()
         if resolution != 64:
             raise ValueError("TFDSImagenetResized currently supports only 64x64 resolution.")
         if split == 'val':
             split = 'validation'
-        builder = tfds.builder('imagenet_resized/64x64', data_dir=data_dir)
-        builder.download_and_prepare()
-        ds = builder.as_dataset(split=split, shuffle_files=False)
-        if max_samples is not None:
-            ds = ds.take(max_samples)
-        self.tfds = ds
-        self._length = int(max_samples) if max_samples is not None else builder.info.splits[split].num_examples
+        self._split = split
+        self._builder = tfds.builder('imagenet_resized/64x64', data_dir=data_dir)
+        self._builder.download_and_prepare()
+        # Only pre-truncate when no class subset is requested
+        if class_subset is None and max_samples is not None:
+            self.tfds = self._builder.as_dataset(split=split, shuffle_files=False).take(max_samples)
+        else:
+            self.tfds = self._builder.as_dataset(split=split, shuffle_files=False)
+        self._length = int(max_samples) if max_samples is not None else self._builder.info.splits[split].num_examples
+        self._max_samples = int(max_samples) if max_samples is not None else None
+        self.class_subset = class_subset
         self._prepare_list()
 
     def _prepare_list(self):
@@ -647,7 +652,75 @@ class TFDSImagenetResized(Dataset):
         # Provide class-like attributes for compatibility with helpers
         self.classes = list(range(1000))
         count = 0
-        for example in tfds.as_numpy(self.tfds):
+        # Default path: populate from (possibly pre-truncated) dataset
+        if self.class_subset is None or self._max_samples is None:
+            for example in tfds.as_numpy(self.tfds):
+                self._images.append(example['image'])
+                self._labels.append(int(example['label']))
+                count += 1
+                if self._length is not None and count >= self._length:
+                    break
+            self._length = count
+            self.samples = [(i, self._labels[i]) for i in range(self._length)]
+            return
+
+        # Resolve desired class id
+        cid: Optional[int] = None
+        try:
+            if isinstance(self.class_subset, str):
+                if self.class_subset.isdigit():
+                    cid = int(self.class_subset)
+            elif isinstance(self.class_subset, int):
+                cid = int(self.class_subset)
+        except Exception:
+            cid = None
+
+        if cid is None or not (0 <= cid < len(self.classes)):
+            # Fallback to default behavior
+            for example in tfds.as_numpy(self.tfds):
+                self._images.append(example['image'])
+                self._labels.append(int(example['label']))
+                count += 1
+                if self._length is not None and count >= self._length:
+                    break
+            self._length = count
+            self.samples = [(i, self._labels[i]) for i in range(self._length)]
+            return
+
+        # First pass: count how many samples belong to the target class (avoid image decode)
+        try:
+            meta_ds = self._builder.as_dataset(
+                split=self._split,
+                shuffle_files=False,
+                decoders={"image": tfds.decode.SkipDecoding()},
+            )
+            total_in_class = 0
+            for ex in tfds.as_numpy(meta_ds):
+                try:
+                    if int(ex['label']) == cid:
+                        total_in_class += 1
+                except Exception:
+                    continue
+        except Exception:
+            total_in_class = None
+
+        # If class has fewer than max_samples, collect only that class
+        if total_in_class is not None and total_in_class < int(self._max_samples):
+            full_ds = self._builder.as_dataset(split=self._split, shuffle_files=False)
+            for ex in tfds.as_numpy(full_ds):
+                try:
+                    if int(ex['label']) == cid:
+                        self._images.append(ex['image'])
+                        self._labels.append(cid)
+                except Exception:
+                    continue
+            self._length = len(self._labels)
+            self.samples = [(i, self._labels[i]) for i in range(self._length)]
+            return
+
+        # Otherwise, keep default multi-class behavior capped by max_samples
+        default_ds = self._builder.as_dataset(split=self._split, shuffle_files=False).take(int(self._max_samples))
+        for example in tfds.as_numpy(default_ds):
             self._images.append(example['image'])
             self._labels.append(int(example['label']))
             count += 1
@@ -707,7 +780,7 @@ class KaggleImageFolderImagenet(Dataset):
 class ImageNet21kFolder(Dataset):
     """Generic ImageNet-21k style folder loader with class subfolders."""
 
-    def __init__(self, root_dir: str, split: str = 'train', resolution: int = 64, max_samples: Optional[int] = None, random_subset_seed: Optional[int] = None):
+    def __init__(self, root_dir: str, split: str = 'train', resolution: int = 64, max_samples: Optional[int] = None, random_subset_seed: Optional[int] = None, class_subset: Optional[Union[int, str]] = None):
         super().__init__()
         self.root_dir = pathlib.Path(root_dir)
         if split not in {"train", "val", "validation"}:
@@ -718,6 +791,7 @@ class ImageNet21kFolder(Dataset):
         self.resolution = resolution
         self.max_samples = max_samples
         self.random_subset_seed = random_subset_seed
+        self.class_subset = class_subset
 
         split_dir = self.root_dir / self.split
         if not split_dir.exists():
@@ -747,6 +821,25 @@ class ImageNet21kFolder(Dataset):
 
         if not self.samples:
             raise RuntimeError(f"No images found under {split_dir}")
+
+        # Optional conditional class filtering before truncation
+        if self.class_subset is not None and self.max_samples is not None:
+            # Resolve class index by name or numeric id
+            target_idx: Optional[int] = None
+            try:
+                if isinstance(self.class_subset, str):
+                    if self.class_subset.isdigit():
+                        target_idx = int(self.class_subset)
+                    else:
+                        target_idx = self.class_to_idx.get(self.class_subset, None)
+                elif isinstance(self.class_subset, int):
+                    target_idx = int(self.class_subset)
+            except Exception:
+                target_idx = None
+            if target_idx is not None and 0 <= target_idx < len(self.classes):
+                total_in_class = sum(1 for _, cls_idx in self.samples if cls_idx == target_idx)
+                if total_in_class < int(self.max_samples):
+                    self.samples = [(p, c) for (p, c) in self.samples if c == target_idx]
 
         if self.max_samples is not None:
             if self.random_subset_seed is not None:
@@ -787,16 +880,36 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
         res = int(H)
         if res != 64 or res != int(W):
             raise ValueError("imagenet64_tfds requires input_size [64, 64]")
-        dataset = TFDSImagenetResized64(split='train', max_samples=getattr(config, 'max_samples', None))
-        val_dataset = TFDSImagenetResized64(split='validation', max_samples=getattr(config, 'max_samples', None))
+        dataset = TFDSImagenetResized64(
+            split='train',
+            max_samples=getattr(config, 'max_samples', None),
+            class_subset=getattr(config, 'class_subset', None)
+        )
+        val_dataset = TFDSImagenetResized64(
+            split='validation',
+            max_samples=getattr(config, 'max_samples', None),
+            class_subset=getattr(config, 'class_subset', None)
+        )
     elif str(dataset_choice).lower() == 'imagenet21k_folder':
         root = getattr(config, 'imagenet21k_root', None)
         if not root:
             raise ValueError("--imagenet21k_root must be provided for imagenet21k_folder dataset")
         H, W = tuple(getattr(config, 'input_size'))
         res = int(H)
-        dataset = ImageNet21kFolder(root_dir=root, split='train', resolution=res, max_samples=getattr(config, 'max_samples', None))
-        val_dataset = ImageNet21kFolder(root_dir=root, split='val', resolution=res, max_samples=getattr(config, 'max_samples', None))
+        dataset = ImageNet21kFolder(
+            root_dir=root,
+            split='train',
+            resolution=res,
+            max_samples=getattr(config, 'max_samples', None),
+            class_subset=getattr(config, 'class_subset', None)
+        )
+        val_dataset = ImageNet21kFolder(
+            root_dir=root,
+            split='val',
+            resolution=res,
+            max_samples=getattr(config, 'max_samples', None),
+            class_subset=getattr(config, 'class_subset', None)
+        )
     else:
         dataset = LAIONPOPTextImageDataset(
             vocab_size=getattr(config, 'vocab_size'),
