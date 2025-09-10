@@ -75,7 +75,7 @@ fid_is_num_samples: 0
 
 # Dataloader / augmentation
 num_workers: 8
-max_samples: 5000            # fixed 5k subset
+# max_samples: 5000            # fixed 5k subset
 ignore_pad: false
 random_flip_prob: 0.0        # disable augmentation
 
