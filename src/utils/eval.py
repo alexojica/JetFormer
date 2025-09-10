@@ -80,11 +80,11 @@ def evaluate_one_epoch(model_obj: torch.nn.Module,
                 images01 = (images_float + noise) / 256.0
                 z, logdet = model_obj(images01.permute(0, 2, 3, 1))
                 from src.utils.losses import bits_per_dim_flow
-                loss_bpd, nll_bpd, logdet_bpd = bits_per_dim_flow(z.float(), logdet.float(), (images_uint8.shape[2], images_uint8.shape[3], images_uint8.shape[1]), reduce=True)
-                out = {"loss": loss_bpd, "bpd": loss_bpd, "nll_bpd": nll_bpd, "logdet_bpd": logdet_bpd}
+                loss_bpd, nll_bpd, flow_bpd, logdet_bpd = bits_per_dim_flow(z.float(), logdet.float(), (images_uint8.shape[2], images_uint8.shape[3], images_uint8.shape[1]), reduce=True)
+                out = {"loss": loss_bpd, "bpd": loss_bpd, "nll_bpd": nll_bpd, "flow_bpd": flow_bpd, "logdet_bpd": logdet_bpd}
             sum_total += float(out.get('bpd', out.get('loss', 0.0))) * bsz
             sum_img += float(out.get('bpd', 0.0)) * bsz
-            sum_flow += float(out.get('logdet_bpd', 0.0)) * bsz
+            sum_flow += float(out.get('flow_bpd', out.get('logdet_bpd', 0.0))) * bsz
         count += int(bsz or 0)
     model_obj.train()
     denom = max(1, count)

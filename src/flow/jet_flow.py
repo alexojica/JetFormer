@@ -869,7 +869,7 @@ class FlowCore(nn.Module):
     def training_step(self, images_uint8_chw: torch.Tensor):
         """Performs the flow-only training step on uint8 CHW images.
 
-        Returns a dict with keys: loss, bpd, nll_bpd, logdet_bpd.
+        Returns a dict with keys: loss, bpd, nll_bpd, flow_bpd, logdet_bpd.
         """
         # Uniform dequantization and normalization to [0,1]
         images_float = images_uint8_chw.float()
@@ -877,6 +877,9 @@ class FlowCore(nn.Module):
         images01 = (images_float + noise_u) / 256.0
 
         # Cosine RGB noise curriculum; do not clamp after adding Gaussian noise
+        # Note: paper describes floor(I + sigma*N). Here we use dequantization + Gaussian
+        # in [0,1] space without flooring; the ln(256) constant in the BPD recovers
+        # the correct discrete lower bound.
         step_val = self._train_step.to(dtype=torch.float32)
         t_prog = torch.clamp(step_val / max(1, self.noise_total_steps), min=0.0, max=1.0)
         sigma_t = torch.tensor(self.rgb_sigma0, device=images01.device) * (1.0 + math.cos(math.pi * t_prog)) * 0.5
@@ -888,12 +891,13 @@ class FlowCore(nn.Module):
         x_nhwc = images01.permute(0, 2, 3, 1).contiguous()
         z, logdet = self.forward(x_nhwc)
 
-        loss_bpd, nll_bpd, logdet_bpd = bits_per_dim_flow(z.float(), logdet.float(), self.input_img_shape_hwc, reduce=True)
+        loss_bpd, nll_bpd, flow_bpd, logdet_bpd = bits_per_dim_flow(z.float(), logdet.float(), self.input_img_shape_hwc, reduce=True)
         self._train_step = self._train_step + 1
         return {
             "loss": loss_bpd,
             "bpd": loss_bpd,
             "nll_bpd": nll_bpd,
+            "flow_bpd": flow_bpd,
             "logdet_bpd": logdet_bpd,
         }
 

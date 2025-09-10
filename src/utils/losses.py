@@ -31,8 +31,13 @@ def cross_entropy_second_only(logits: torch.Tensor,
 def bits_per_dim_flow(z: torch.Tensor, logdet: torch.Tensor, image_shape_hwc: tuple, reduce: bool = True):
     """Flow-only bits-per-dimension consistent with JetFormer/Jet paper.
 
-    Returns either per-sample or mean triplet: (total_bpd, nll_bpd, logdet_bpd),
-    where total_bpd = (NLL(z) + ln256*D - logdet) / (ln2*D).
+    Returns either per-sample or mean tuple:
+      (total_bpd, nll_bpd, flow_bpd, logdet_bpd)
+
+    Where:
+      total_bpd = (NLL(z) + ln256*D - logdet) / (ln2*D)
+      flow_bpd  = (-logdet) / (ln2*D)   # paper's convention
+      logdet_bpd = -flow_bpd            # kept for backward-compatibility
     """
     normal_dist = torch.distributions.Normal(0.0, 1.0)
     nll = -normal_dist.log_prob(z)
@@ -44,11 +49,12 @@ def bits_per_dim_flow(z: torch.Tensor, logdet: torch.Tensor, image_shape_hwc: tu
     normalizer = math.log(2.0) * dim_count
     loss_bpd = total_nats / normalizer
     nll_bpd = nll_summed / normalizer
-    logdet_bpd = logdet / normalizer
+    flow_bpd = (-logdet) / normalizer
+    logdet_bpd = -flow_bpd
     if reduce:
-        return torch.mean(loss_bpd), torch.mean(nll_bpd), torch.mean(logdet_bpd)
+        return torch.mean(loss_bpd), torch.mean(nll_bpd), torch.mean(flow_bpd), torch.mean(logdet_bpd)
     else:
-        return loss_bpd, nll_bpd, logdet_bpd
+        return loss_bpd, nll_bpd, flow_bpd, logdet_bpd
 
 
 def bits_per_dim(z: torch.Tensor, logdet: torch.Tensor, image_shape_hwc: tuple, reduce: bool = True):

@@ -82,12 +82,12 @@ def evaluate_one_epoch(model: nn.Module,
             with autocast_ctx:
                 z, logdet = model(images_input.permute(0, 2, 3, 1))
             # Compute loss in float32 for numerical stability
-            loss_bpd, nll_bpd, logdet_bpd = bits_per_dim_flow(z.float(), logdet.float(), image_shape_hwc, reduce=True)
+            loss_bpd, nll_bpd, flow_bpd, logdet_bpd = bits_per_dim_flow(z.float(), logdet.float(), image_shape_hwc, reduce=True)
 
-            # Accumulate sample-weighted sums
+            # Accumulate sample-weighted sums (paper-consistent: use flow_bpd)
             sum_loss += loss_bpd.item() * batch_size
             sum_nll += nll_bpd.item() * batch_size
-            sum_logdet += logdet_bpd.item() * batch_size
+            sum_logdet += flow_bpd.item() * batch_size
             total_samples += batch_size
 
     return sum_loss, sum_nll, sum_logdet, total_samples
