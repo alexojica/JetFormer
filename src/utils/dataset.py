@@ -10,7 +10,7 @@ import torchvision.transforms as transforms
 import platform
 import os
 import pathlib
-import tensorflow_datasets as tfds
+ # Defer importing TFDS until we have disabled TF GPU usage (see helper below)
 import torchvision
 import numpy as np
 from PIL import Image
@@ -34,6 +34,29 @@ from src.utils.logging import get_logger
 logger = get_logger(__name__)
 from sentencepiece import SentencePieceProcessor
 from src.utils.tokenizer import download_sentencepiece_model
+
+def _import_tfds_cpu_only():
+    """Import tensorflow_datasets with TensorFlow forced to use CPU only and not pre-allocate GPU VRAM.
+
+    Returns the imported tensorflow_datasets module.
+    """
+    try:
+        # Minimize TF logging/noise and disable onednn to avoid CPU kernel warnings
+        os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '3')
+        os.environ.setdefault('TF_ENABLE_ONEDNN_OPTS', '0')
+        # Allow growth in case TF ends up using GPU (shouldn't after we hide it)
+        os.environ.setdefault('TF_FORCE_GPU_ALLOW_GROWTH', 'true')
+        # Import TF and hide GPUs before TF runtime is initialized
+        import tensorflow as tf  # type: ignore
+        try:
+            tf.config.set_visible_devices([], 'GPU')
+        except Exception:
+            pass
+    except Exception:
+        # If TF is not available or fails to import, tfds import may still work for some ops
+        pass
+    import tensorflow_datasets as tfds  # type: ignore
+    return tfds
 
 class LAIONPOPTextImageDataset(Dataset): # tokenizer: gs://t5-data/vocabs/cc_en.32000/sentencepiece.model
     def _download_tokenizer_model(self, tokenizer_path):
@@ -574,7 +597,9 @@ class TFDSImagenet(Dataset):
                 manual_tar_dir = str(pathlib.Path(manual_tar_dir).resolve())
             tfds.download.manual_dir = manual_tar_dir
 
-        builder = tfds.builder(dataset_name, data_dir=data_dir)
+        tfds = _import_tfds_cpu_only()
+        self._tfds = tfds
+        builder = self._tfds.builder(dataset_name, data_dir=data_dir)
         builder.download_and_prepare()
         ds = builder.as_dataset(split=split, shuffle_files=False)
         if max_samples is not None:
@@ -588,7 +613,7 @@ class TFDSImagenet(Dataset):
         self._images = []
         self._labels = []
         count = 0
-        for example in tfds.as_numpy(self.tfds):
+        for example in self._tfds.as_numpy(self.tfds):
             img_uint8 = example['image']
             lbl = example['label']
             self._images.append(img_uint8)
@@ -633,8 +658,10 @@ class TFDSImagenetResized(Dataset):
             raise ValueError("TFDSImagenetResized currently supports only 64x64 resolution.")
         if split == 'val':
             split = 'validation'
+        tfds = _import_tfds_cpu_only()
+        self._tfds = tfds
         self._split = split
-        self._builder = tfds.builder('imagenet_resized/64x64', data_dir=data_dir)
+        self._builder = self._tfds.builder('imagenet_resized/64x64', data_dir=data_dir)
         self._builder.download_and_prepare()
         # Only pre-truncate when no class subset is requested
         if class_subset is None and max_samples is not None:
@@ -654,7 +681,7 @@ class TFDSImagenetResized(Dataset):
         count = 0
         # Default path: populate from (possibly pre-truncated) dataset
         if self.class_subset is None or self._max_samples is None:
-            for example in tfds.as_numpy(self.tfds):
+            for example in self._tfds.as_numpy(self.tfds):
                 self._images.append(example['image'])
                 self._labels.append(int(example['label']))
                 count += 1
@@ -677,7 +704,7 @@ class TFDSImagenetResized(Dataset):
 
         if cid is None or not (0 <= cid < len(self.classes)):
             # Fallback to default behavior
-            for example in tfds.as_numpy(self.tfds):
+            for example in self._tfds.as_numpy(self.tfds):
                 self._images.append(example['image'])
                 self._labels.append(int(example['label']))
                 count += 1
@@ -692,10 +719,10 @@ class TFDSImagenetResized(Dataset):
             meta_ds = self._builder.as_dataset(
                 split=self._split,
                 shuffle_files=False,
-                decoders={"image": tfds.decode.SkipDecoding()},
+                decoders={"image": self._tfds.decode.SkipDecoding()},
             )
             total_in_class = 0
-            for ex in tfds.as_numpy(meta_ds):
+            for ex in self._tfds.as_numpy(meta_ds):
                 try:
                     if int(ex['label']) == cid:
                         total_in_class += 1
@@ -707,7 +734,7 @@ class TFDSImagenetResized(Dataset):
         # If class has fewer than max_samples, collect only that class
         if total_in_class is not None and total_in_class < int(self._max_samples):
             full_ds = self._builder.as_dataset(split=self._split, shuffle_files=False)
-            for ex in tfds.as_numpy(full_ds):
+            for ex in self._tfds.as_numpy(full_ds):
                 try:
                     if int(ex['label']) == cid:
                         self._images.append(ex['image'])
@@ -720,7 +747,7 @@ class TFDSImagenetResized(Dataset):
 
         # Otherwise, keep default multi-class behavior capped by max_samples
         default_ds = self._builder.as_dataset(split=self._split, shuffle_files=False).take(int(self._max_samples))
-        for example in tfds.as_numpy(default_ds):
+        for example in self._tfds.as_numpy(default_ds):
             self._images.append(example['image'])
             self._labels.append(int(example['label']))
             count += 1
