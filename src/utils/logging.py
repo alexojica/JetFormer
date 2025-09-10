@@ -3,6 +3,7 @@ import os
 import time
 import math
 import torch
+import wandb
 
 
 class WBLogger:
@@ -16,6 +17,8 @@ class WBLogger:
         if not self.enabled:
             return
         try:
+            # Derive a few stable config fields used across runs
+            ps_val = int(getattr(self.cfg, 'patch_size', 16))
             self.wb.summary.update({
                 # Param counts
                 "model/total_params": param_counts.get('total', 0),
@@ -23,10 +26,12 @@ class WBLogger:
                 "model/transformer_params": param_counts.get('transformer', 0),
                 # Config snapshot
                 "config/image_size": int(getattr(self.cfg, 'input_size', (256, 256))[0]),
-                "config/patch_size": int(getattr(self.cfg, 'patch_size', 16)),
-                "config/factored_dims": int(getattr(self.cfg, 'image_ar_dim', 128)),
+                "config/patch_size": ps_val,
+                # Autoregressive token dimensionality (paper uses d)
                 "config/mixtures_k": int(getattr(self.cfg, 'num_mixtures', 1024)),
                 "config/image_ar_dim": int(getattr(self.cfg, 'image_ar_dim', 128)),
+                # Full token dimensionality per image token (3 * p^2)
+                "config/image_token_dim": int(3 * ps_val * ps_val),
                 "config/num_class_tokens": int(getattr(self.cfg, 'class_token_length', 16)),
                 "config/jet/num_blocks": int(getattr(self.cfg, 'jet_depth', 8)),
                 "config/jet/width": int(getattr(self.cfg, 'jet_emb_dim', 512)),
@@ -37,7 +42,6 @@ class WBLogger:
                 "config/ar/num_heads": int(getattr(self.cfg, 'n_heads', 12)),
                 "config/ar/n_kv_heads": int(getattr(self.cfg, 'n_kv_heads', 1)),
                 "config/rope": True,
-                "config/params_total": param_counts.get('total', 0),
             })
         except Exception:
             pass
@@ -60,6 +64,7 @@ class WBLogger:
         text_ppl = float(math.exp(min(30.0, text_ce))) if text_ce > 0 else 0.0
         # Resolve base module for submodule-specific grad norms (computed only when requested)
         grad_metrics = {}
+        grad_hists = {}
         if log_grads:
             base = model
             if hasattr(base, 'module'):
@@ -77,22 +82,57 @@ class WBLogger:
                 "train/grad_norm_transformer": grad_norm_transformer,
                 "train/grad_norm_jet": grad_norm_jet,
             }
+            # Gradient histograms and summary stats
+            def _concat_grads(module):
+                try:
+                    grads = []
+                    for p in module.parameters():
+                        if p.grad is not None:
+                            g = p.grad.detach()
+                            if g.is_sparse:
+                                g = g.coalesce().values()
+                            grads.append(g.reshape(-1))
+                    if len(grads) == 0:
+                        return None
+                    return torch.cat(grads)
+                except Exception:
+                    return None
+
+            def _add_hist(tag: str, module):
+                t = _concat_grads(module)
+                if t is None or t.numel() == 0:
+                    return
+                t_f = t.float()
+                try:
+                    grad_hists[f"train/grads/{tag}"] = wandb.Histogram(t_f.detach().cpu().numpy())
+                except Exception:
+                    # Fallback: skip histogram if construction fails
+                    pass
+                try:
+                    grad_metrics[f"train/grads/{tag}_mean"] = float(t_f.mean().item())
+                    grad_metrics[f"train/grads/{tag}_std"] = float(t_f.std(unbiased=False).item())
+                    grad_metrics[f"train/grads/{tag}_max_abs"] = float(t_f.abs().max().item())
+                except Exception:
+                    pass
+
+            _add_hist("model", model)
+            if hasattr(base, 'transformer'):
+                _add_hist("transformer", base.transformer)
+            if hasattr(base, 'jet'):
+                _add_hist("jet", base.jet)
         # Prefer explicit NLL (nats) if provided; otherwise derive from BPD if possible
         payload = {
             # Core likelihood metrics
             "train/total_bpd": float(out.get('image_bpd_total', out.get('bpd', 0.0))),
-            # Alias matching paper terminology
-            "train/nll_bpd": float(out.get('image_bpd_total', out.get('bpd', 0.0))),
             "train/flow_bpd": float(out.get('flow_bpd_component', 0.0)),
             "train/ar_bpd": float(out.get('ar_bpd_component', 0.0)),
             # NLL (nats) and its components
-            "train/total_nll_nats": float(out.get('total_nll_nats', float('nan'))),
             "train/nll_nats": float(out.get('total_nll_nats', float('nan'))),
             "train/ar_nll_nats": float(out.get('ar_nll_nats', float('nan'))),
             "train/flow_neg_logdet_nats": float(out.get('flow_neg_logdet_nats', float('nan'))),
             # Log-likelihoods (nats)
             "train/ar_log_pz_nats": float(out.get('ar_log_pz_nats', float('nan'))),
-            "train/total_log_px_nats": float(out.get('total_log_px_nats', float('nan'))),
+            "train/log_px_nats": float(out.get('total_log_px_nats', float('nan'))),
             # Text
             "train/text_ce": text_ce,
             "train/text_ppl": text_ppl,
@@ -118,8 +158,9 @@ class WBLogger:
             # Sanity
             "sanity/gmm_small_scales_rate": float(out.get('gmm_small_scales_rate', 0.0)),
         }
-        if log_grads and grad_metrics:
+        if log_grads and (grad_metrics or grad_hists):
             payload.update(grad_metrics)
+            payload.update(grad_hists)
         try:
             # Use explicit step so W&B curves are aligned with optimizer steps
             self.wb.log(payload, step=int(step))
@@ -147,13 +188,10 @@ class WBLogger:
         payload = {
             # Bits/dim
             'val/total_bpd': v_img_bpd,
-            # Alias matching paper terminology
-            'val/nll_bpd': v_img_bpd,
             'val/flow_bpd': v_flow_bpd,
             # Paper-consistent decomposition: total_bpd = ar_bpd + flow_bpd, where flow_bpd = (-logdet)/(ln2*D)
             'val/ar_bpd': (v_img_bpd - v_flow_bpd),
             # NLL (nats)
-            'val/total_nll_nats': val_total_nll,
             'val/ar_nll_nats': val_ar_nll,
             'val/nll_nats': val_total_nll,
             # Positive contribution from -logdet (nats)
