@@ -8,8 +8,8 @@ num_mixtures: 256
 use_bfloat16_img_head: true
 
 # Flow (Jet) — post-flow factoring
-jet_depth: 12
-jet_block_depth: 2
+jet_depth: 16
+jet_block_depth: 3
 jet_emb_dim: 256
 jet_num_heads: 4
 flow_actnorm: true
@@ -39,7 +39,9 @@ dataset: cifar10
 
 # Optimization / curriculum
 batch_size: 256
-learning_rate: 0.001
+learning_rate: 0.003
+warmup_percent: 0.05
+use_cosine: true
 weight_decay: 0.0001
 opt_b1: 0.9
 opt_b2: 0.95
@@ -55,10 +57,10 @@ ema:
   enabled: false
 
 # Noise curriculum
-rgb_sigma0: 16.0
+rgb_sigma0: 10.0
 rgb_sigma_final: 0.0
 noise_curriculum_epochs: 20
-latent_noise_std: 0.3
+latent_noise_std: 0.1
 text_loss_weight: 0.0
 image_loss_weight: 1.0
 grad_accum_steps: 1
