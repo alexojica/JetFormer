@@ -19,7 +19,7 @@ def main():
         sys.argv = [sys.argv[0]] + rest
         train_main()
     elif args.cmd == "train-flow":
-        from src.flow.train import main as flow_main
+        from src.train_flow import main as flow_main
         sys.argv = [sys.argv[0]] + rest
         flow_main()
     elif args.cmd == "eval":

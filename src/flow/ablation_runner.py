@@ -7,7 +7,7 @@ import collections
 import sys
 
 # Import the main training function to call it directly
-from .train import main as train_main
+from ..train_flow import main as train_main
 
 def _maybe_generate_study_plots(study_name: str, entity: str = None):
     try:

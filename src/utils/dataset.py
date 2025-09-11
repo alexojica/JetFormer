@@ -652,7 +652,7 @@ class TFDSImagenetResized(Dataset):
                  resolution: int = 64,
                  max_samples: Optional[int] = None,
                  data_dir: str = None,
-                 class_subset: Optional[Union[int, str, List[int], List[str]]] = None):
+                 class_subset: Optional[Union[int, str]] = None):
         super().__init__()
         if resolution != 64:
             raise ValueError("TFDSImagenetResized currently supports only 64x64 resolution.")
@@ -678,54 +678,76 @@ class TFDSImagenetResized(Dataset):
         self._labels: List[int] = []
         # Provide class-like attributes for compatibility with helpers
         self.classes = list(range(1000))
-
-        # Resolve target class ids if provided (supports int, str, list, comma-separated str)
-        target_cids: Optional[set] = None
-        if self.class_subset is not None:
-            try:
-                raw = self.class_subset
-                items: List[Any]
-                if isinstance(raw, (list, tuple)):
-                    items = list(raw)
-                elif isinstance(raw, str):
-                    # Split comma-separated, or single token
-                    items = [s.strip() for s in raw.split(',') if s.strip()]
-                else:
-                    items = [raw]
-                parsed: set = set()
-                for it in items:
-                    if isinstance(it, str) and it.isdigit():
-                        parsed.add(int(it))
-                    elif isinstance(it, int):
-                        parsed.add(int(it))
-                # Keep only valid ImageNet ids
-                parsed = {cid for cid in parsed if 0 <= cid < len(self.classes)}
-                target_cids = parsed if len(parsed) > 0 else None
-            except Exception:
-                target_cids = None
-
         count = 0
-        if target_cids is not None:
-            # Iterate full split and keep only requested classes; optionally cap at max_samples in total
-            full_ds = self._builder.as_dataset(split=self._split, shuffle_files=False)
-            for ex in self._tfds.as_numpy(full_ds):
-                try:
-                    lbl = int(ex['label'])
-                    if lbl not in target_cids:
-                        continue
-                    self._images.append(ex['image'])
-                    self._labels.append(lbl)
-                    count += 1
-                    if self._max_samples is not None and count >= int(self._max_samples):
-                        break
-                except Exception:
-                    continue
+        # Default path: populate from (possibly pre-truncated) dataset
+        if self.class_subset is None or self._max_samples is None:
+            for example in self._tfds.as_numpy(self.tfds):
+                self._images.append(example['image'])
+                self._labels.append(int(example['label']))
+                count += 1
+                if self._length is not None and count >= self._length:
+                    break
             self._length = count
             self.samples = [(i, self._labels[i]) for i in range(self._length)]
             return
 
-        # No class filtering: populate from (possibly pre-truncated) dataset
-        for example in self._tfds.as_numpy(self.tfds):
+        # Resolve desired class id
+        cid: Optional[int] = None
+        try:
+            if isinstance(self.class_subset, str):
+                if self.class_subset.isdigit():
+                    cid = int(self.class_subset)
+            elif isinstance(self.class_subset, int):
+                cid = int(self.class_subset)
+        except Exception:
+            cid = None
+
+        if cid is None or not (0 <= cid < len(self.classes)):
+            # Fallback to default behavior
+            for example in self._tfds.as_numpy(self.tfds):
+                self._images.append(example['image'])
+                self._labels.append(int(example['label']))
+                count += 1
+                if self._length is not None and count >= self._length:
+                    break
+            self._length = count
+            self.samples = [(i, self._labels[i]) for i in range(self._length)]
+            return
+
+        # First pass: count how many samples belong to the target class (avoid image decode)
+        try:
+            meta_ds = self._builder.as_dataset(
+                split=self._split,
+                shuffle_files=False,
+                decoders={"image": self._tfds.decode.SkipDecoding()},
+            )
+            total_in_class = 0
+            for ex in self._tfds.as_numpy(meta_ds):
+                try:
+                    if int(ex['label']) == cid:
+                        total_in_class += 1
+                except Exception:
+                    continue
+        except Exception:
+            total_in_class = None
+
+        # If class has fewer than max_samples, collect only that class
+        if total_in_class is not None and total_in_class < int(self._max_samples):
+            full_ds = self._builder.as_dataset(split=self._split, shuffle_files=False)
+            for ex in self._tfds.as_numpy(full_ds):
+                try:
+                    if int(ex['label']) == cid:
+                        self._images.append(ex['image'])
+                        self._labels.append(cid)
+                except Exception:
+                    continue
+            self._length = len(self._labels)
+            self.samples = [(i, self._labels[i]) for i in range(self._length)]
+            return
+
+        # Otherwise, keep default multi-class behavior capped by max_samples
+        default_ds = self._builder.as_dataset(split=self._split, shuffle_files=False).take(int(self._max_samples))
+        for example in self._tfds.as_numpy(default_ds):
             self._images.append(example['image'])
             self._labels.append(int(example['label']))
             count += 1
@@ -827,36 +849,24 @@ class ImageNet21kFolder(Dataset):
         if not self.samples:
             raise RuntimeError(f"No images found under {split_dir}")
 
-        # Apply class filtering whenever class_subset is provided (supports multiple)
-        if self.class_subset is not None:
-            # Normalize to a set of target indices
-            target_idxs: Optional[set] = None
+        # Optional conditional class filtering before truncation
+        if self.class_subset is not None and self.max_samples is not None:
+            # Resolve class index by name or numeric id
+            target_idx: Optional[int] = None
             try:
-                raw = self.class_subset
-                items: List[Any]
-                if isinstance(raw, (list, tuple)):
-                    items = list(raw)
-                elif isinstance(raw, str):
-                    items = [s.strip() for s in raw.split(',') if s.strip()]
-                else:
-                    items = [raw]
-                parsed: set = set()
-                for it in items:
-                    if isinstance(it, str):
-                        if it.isdigit():
-                            parsed.add(int(it))
-                        else:
-                            idx = self.class_to_idx.get(it, None)
-                            if idx is not None:
-                                parsed.add(int(idx))
-                    elif isinstance(it, int):
-                        parsed.add(int(it))
-                parsed = {idx for idx in parsed if 0 <= idx < len(self.classes)}
-                target_idxs = parsed if len(parsed) > 0 else None
+                if isinstance(self.class_subset, str):
+                    if self.class_subset.isdigit():
+                        target_idx = int(self.class_subset)
+                    else:
+                        target_idx = self.class_to_idx.get(self.class_subset, None)
+                elif isinstance(self.class_subset, int):
+                    target_idx = int(self.class_subset)
             except Exception:
-                target_idxs = None
-            if target_idxs is not None:
-                self.samples = [(p, c) for (p, c) in self.samples if c in target_idxs]
+                target_idx = None
+            if target_idx is not None and 0 <= target_idx < len(self.classes):
+                total_in_class = sum(1 for _, cls_idx in self.samples if cls_idx == target_idx)
+                if total_in_class < int(self.max_samples):
+                    self.samples = [(p, c) for (p, c) in self.samples if c == target_idx]
 
         if self.max_samples is not None:
             if self.random_subset_seed is not None:
@@ -927,6 +937,9 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
             max_samples=getattr(config, 'max_samples', None),
             class_subset=getattr(config, 'class_subset', None)
         )
+    elif str(dataset_choice).lower() == 'cifar10':
+        dataset = TorchvisionCIFAR10(split='train', download=True)
+        val_dataset = TorchvisionCIFAR10(split='test', download=True)
     else:
         dataset = LAIONPOPTextImageDataset(
             vocab_size=getattr(config, 'vocab_size'),
@@ -946,38 +959,28 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
     train_sampler, val_sampler = accelerator.build_samplers(dataset, val_dataset)
     pin_mem = True if accelerator.device.type == 'cuda' else False
 
-    # Build dataloader kwargs with optional prefetch_factor to use framework default when None
-    pf = getattr(config, 'dataloader_prefetch_factor', None)
-    dl_kwargs = dict(
+    dataloader = DataLoader(
+        dataset,
         batch_size=config.batch_size,
         shuffle=(train_sampler is None),
         sampler=train_sampler,
         num_workers=int(getattr(config, 'num_workers')),
+        prefetch_factor=4,
         persistent_workers=True,
         drop_last=True,
-        pin_memory=pin_mem,
-    )
-    if pf is not None:
-        dl_kwargs['prefetch_factor'] = int(pf)
-    dataloader = DataLoader(
-        dataset,
-        **dl_kwargs
+        pin_memory=pin_mem
     )
 
-    val_dl_kwargs = dict(
+    val_loader = DataLoader(
+        val_dataset,
         batch_size=config.batch_size,
         shuffle=False,
         sampler=val_sampler,
         num_workers=int(getattr(config, 'num_workers')),
+        prefetch_factor=4,
         persistent_workers=True,
         drop_last=False,
-        pin_memory=pin_mem,
-    )
-    if pf is not None:
-        val_dl_kwargs['prefetch_factor'] = int(pf)
-    val_loader = DataLoader(
-        val_dataset,
-        **val_dl_kwargs
+        pin_memory=pin_mem
     )
 
     return dataset, val_dataset, dataloader, val_loader

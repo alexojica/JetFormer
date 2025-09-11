@@ -9,7 +9,7 @@ from src.utils.logging import get_logger
 logger = get_logger(__name__)
 import math
 from tqdm import tqdm
-from src.dataset import TinyStoriesDataset
+from src.utils.dataset import TinyStoriesDataset
 from src.transformer import GemmaTransformer
 from src.transformer import Transformer
 
