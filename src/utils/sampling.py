@@ -99,8 +99,17 @@ def generate_text_to_image_samples_cfg(
         numer = torch.logsumexp(mix_logits + log_normal, dim=-1)
         return numer - logZ
 
+    def _sanitize_params(mix_logits, means, scales):
+        # Replace non-finite values to avoid NaN propagation during sampling
+        mix_logits = torch.where(torch.isfinite(mix_logits), mix_logits, torch.zeros_like(mix_logits))
+        means = torch.where(torch.isfinite(means), means, torch.zeros_like(means))
+        safe_scales = torch.where(torch.isfinite(scales), scales, torch.ones_like(scales))
+        safe_scales = safe_scales.clamp_min(1e-6)
+        return mix_logits, means, safe_scales
+
     def _sample_from_mixture(mix_logits, means, scales):
         B, k = mix_logits.shape
+        mix_logits, means, scales = _sanitize_params(mix_logits, means, scales)
         mix = torch.distributions.Categorical(logits=mix_logits)
         comp_idx = mix.sample()
         b = torch.arange(B, device=mix_logits.device)
@@ -170,12 +179,18 @@ def generate_text_to_image_samples_cfg(
                         image_tokens[0, pos] = sampled[0, 0]
                     elif cfg_mode == "interp":
                         guided_logits = image_logits_u + cfg_strength * (image_logits_c - image_logits_u)
-                        mix_logits, means, scales = gmm_params(guided_logits[:, pos:pos+1], int(getattr(model, 'num_mixtures', 1024)), int(getattr(model, 'image_ar_dim', model.image_token_dim)))
-                        mix = torch.distributions.Categorical(logits=mix_logits.squeeze(1))
+                        mix_logits, means, scales = gmm_params(
+                            guided_logits[:, pos:pos+1], int(getattr(model, 'num_mixtures', 1024)), int(getattr(model, 'image_ar_dim', model.image_token_dim))
+                        )
+                        mix_s = mix_logits.squeeze(1)
+                        means_s = means.squeeze(1)
+                        scales_s = scales.squeeze(1)
+                        mix_s, means_s, scales_s = _sanitize_params(mix_s, means_s, scales_s)
+                        mix = torch.distributions.Categorical(logits=mix_s)
                         comp_idx = mix.sample()
                         bidx = torch.arange(comp_idx.shape[0], device=device)
-                        sel_means = means[:, 0, comp_idx, :]
-                        sel_scales = scales[:, 0, comp_idx, :]
+                        sel_means = means_s[bidx, comp_idx, :]
+                        sel_scales = scales_s[bidx, comp_idx, :]
                         normal = torch.distributions.Normal(sel_means, sel_scales)
                         sampled = normal.sample()
                         image_tokens[0, pos] = sampled[0]
@@ -186,6 +201,8 @@ def generate_text_to_image_samples_cfg(
                         mix_u, means_u, scales_u = gmm_params(image_logits_u[:, pos:pos+1], int(getattr(model, 'num_mixtures', 1024)), int(getattr(model, 'image_ar_dim', model.image_token_dim)))
                         mix_c = mix_c.squeeze(1); means_c = means_c.squeeze(1); scales_c = scales_c.squeeze(1)
                         mix_u = mix_u.squeeze(1); means_u = means_u.squeeze(1); scales_u = scales_u.squeeze(1)
+                        mix_c, means_c, scales_c = _sanitize_params(mix_c, means_c, scales_c)
+                        mix_u, means_u, scales_u = _sanitize_params(mix_u, means_u, scales_u)
                         max_tries = 64
                         accepted = False
                         for _ in range(max_tries):
@@ -202,12 +219,18 @@ def generate_text_to_image_samples_cfg(
                                 break
                         if not accepted:
                             guided_logits = image_logits_u + cfg_strength * (image_logits_c - image_logits_u)
-                            mix_logits, means, scales = gmm_params(guided_logits[:, pos:pos+1], int(getattr(model, 'num_mixtures', 1024)), int(getattr(model, 'image_ar_dim', model.image_token_dim)))
-                            mix = torch.distributions.Categorical(logits=mix_logits.squeeze(1))
+                            mix_logits, means, scales = gmm_params(
+                                guided_logits[:, pos:pos+1], int(getattr(model, 'num_mixtures', 1024)), int(getattr(model, 'image_ar_dim', model.image_token_dim))
+                            )
+                            mix_s = mix_logits.squeeze(1)
+                            means_s = means.squeeze(1)
+                            scales_s = scales.squeeze(1)
+                            mix_s, means_s, scales_s = _sanitize_params(mix_s, means_s, scales_s)
+                            mix = torch.distributions.Categorical(logits=mix_s)
                             comp_idx = mix.sample()
                             bidx = torch.arange(comp_idx.shape[0], device=device)
-                            sel_means = means[:, 0, comp_idx, :]
-                            sel_scales = scales[:, 0, comp_idx, :]
+                            sel_means = means_s[bidx, comp_idx, :]
+                            sel_scales = scales_s[bidx, comp_idx, :]
                             normal = torch.distributions.Normal(sel_means, sel_scales)
                             sampled = normal.sample()
                             image_tokens[0, pos] = sampled[0]

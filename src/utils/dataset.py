@@ -788,6 +788,11 @@ class TorchvisionCIFAR10(Dataset):
             transform=None,
             target_transform=None,
         )
+        # Expose class names for downstream logging/sampling helpers
+        try:
+            self.classes = list(self.ds.classes)
+        except Exception:
+            self.classes = [str(i) for i in range(10)]
         self._flip_prob = float(random_flip_prob) if train else 0.0
 
     def __len__(self):
