@@ -2,35 +2,35 @@ vocab_size: 32000
 
 # Image/tokenization
 input_size: [32, 32]
-patch_size: 8                 
-image_ar_dim: 64             
-num_mixtures: 128             
+patch_size: 8
+image_ar_dim: 64
+num_mixtures: 128
 use_bfloat16_img_head: true
-channel_repeat: 0
 
-# Flow (Jet) — post-flow factoring, channel-wise only
-jet_depth: 32
-jet_block_depth: 3
-jet_emb_dim: 512
-jet_num_heads: 8
+# Flow (Jet) — post-flow factoring
+jet_depth: 12
+jet_block_depth: 2
+jet_emb_dim: 256
+jet_num_heads: 4
 flow_actnorm: true
 flow_invertible_dense: true
-pre_factor_dim: None              # keep POST-flow factoring (paper's main setup)
+pre_factor_dim: null  # keep POST-flow factoring
+# channel_repeat: 0  # note: currently unused by the model
 
-# AR Transformer (smaller for CIFAR-10)
+# AR Transformer
 d_model: 256
 n_heads: 4
 n_layers: 8
 d_ff: 1024
 n_kv_heads: 1
 dropout: 0.1
-max_seq_len: 36                # 4 class + 16 image tokens for 32x32 with 8x8 patches
+max_seq_len: 16
 
 # Conditioning (class-conditional CIFAR-10)
 num_classes: 10
-class_token_length: 4
-cfg_drop_prob: 0.1             # classifier-free guidance training drop
-cfg_strength: 4.0              # used at sampling
+class_token_length: 16
+cfg_drop_prob: 0.1
+cfg_strength: 4.0
 cfg_mode: "reject"
 
 # Dataset / training target
@@ -38,7 +38,7 @@ dataset: cifar10
 
 # Optimization / curriculum
 batch_size: 256
-learning_rate: 0.001          
+learning_rate: 0.001
 weight_decay: 0.0001
 opt_b1: 0.9
 opt_b2: 0.95
@@ -53,9 +53,10 @@ flow_grad_checkpoint: false
 ema:
   enabled: false
 
-rgb_sigma0: 0.0
-rgb_sigma_final: 0.0          
-noise_curriculum_epochs: 0   
+# Noise curriculum
+rgb_sigma0: 16.0
+rgb_sigma_final: 0.0
+noise_curriculum_epochs: 20
 latent_noise_std: 0.3
 text_loss_weight: 0.0
 image_loss_weight: 1.0
@@ -63,25 +64,25 @@ grad_accum_steps: 1
 
 # Epoch-level schedules
 sample_every_epochs: 5
-val_every_epochs: 5            
+val_every_epochs: 5
 
 # Evaluation controls
-eval_no_rgb_noise: true        # ensure σ=0 at validation to see "true" NLL/BPD
-fid_every_epochs: 0           # compute FID every N epochs (0 disables)
-is_every_epochs: 0            # compute Inception Score every N epochs (0 disables)
-fid_is_num_samples: 0       # number of samples for FID/IS
+eval_no_rgb_noise: true
+fid_every_epochs: 0
+is_every_epochs: 0
+fid_is_num_samples: 0
 
 # Dataloader / augmentation
 num_workers: 8
 max_samples: null
 ignore_pad: false
-random_flip_prob: 0.5          # horizontal flip probability for CIFAR-10 train set
+random_flip_prob: 0.5
 
 # Accelerator
 accelerator: auto
 device: auto
 
-# W&B (optional)
+# W&B
 wandb: true
 wandb_offline: false
 wandb_project: "jetformer-cifar10-32"

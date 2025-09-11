@@ -223,7 +223,7 @@ def generate_and_log_samples(base_model,
                              num_samples: int,
                              batch_idx: Optional[int] = None) -> None:
     dataset_choice_l = str(dataset_choice).lower() if dataset_choice is not None else ''
-    if dataset_choice_l in ('imagenet64_tfds', 'imagenet21k_folder'):
+    if dataset_choice_l in ('imagenet64_tfds', 'imagenet21k_folder', 'cifar10'):
         # Pick top-frequency classes actually present in the (possibly truncated) train subset
         class_ids = None
         try:
