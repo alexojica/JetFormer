@@ -18,8 +18,9 @@ class InvertibleLinear(nn.Module):
         self.L = nn.Parameter(L)
         self.U = nn.Parameter(U)
         # Masks: unit diagonal on L; upper-triangular on U
-        self.L_mask = torch.tril(torch.ones_like(self.L), diagonal=-1)
-        self.U_mask = torch.triu(torch.ones_like(self.U), diagonal=0)
+        # Register as buffers so they follow the module to the right device/dtype
+        self.register_buffer('L_mask', torch.tril(torch.ones_like(self.L), diagonal=-1), persistent=False)
+        self.register_buffer('U_mask', torch.triu(torch.ones_like(self.U), diagonal=0), persistent=False)
 
     def _weight(self) -> torch.Tensor:
         L = self.L * self.L_mask + torch.eye(self.L.shape[0], device=self.L.device, dtype=self.L.dtype)
