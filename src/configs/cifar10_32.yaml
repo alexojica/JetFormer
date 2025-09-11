@@ -55,7 +55,7 @@ ema:
 
 rgb_sigma0: 32.0
 rgb_sigma_final: 0.0          
-noise_curriculum_epochs: 200   
+noise_curriculum_epochs: 0   
 latent_noise_std: 0.3
 text_loss_weight: 0.0
 image_loss_weight: 1.0
@@ -67,9 +67,9 @@ val_every_epochs: 5
 
 # Evaluation controls
 eval_no_rgb_noise: true        # ensure σ=0 at validation to see "true" NLL/BPD
-fid_every_epochs: 10           # compute FID every N epochs (0 disables)
-is_every_epochs: 10            # compute Inception Score every N epochs (0 disables)
-fid_is_num_samples: 1000       # number of samples for FID/IS
+fid_every_epochs: 0           # compute FID every N epochs (0 disables)
+is_every_epochs: 0            # compute Inception Score every N epochs (0 disables)
+fid_is_num_samples: 0       # number of samples for FID/IS
 
 # Dataloader / augmentation
 num_workers: 8
