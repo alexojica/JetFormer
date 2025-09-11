@@ -678,76 +678,46 @@ class TFDSImagenetResized(Dataset):
         self._labels: List[int] = []
         # Provide class-like attributes for compatibility with helpers
         self.classes = list(range(1000))
-        count = 0
-        # Default path: populate from (possibly pre-truncated) dataset
-        if self.class_subset is None or self._max_samples is None:
-            for example in self._tfds.as_numpy(self.tfds):
-                self._images.append(example['image'])
-                self._labels.append(int(example['label']))
-                count += 1
-                if self._length is not None and count >= self._length:
-                    break
-            self._length = count
-            self.samples = [(i, self._labels[i]) for i in range(self._length)]
-            return
 
-        # Resolve desired class id
+        # Resolve desired class id if provided
         cid: Optional[int] = None
-        try:
-            if isinstance(self.class_subset, str):
-                if self.class_subset.isdigit():
+        if self.class_subset is not None:
+            try:
+                if isinstance(self.class_subset, str):
+                    if self.class_subset.isdigit():
+                        cid = int(self.class_subset)
+                    else:
+                        # Imagenet resized uses numeric labels 0..999 only; ignore string class names
+                        cid = None
+                elif isinstance(self.class_subset, int):
                     cid = int(self.class_subset)
-            elif isinstance(self.class_subset, int):
-                cid = int(self.class_subset)
-        except Exception:
-            cid = None
+            except Exception:
+                cid = None
 
-        if cid is None or not (0 <= cid < len(self.classes)):
-            # Fallback to default behavior
-            for example in self._tfds.as_numpy(self.tfds):
-                self._images.append(example['image'])
-                self._labels.append(int(example['label']))
-                count += 1
-                if self._length is not None and count >= self._length:
-                    break
-            self._length = count
-            self.samples = [(i, self._labels[i]) for i in range(self._length)]
-            return
+        # If invalid class id provided, fall back to no filtering
+        has_valid_cid = (cid is not None) and (0 <= cid < len(self.classes))
 
-        # First pass: count how many samples belong to the target class (avoid image decode)
-        try:
-            meta_ds = self._builder.as_dataset(
-                split=self._split,
-                shuffle_files=False,
-                decoders={"image": self._tfds.decode.SkipDecoding()},
-            )
-            total_in_class = 0
-            for ex in self._tfds.as_numpy(meta_ds):
-                try:
-                    if int(ex['label']) == cid:
-                        total_in_class += 1
-                except Exception:
-                    continue
-        except Exception:
-            total_in_class = None
-
-        # If class has fewer than max_samples, collect only that class
-        if total_in_class is not None and total_in_class < int(self._max_samples):
+        count = 0
+        if has_valid_cid:
+            # Iterate full split and keep only requested class; optionally cap at max_samples
             full_ds = self._builder.as_dataset(split=self._split, shuffle_files=False)
             for ex in self._tfds.as_numpy(full_ds):
                 try:
-                    if int(ex['label']) == cid:
-                        self._images.append(ex['image'])
-                        self._labels.append(cid)
+                    if int(ex['label']) != cid:
+                        continue
+                    self._images.append(ex['image'])
+                    self._labels.append(cid)
+                    count += 1
+                    if self._max_samples is not None and count >= int(self._max_samples):
+                        break
                 except Exception:
                     continue
-            self._length = len(self._labels)
+            self._length = count
             self.samples = [(i, self._labels[i]) for i in range(self._length)]
             return
 
-        # Otherwise, keep default multi-class behavior capped by max_samples
-        default_ds = self._builder.as_dataset(split=self._split, shuffle_files=False).take(int(self._max_samples))
-        for example in self._tfds.as_numpy(default_ds):
+        # No class filtering: populate from (possibly pre-truncated) dataset
+        for example in self._tfds.as_numpy(self.tfds):
             self._images.append(example['image'])
             self._labels.append(int(example['label']))
             count += 1
@@ -849,8 +819,8 @@ class ImageNet21kFolder(Dataset):
         if not self.samples:
             raise RuntimeError(f"No images found under {split_dir}")
 
-        # Optional conditional class filtering before truncation
-        if self.class_subset is not None and self.max_samples is not None:
+        # Apply class filtering whenever class_subset is provided (independent of max_samples)
+        if self.class_subset is not None:
             # Resolve class index by name or numeric id
             target_idx: Optional[int] = None
             try:
@@ -864,9 +834,7 @@ class ImageNet21kFolder(Dataset):
             except Exception:
                 target_idx = None
             if target_idx is not None and 0 <= target_idx < len(self.classes):
-                total_in_class = sum(1 for _, cls_idx in self.samples if cls_idx == target_idx)
-                if total_in_class < int(self.max_samples):
-                    self.samples = [(p, c) for (p, c) in self.samples if c == target_idx]
+                self.samples = [(p, c) for (p, c) in self.samples if c == target_idx]
 
         if self.max_samples is not None:
             if self.random_subset_seed is not None:
