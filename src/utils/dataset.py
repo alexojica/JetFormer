@@ -34,6 +34,7 @@ from src.utils.logging import get_logger
 logger = get_logger(__name__)
 from sentencepiece import SentencePieceProcessor
 from src.utils.tokenizer import download_sentencepiece_model
+import random
 
 def _import_tfds_cpu_only():
     """Import tensorflow_datasets with TensorFlow forced to use CPU only and not pre-allocate GPU VRAM.
@@ -772,8 +773,12 @@ class TFDSImagenetResized64(TFDSImagenetResized):
         super().__init__(resolution=64, **kwargs)
 
 class TorchvisionCIFAR10(Dataset):
-    """Wrapper around torchvision CIFAR-10 to return uint8 CHW images."""
-    def __init__(self, split: str = 'train', download: bool = True):
+    """Wrapper around torchvision CIFAR-10 to return uint8 CHW images.
+
+    Applies probabilistic horizontal flips during training according to
+    `random_flip_prob` to match config-driven augmentation.
+    """
+    def __init__(self, split: str = 'train', download: bool = True, random_flip_prob: float = 0.0):
         super().__init__()
         train = (split == 'train')
         self.ds = torchvision.datasets.CIFAR10(
@@ -783,12 +788,19 @@ class TorchvisionCIFAR10(Dataset):
             transform=None,
             target_transform=None,
         )
+        self._flip_prob = float(random_flip_prob) if train else 0.0
 
     def __len__(self):
         return len(self.ds)
 
     def __getitem__(self, idx: int):
         img, label = self.ds[idx]
+        # Apply random horizontal flip on the PIL image before tensor conversion
+        if self._flip_prob > 0.0 and random.random() < self._flip_prob:
+            try:
+                img = img.transpose(Image.FLIP_LEFT_RIGHT)
+            except Exception:
+                pass
         img_np = np.array(img, dtype=np.uint8)
         img_tensor = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()
         label_tensor = torch.tensor(label, dtype=torch.long)
@@ -938,8 +950,9 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
             class_subset=getattr(config, 'class_subset', None)
         )
     elif str(dataset_choice).lower() == 'cifar10':
-        dataset = TorchvisionCIFAR10(split='train', download=True)
-        val_dataset = TorchvisionCIFAR10(split='test', download=True)
+        flip_prob = float(getattr(config, 'random_flip_prob', 0.0))
+        dataset = TorchvisionCIFAR10(split='train', download=True, random_flip_prob=flip_prob)
+        val_dataset = TorchvisionCIFAR10(split='test', download=True, random_flip_prob=0.0)
     else:
         dataset = LAIONPOPTextImageDataset(
             vocab_size=getattr(config, 'vocab_size'),

@@ -4,7 +4,7 @@ vocab_size: 32000
 input_size: [32, 32]
 patch_size: 8                 
 image_ar_dim: 64             
-num_mixtures: 512             
+num_mixtures: 128             
 use_bfloat16_img_head: true
 channel_repeat: 0
 
@@ -53,7 +53,7 @@ flow_grad_checkpoint: false
 ema:
   enabled: false
 
-rgb_sigma0: 32.0
+rgb_sigma0: 0.0
 rgb_sigma_final: 0.0          
 noise_curriculum_epochs: 0   
 latent_noise_std: 0.3
