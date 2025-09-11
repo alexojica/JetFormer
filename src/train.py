@@ -320,7 +320,8 @@ def train_from_config(config_dict: dict):
             # Log on a per-batch cadence for smoother curves, independent of grad accumulation
             if is_main_process and wb_run is not None and (batch_idx % int(getattr(config, 'log_every_batches')) == 0):
                 # Only compute gradient metrics on accumulation boundaries to avoid extra all-reduces in DDP
-                log_grads = bool(is_accum_boundary)
+                want_grad_logging = bool(getattr(config, 'grad_logging'))
+                log_grads = bool(is_accum_boundary and want_grad_logging)
                 wb_logger.log_train_step(model, optimizer, out, step, epoch, time.time() - start_time, log_grads=log_grads)
             
             # If an epoch-level sampling schedule is configured, it overrides per-batch sampling
@@ -567,11 +568,12 @@ if __name__ == "__main__":
     # Dataset
     parser.add_argument('--dataset', type=str, default='imagenet64_tfds', choices=['laion_pop','imagenet64_tfds','imagenet21k_folder'])
     parser.add_argument('--imagenet21k_root', type=str, default=None)
-    parser.add_argument('--class_subset', type=str, default=None, help='Restrict to this class if that class has fewer images than max_samples')
+    parser.add_argument('--class_subset', type=str, nargs='+', default=None, help='Restrict to one or more classes (ids or names)')
     parser.add_argument('--max_samples', type=int, default=None)
     parser.add_argument('--use_cogvlm_captions', type=str, default='true', choices=['true','false'])
     parser.add_argument('--min_resolution', type=int, default=512)
     parser.add_argument('--num_workers', type=int, default=8)
+    parser.add_argument('--dataloader_prefetch_factor', type=int, default=None)
     parser.add_argument('--ignore_pad', type=str, default='false', choices=['true','false'])
     parser.add_argument('--tokenizer_path', type=str, default='gs://t5-data/vocabs/cc_en.32000/sentencepiece.model')
     parser.add_argument('--cache_dir', type=str, default='./laion_pop_cache')
@@ -585,6 +587,7 @@ if __name__ == "__main__":
     parser.add_argument('--cfg_strength', type=float, default=4.0)
     parser.add_argument('--cfg_mode', type=str, default='reject', choices=['reject','interp'])
     parser.add_argument('--log_every_batches', type=int, default=10)
+    parser.add_argument('--grad_logging', type=str, default='false', choices=['true','false'])
     parser.add_argument('--sample_every_batches', type=int, default=100)
     parser.add_argument('--warmup_percent', type=float, default=0.0)
     parser.add_argument('--use_cosine', type=str, default='true', choices=['true','false'])

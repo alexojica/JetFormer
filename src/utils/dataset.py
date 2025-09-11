@@ -652,7 +652,7 @@ class TFDSImagenetResized(Dataset):
                  resolution: int = 64,
                  max_samples: Optional[int] = None,
                  data_dir: str = None,
-                 class_subset: Optional[Union[int, str]] = None):
+                 class_subset: Optional[Union[int, str, List[int], List[str]]] = None):
         super().__init__()
         if resolution != 64:
             raise ValueError("TFDSImagenetResized currently supports only 64x64 resolution.")
@@ -679,34 +679,42 @@ class TFDSImagenetResized(Dataset):
         # Provide class-like attributes for compatibility with helpers
         self.classes = list(range(1000))
 
-        # Resolve desired class id if provided
-        cid: Optional[int] = None
+        # Resolve target class ids if provided (supports int, str, list, comma-separated str)
+        target_cids: Optional[set] = None
         if self.class_subset is not None:
             try:
-                if isinstance(self.class_subset, str):
-                    if self.class_subset.isdigit():
-                        cid = int(self.class_subset)
-                    else:
-                        # Imagenet resized uses numeric labels 0..999 only; ignore string class names
-                        cid = None
-                elif isinstance(self.class_subset, int):
-                    cid = int(self.class_subset)
+                raw = self.class_subset
+                items: List[Any]
+                if isinstance(raw, (list, tuple)):
+                    items = list(raw)
+                elif isinstance(raw, str):
+                    # Split comma-separated, or single token
+                    items = [s.strip() for s in raw.split(',') if s.strip()]
+                else:
+                    items = [raw]
+                parsed: set = set()
+                for it in items:
+                    if isinstance(it, str) and it.isdigit():
+                        parsed.add(int(it))
+                    elif isinstance(it, int):
+                        parsed.add(int(it))
+                # Keep only valid ImageNet ids
+                parsed = {cid for cid in parsed if 0 <= cid < len(self.classes)}
+                target_cids = parsed if len(parsed) > 0 else None
             except Exception:
-                cid = None
-
-        # If invalid class id provided, fall back to no filtering
-        has_valid_cid = (cid is not None) and (0 <= cid < len(self.classes))
+                target_cids = None
 
         count = 0
-        if has_valid_cid:
-            # Iterate full split and keep only requested class; optionally cap at max_samples
+        if target_cids is not None:
+            # Iterate full split and keep only requested classes; optionally cap at max_samples in total
             full_ds = self._builder.as_dataset(split=self._split, shuffle_files=False)
             for ex in self._tfds.as_numpy(full_ds):
                 try:
-                    if int(ex['label']) != cid:
+                    lbl = int(ex['label'])
+                    if lbl not in target_cids:
                         continue
                     self._images.append(ex['image'])
-                    self._labels.append(cid)
+                    self._labels.append(lbl)
                     count += 1
                     if self._max_samples is not None and count >= int(self._max_samples):
                         break
@@ -819,22 +827,36 @@ class ImageNet21kFolder(Dataset):
         if not self.samples:
             raise RuntimeError(f"No images found under {split_dir}")
 
-        # Apply class filtering whenever class_subset is provided (independent of max_samples)
+        # Apply class filtering whenever class_subset is provided (supports multiple)
         if self.class_subset is not None:
-            # Resolve class index by name or numeric id
-            target_idx: Optional[int] = None
+            # Normalize to a set of target indices
+            target_idxs: Optional[set] = None
             try:
-                if isinstance(self.class_subset, str):
-                    if self.class_subset.isdigit():
-                        target_idx = int(self.class_subset)
-                    else:
-                        target_idx = self.class_to_idx.get(self.class_subset, None)
-                elif isinstance(self.class_subset, int):
-                    target_idx = int(self.class_subset)
+                raw = self.class_subset
+                items: List[Any]
+                if isinstance(raw, (list, tuple)):
+                    items = list(raw)
+                elif isinstance(raw, str):
+                    items = [s.strip() for s in raw.split(',') if s.strip()]
+                else:
+                    items = [raw]
+                parsed: set = set()
+                for it in items:
+                    if isinstance(it, str):
+                        if it.isdigit():
+                            parsed.add(int(it))
+                        else:
+                            idx = self.class_to_idx.get(it, None)
+                            if idx is not None:
+                                parsed.add(int(idx))
+                    elif isinstance(it, int):
+                        parsed.add(int(it))
+                parsed = {idx for idx in parsed if 0 <= idx < len(self.classes)}
+                target_idxs = parsed if len(parsed) > 0 else None
             except Exception:
-                target_idx = None
-            if target_idx is not None and 0 <= target_idx < len(self.classes):
-                self.samples = [(p, c) for (p, c) in self.samples if c == target_idx]
+                target_idxs = None
+            if target_idxs is not None:
+                self.samples = [(p, c) for (p, c) in self.samples if c in target_idxs]
 
         if self.max_samples is not None:
             if self.random_subset_seed is not None:
@@ -924,28 +946,38 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
     train_sampler, val_sampler = accelerator.build_samplers(dataset, val_dataset)
     pin_mem = True if accelerator.device.type == 'cuda' else False
 
-    dataloader = DataLoader(
-        dataset,
+    # Build dataloader kwargs with optional prefetch_factor to use framework default when None
+    pf = getattr(config, 'dataloader_prefetch_factor', None)
+    dl_kwargs = dict(
         batch_size=config.batch_size,
         shuffle=(train_sampler is None),
         sampler=train_sampler,
         num_workers=int(getattr(config, 'num_workers')),
-        prefetch_factor=4,
         persistent_workers=True,
         drop_last=True,
-        pin_memory=pin_mem
+        pin_memory=pin_mem,
+    )
+    if pf is not None:
+        dl_kwargs['prefetch_factor'] = int(pf)
+    dataloader = DataLoader(
+        dataset,
+        **dl_kwargs
     )
 
-    val_loader = DataLoader(
-        val_dataset,
+    val_dl_kwargs = dict(
         batch_size=config.batch_size,
         shuffle=False,
         sampler=val_sampler,
         num_workers=int(getattr(config, 'num_workers')),
-        prefetch_factor=4,
         persistent_workers=True,
         drop_last=False,
-        pin_memory=pin_mem
+        pin_memory=pin_mem,
+    )
+    if pf is not None:
+        val_dl_kwargs['prefetch_factor'] = int(pf)
+    val_loader = DataLoader(
+        val_dataset,
+        **val_dl_kwargs
     )
 
     return dataset, val_dataset, dataloader, val_loader
