@@ -4,7 +4,7 @@ vocab_size: 32000
 input_size: [32, 32]
 patch_size: 8
 image_ar_dim: 96
-num_mixtures: 128
+num_mixtures: 256
 use_bfloat16_img_head: true
 
 # Flow (Jet) — post-flow factoring
