@@ -5,12 +5,12 @@ input_size: [32, 32]
 patch_size: 8
 image_ar_dim: 96
 num_mixtures: 256
-use_bfloat16_img_head: true
+use_bfloat16_img_head: false
 
 # Flow (Jet) — post-flow factoring
-jet_depth: 32
+jet_depth: 16
 jet_block_depth: 3
-jet_emb_dim: 512
+jet_emb_dim: 256
 jet_num_heads: 8
 flow_actnorm: true
 flow_invertible_dense: true
@@ -39,7 +39,7 @@ dataset: cifar10
 
 # Optimization / curriculum
 batch_size: 256
-learning_rate: 0.003
+learning_rate: 0.0003
 warmup_percent: 0.05
 use_cosine: true
 weight_decay: 0.0001
