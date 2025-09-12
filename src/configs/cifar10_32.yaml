@@ -2,7 +2,7 @@ vocab_size: 32000
 
 # Image/tokenization
 input_size: [32, 32]
-patch_size: 8
+patch_size: 4
 image_ar_dim: 96
 num_mixtures: 256
 use_bfloat16_img_head: false
@@ -15,7 +15,7 @@ jet_num_heads: 8
 flow_actnorm: true
 flow_invertible_dense: true
 latent_projection: learned
-pre_factor_dim: null  # keep POST-flow factoring
+pre_factor_dim: 64  # keep POST-flow factoring
 # channel_repeat: 0  # note: currently unused by the model
 
 # AR Transformer
