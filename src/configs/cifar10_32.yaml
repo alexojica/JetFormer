@@ -54,7 +54,7 @@ flow_grad_checkpoint: false
 
 # EMA
 ema:
-  enabled: true
+  enabled: false
 
 # Noise curriculum
 rgb_sigma0: 64.0
