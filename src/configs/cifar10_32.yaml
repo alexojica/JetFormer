@@ -14,7 +14,7 @@ jet_emb_dim: 256
 jet_num_heads: 8
 flow_actnorm: false
 flow_invertible_dense: false
-latent_projection: learned
+latent_projection: null
 pre_factor_dim: null  # keep POST-flow factoring
 # channel_repeat: 0  # note: currently unused by the model
 
@@ -57,7 +57,7 @@ ema:
   enabled: false
 
 # Noise curriculum
-rgb_sigma0: 16.0
+rgb_sigma0: 64.0
 rgb_sigma_final: 0.0
 noise_curriculum_epochs: 20
 latent_noise_std: 0.1
