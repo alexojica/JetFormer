@@ -237,8 +237,8 @@ def compute_jetformer_loss(model,
     log_det, tokens_full = flow_encode_images01_to_tokens(model, images01_noisy)
     hat_tokens, residual_tokens = model.factor_tokens(tokens_full)
     hat_tokens_noisy = hat_tokens + torch.randn_like(hat_tokens) * float(latent_noise_std)
-    text_second_mask_bool = text_second_mask.view(-1, 1, 1)
-    hat_tokens_in = torch.where(text_second_mask_bool, hat_tokens_noisy.detach(), hat_tokens_noisy)
+    # Stop gradients from AR back into flow latents for stability across modes
+    hat_tokens_in = hat_tokens_noisy.detach()
 
     # AR forward with CFG drop when text-first
     drop_mask = (torch.rand(B, device=device) < float(cfg_drop_prob))
