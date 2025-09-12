@@ -3,12 +3,12 @@ vocab_size: 32000
 # Image/tokenization
 input_size: [32, 32]
 patch_size: 8
-image_ar_dim: 96
-num_mixtures: 512
+image_ar_dim: 128
+num_mixtures: 1024
 use_bfloat16_img_head: true
 
 # Flow (Jet) — post-flow factoring
-jet_depth: 24
+jet_depth: 32
 jet_block_depth: 4
 jet_emb_dim: 256
 jet_num_heads: 8
@@ -19,9 +19,9 @@ pre_factor_dim: null  # keep POST-flow factoring
 # channel_repeat: 0  # note: currently unused by the model
 
 # AR Transformer
-d_model: 512
-n_heads: 8
-n_layers: 12
+d_model: 768
+n_heads: 12
+n_layers: 16
 d_ff: 2048
 n_kv_heads: 1
 dropout: 0.1
@@ -54,7 +54,7 @@ flow_grad_checkpoint: false
 
 # EMA
 ema:
-  enabled: false
+  enabled: true
 
 # Noise curriculum
 rgb_sigma0: 64.0
