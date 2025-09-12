@@ -122,15 +122,15 @@ class WBLogger:
                 _add_hist("jet", base.jet)
         # Prefer explicit NLL (nats) if provided; otherwise derive from BPD if possible
         payload = {
-            # Core likelihood metrics
+            # Bits/dim first (paper-consistent): total, ar, flow
             "train/total_bpd": float(out.get('image_bpd_total', out.get('bpd', 0.0))),
-            "train/flow_bpd": float(out.get('flow_bpd_component', 0.0)),
             "train/ar_bpd": float(out.get('ar_bpd_component', 0.0)),
-            # NLL (nats) and its components
+            "train/flow_bpd": float(out.get('flow_bpd_component', 0.0)),
+            # NLL (nats) next: total, ar, flow(-logdet)
             "train/nll_nats": float(out.get('total_nll_nats', float('nan'))),
             "train/ar_nll_nats": float(out.get('ar_nll_nats', float('nan'))),
             "train/flow_neg_logdet_nats": float(out.get('flow_neg_logdet_nats', float('nan'))),
-            # Log-likelihoods (nats)
+            # Other log-likelihoods (nats)
             "train/ar_log_pz_nats": float(out.get('ar_log_pz_nats', float('nan'))),
             "train/log_px_nats": float(out.get('total_log_px_nats', float('nan'))),
             # Text
@@ -145,6 +145,15 @@ class WBLogger:
             "train/sigma_rgb_final": float(getattr(self.cfg, 'rgb_sigma_final', 3.0)),
             "train/latent_noise_std": float(getattr(self.cfg, 'latent_noise_std', 0.3)),
             "train/cfg_drop_prob": float(getattr(self.cfg, 'cfg_drop_prob', 0.1)),
+            # AR/flow diagnostics
+            "train/gmm_entropy_nats": float(out.get('gmm_entropy_nats', float('nan'))),
+            "train/gmm_log_scales_mean": float(out.get('gmm_log_scales_mean', float('nan'))),
+            "train/gmm_log_scales_std": float(out.get('gmm_log_scales_std', float('nan'))),
+            "train/ar_hat_tokens_rms": float(out.get('ar_hat_tokens_rms', float('nan'))),
+            "train/residual_tokens_rms": float(out.get('residual_tokens_rms', float('nan'))),
+            "train/text_first_rate": float(out.get('text_first_rate', float('nan'))),
+            "train/flow_logdet_per_patch": float(out.get('flow_logdet_per_patch', float('nan'))),
+            "train/image_logits_rms": float(out.get('image_logits_rms', float('nan'))),
             # Optimization / dynamics
             "train/lr": optimizer.param_groups[0]['lr'] if hasattr(optimizer, 'param_groups') else 0.0,
             "train/optimizer_beta2": optimizer.param_groups[0].get('betas', (None, 0.95))[1] if hasattr(optimizer, 'param_groups') else 0.95,
@@ -186,15 +195,13 @@ class WBLogger:
         val_flow_neg_logdet = float(v_flow_bpd) * math.log(2.0) * dim_x
         val_ar_nll = val_total_nll - val_flow_neg_logdet
         payload = {
-            # Bits/dim
+            # Bits/dim first
             'val/total_bpd': v_img_bpd,
-            'val/flow_bpd': v_flow_bpd,
-            # Paper-consistent decomposition: total_bpd = ar_bpd + flow_bpd, where flow_bpd = (-logdet)/(ln2*D)
             'val/ar_bpd': (v_img_bpd - v_flow_bpd),
-            # NLL (nats)
-            'val/ar_nll_nats': val_ar_nll,
+            'val/flow_bpd': v_flow_bpd,
+            # NLL (nats) next
             'val/nll_nats': val_total_nll,
-            # Positive contribution from -logdet (nats)
+            'val/ar_nll_nats': val_ar_nll,
             'val/flow_neg_logdet_nats': val_flow_neg_logdet,
             # Text
             'val/text_ce': v_text,

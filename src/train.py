@@ -591,6 +591,8 @@ if __name__ == "__main__":
     parser.add_argument('--sample_every_batches', type=int, default=100)
     parser.add_argument('--warmup_percent', type=float, default=0.0)
     parser.add_argument('--use_cosine', type=str, default='true', choices=['true','false'])
+    # Diagnostics
+    parser.add_argument('--advanced_metrics', type=str, default='false', choices=['true','false'])
     # FID / IS
     parser.add_argument('--fid_every_epochs', type=int, default=5)
     parser.add_argument('--is_every_epochs', type=int, default=5)

@@ -39,7 +39,7 @@ dataset: cifar10
 
 # Optimization / curriculum
 batch_size: 256
-learning_rate: 0.0003
+learning_rate: 0.0001
 warmup_percent: 0.05
 use_cosine: true
 weight_decay: 0.0001
@@ -74,6 +74,7 @@ eval_no_rgb_noise: true
 fid_every_epochs: 0
 is_every_epochs: 0
 fid_is_num_samples: 0
+advanced_metrics: true
 
 # Dataloader / augmentation
 num_workers: 8

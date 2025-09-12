@@ -183,7 +183,8 @@ def compute_jetformer_loss(model,
                            rgb_sigma_final: float,
                            latent_noise_std: float,
                            cfg_drop_prob: float,
-                           eval_no_rgb_noise: bool = False):
+                           eval_no_rgb_noise: bool = False,
+                           advanced_metrics: bool = False):
     """Unified forward loss for JetFormer AR+flow training.
 
     This function centralizes image dequantization/noise, flow encoding, AR forward,
@@ -271,6 +272,38 @@ def compute_jetformer_loss(model,
         ar_log_pz_nats = -(gmm_nll + residual_nll).mean()
         total_log_px_nats = -total_nll.mean()
         small_scales_rate = (scales < 1e-4).float().mean()
+        # Additional diagnostics (optional for perf)
+        if advanced_metrics:
+            try:
+                k = mix_logits.shape[-1]
+                mix_entropy = torch.distributions.Categorical(logits=mix_logits.reshape(B * N, k)).entropy().mean()
+            except Exception:
+                mix_entropy = torch.tensor(float('nan'), device=device)
+            try:
+                log_scales = torch.log(scales.clamp_min(1e-12))
+                log_scales_mean = log_scales.mean()
+                log_scales_std = log_scales.std(unbiased=False)
+            except Exception:
+                log_scales_mean = torch.tensor(float('nan'), device=device)
+                log_scales_std = torch.tensor(float('nan'), device=device)
+            try:
+                hat_rms = torch.sqrt(torch.mean(hat_tokens.float() * hat_tokens.float()))
+                res_rms = torch.sqrt(torch.mean(residual_tokens.float() * residual_tokens.float())) if residual_tokens is not None and residual_tokens.numel() > 0 else torch.tensor(0.0, device=device)
+            except Exception:
+                hat_rms = torch.tensor(float('nan'), device=device)
+                res_rms = torch.tensor(float('nan'), device=device)
+            try:
+                text_first_rate = text_first_mask.float().mean()
+            except Exception:
+                text_first_rate = torch.tensor(float('nan'), device=device)
+            try:
+                flow_logdet_per_patch = (log_det.mean() / float(N)) if N > 0 else torch.tensor(float('nan'), device=device)
+            except Exception:
+                flow_logdet_per_patch = torch.tensor(float('nan'), device=device)
+            try:
+                image_logits_rms = torch.sqrt(torch.mean(image_logits.float() * image_logits.float()))
+            except Exception:
+                image_logits_rms = torch.tensor(float('nan'), device=device)
         if class_ids is not None:
             text_ce_denom = torch.tensor(0.0, device=device)
             text_loss_unmasked = torch.tensor(0.0, device=device)
@@ -307,4 +340,15 @@ def compute_jetformer_loss(model,
         "total_log_px_nats": total_log_px_nats.detach(),
         "gmm_small_scales_rate": small_scales_rate.detach(),
         "sigma_rgb": sigma_t.detach(),
+        # Diagnostics (present only when advanced_metrics=True)
+        **({
+            "gmm_entropy_nats": mix_entropy.detach(),
+            "gmm_log_scales_mean": log_scales_mean.detach(),
+            "gmm_log_scales_std": log_scales_std.detach(),
+            "ar_hat_tokens_rms": hat_rms.detach(),
+            "residual_tokens_rms": res_rms.detach(),
+            "text_first_rate": text_first_rate.detach(),
+            "flow_logdet_per_patch": flow_logdet_per_patch.detach(),
+            "image_logits_rms": image_logits_rms.detach(),
+        } if 'mix_entropy' in locals() else {}),
     }

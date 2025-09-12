@@ -377,6 +377,7 @@ def train_step(model: torch.nn.Module,
     text_loss_weight = float(getattr(config, 'text_loss_weight'))
     image_loss_weight = float(getattr(config, 'image_loss_weight'))
     eval_no_rgb_noise = bool(batch.get('no_rgb_noise'))
+    advanced_metrics = bool(getattr(config, 'advanced_metrics', False))
 
     from src.utils.losses import compute_jetformer_loss
     out = compute_jetformer_loss(
@@ -389,6 +390,7 @@ def train_step(model: torch.nn.Module,
         latent_noise_std=latent_noise_std,
         cfg_drop_prob=cfg_drop_prob,
         eval_no_rgb_noise=eval_no_rgb_noise,
+        advanced_metrics=advanced_metrics,
     )
     # Build weighted total from differentiable components
     total = (text_loss_weight * out["text_loss"]) + (image_loss_weight * out["image_loss"])
