@@ -3,8 +3,8 @@ vocab_size: 32000
 # Image/tokenization
 input_size: [32, 32]
 patch_size: 8
-image_ar_dim: 96
-num_mixtures: 256
+image_ar_dim: 128
+num_mixtures: 512
 use_bfloat16_img_head: false
 
 # Flow (Jet) — post-flow factoring
@@ -19,10 +19,10 @@ pre_factor_dim: null  # keep POST-flow factoring
 # channel_repeat: 0  # note: currently unused by the model
 
 # AR Transformer
-d_model: 256
-n_heads: 4
+d_model: 384
+n_heads: 6
 n_layers: 8
-d_ff: 1024
+d_ff: 2048
 n_kv_heads: 1
 dropout: 0.1
 max_seq_len: 16
@@ -39,8 +39,8 @@ dataset: cifar10
 
 # Optimization / curriculum
 batch_size: 256
-learning_rate: 0.0001
-warmup_percent: 0.05
+learning_rate: 0.00005
+warmup_percent: 0.1
 use_cosine: true
 weight_decay: 0.0001
 opt_b1: 0.9
