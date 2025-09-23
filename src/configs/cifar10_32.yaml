@@ -30,9 +30,9 @@ max_seq_len: 64
 # Conditioning (class-conditional CIFAR-10)
 num_classes: 10
 class_token_length: 16
-cfg_drop_prob: 0.1
-cfg_strength: 4.0
-cfg_mode: "reject"
+cfg_drop_prob: 0.05
+cfg_strength: 6.0
+cfg_mode: "interp"
 
 # Dataset / training target
 dataset: cifar10
