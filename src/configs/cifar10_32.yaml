@@ -12,8 +12,8 @@ jet_depth: 32
 jet_block_depth: 4
 jet_emb_dim: 256
 jet_num_heads: 8
-flow_actnorm: false
-flow_invertible_dense: false
+flow_actnorm: true
+flow_invertible_dense: true
 latent_projection: null
 pre_factor_dim: null  # keep POST-flow factoring
 # channel_repeat: 0  # note: currently unused by the model
@@ -30,9 +30,9 @@ max_seq_len: 64
 # Conditioning (class-conditional CIFAR-10)
 num_classes: 10
 class_token_length: 16
-cfg_drop_prob: 0.05
-cfg_strength: 6.0
-cfg_mode: "interp"
+cfg_drop_prob: 0.1
+cfg_strength: 4.0
+cfg_mode: "reject"
 
 # Dataset / training target
 dataset: cifar10
