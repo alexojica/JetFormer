@@ -784,7 +784,8 @@ class HFImagenet1k(Dataset):
                  resolution: int = 256,
                  max_samples: Optional[int] = None,
                  class_subset: Optional[Union[int, str]] = None,
-                 random_flip_prob: float = 0.0):
+                 random_flip_prob: float = 0.0,
+                 hf_cache_dir: Optional[str] = None):
         super().__init__()
         if split == 'val':
             split = 'validation'
@@ -802,9 +803,22 @@ class HFImagenet1k(Dataset):
         except Exception:
             pass
 
+        # Prepare custom cache directory if provided
+        self._hf_cache_dir = hf_cache_dir
+        if isinstance(self._hf_cache_dir, str) and len(self._hf_cache_dir) > 0:
+            try:
+                Path(self._hf_cache_dir).mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+
         # Load dataset (non-streaming)
         try:
-            self._hf_ds = load_dataset("ILSVRC/imagenet-1k", split=self.split, streaming=False)
+            self._hf_ds = load_dataset(
+                "ILSVRC/imagenet-1k",
+                split=self.split,
+                streaming=False,
+                cache_dir=self._hf_cache_dir
+            )
         except Exception as e:
             logger.error(f"Failed to load ILSVRC/imagenet-1k split='{self.split}': {e}")
             raise
@@ -865,6 +879,9 @@ class HFImagenet1k(Dataset):
 
         try:
             img_pil: Image.Image = ex['image'] if isinstance(ex['image'], Image.Image) else Image.fromarray(np.array(ex['image']))
+            # Ensure RGB mode for consistency with class-conditional preprocessing
+            if img_pil.mode != 'RGB':
+                img_pil = img_pil.convert('RGB')
         except Exception:
             # Return a zero image on failure to decode
             img_tensor = torch.zeros((3, self.resolution, self.resolution), dtype=torch.uint8)
@@ -882,6 +899,13 @@ class HFImagenet1k(Dataset):
         from src.utils.image import aspect_preserving_resize_and_center_crop
         img_pil = aspect_preserving_resize_and_center_crop(img_pil, self.resolution)
         img_np = np.array(img_pil, dtype=np.uint8)
+        # Robust channel handling in case upstream decoders yield unexpected shapes
+        if img_np.ndim == 2:
+            # Grayscale -> RGB by channel stacking
+            img_np = np.stack([img_np] * 3, axis=-1)
+        elif img_np.ndim == 3 and img_np.shape[-1] == 4:
+            # Drop alpha channel
+            img_np = img_np[..., :3]
         img_tensor = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()
 
         try:
