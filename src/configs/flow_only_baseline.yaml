@@ -5,8 +5,8 @@ vocab_size: 32000
 
 # Image/tokenization (CIFAR-10 specific)
 input_size: [32, 32]
-patch_size: 2
-image_ar_dim: 12
+patch_size: 4
+image_ar_dim: 48
 num_mixtures: 512
 use_bfloat16_img_head: true
 channel_repeat: 0
@@ -28,7 +28,7 @@ n_layers: 12
 d_ff: 2048
 n_kv_heads: 1
 dropout: 0.1
-max_seq_len: 320  # 64 image tokens + class tokens + slack
+max_seq_len: 96  # 64 image tokens + class tokens + slack
 
 # Conditioning (class-conditional CIFAR-10)
 num_classes: 10
