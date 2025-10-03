@@ -189,6 +189,73 @@ class JetFormer(nn.Module):
                 torch.randn(num_classes, class_token_length, d_model) * (1.0 / math.sqrt(d_model))
             )
 
+    def freeze_for_flow_only(self) -> int:
+        """Freeze autoregressive (non-flow) parameters for flow-only training.
+
+        This freezes transformer backbone, embeddings, AR heads, special embeddings,
+        and class token table. It intentionally does NOT freeze the flow components
+        (self.jet) nor invertible projections (self.proj, self.pre_proj).
+
+        Returns the number of parameters frozen.
+        """
+        frozen_params = 0
+
+        def _freeze_param(p: torch.nn.Parameter) -> int:
+            if isinstance(p, torch.nn.Parameter) and p.requires_grad:
+                p.requires_grad = False
+                return p.numel()
+            return 0
+
+        def _freeze_module(m: nn.Module) -> int:
+            count = 0
+            if isinstance(m, nn.Module):
+                for p in m.parameters(recurse=True):
+                    count += _freeze_param(p)
+            return count
+
+        # Freeze transformer backbone
+        if hasattr(self, 'transformer') and isinstance(self.transformer, nn.Module):
+            # Prefer module-provided freeze() if available
+            try:
+                if hasattr(self.transformer, 'freeze') and callable(getattr(self.transformer, 'freeze')):
+                    self.transformer.freeze()
+                    for p in self.transformer.parameters(recurse=True):
+                        if not p.requires_grad:
+                            frozen_params += p.numel()
+                else:
+                    frozen_params += _freeze_module(self.transformer)
+            except Exception:
+                frozen_params += _freeze_module(self.transformer)
+
+        # Final norm of AR backbone
+        if hasattr(self, 'final_norm') and isinstance(self.final_norm, nn.Module):
+            frozen_params += _freeze_module(self.final_norm)
+
+        # Embeddings and AR heads
+        for attr in ['text_emb', 'image_emb', 'text_head', 'img_head']:
+            try:
+                mod = getattr(self, attr, None)
+                if isinstance(mod, nn.Module):
+                    frozen_params += _freeze_module(mod)
+            except Exception:
+                pass
+
+        # Special embeddings and class tokens
+        for attr in ['bos_emb', 'boi_emb', 'nolabel_emb']:
+            try:
+                prm = getattr(self, attr, None)
+                frozen_params += _freeze_param(prm)
+            except Exception:
+                pass
+        try:
+            if hasattr(self, 'class_tokens_table') and isinstance(self.class_tokens_table, torch.nn.Parameter):
+                frozen_params += _freeze_param(self.class_tokens_table)
+        except Exception:
+            pass
+
+        # NOTE: Do NOT freeze self.jet (flow) nor self.proj/self.pre_proj (invertible projections)
+        return frozen_params
+
     def _patchify(self, images_nhwc: torch.Tensor) -> torch.Tensor:
         """Convert NHWC images to [B, N_patches, 3*ps*ps] tokens."""
         return tk_patchify(images_nhwc, self.patch_size)

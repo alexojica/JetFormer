@@ -132,6 +132,10 @@ class Transformer(nn.Module):
         x = self.norm(x)
         return x
 
+    def freeze(self) -> None:
+        for p in self.parameters(recurse=True):
+            p.requires_grad = False
+
 class MultiQueryAttention(nn.Module):
     def __init__(self, d_model, n_heads, n_kv_heads, dropout=0.1, max_seq_len=2048, pe_type="rope"):
         super().__init__()

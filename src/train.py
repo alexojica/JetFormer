@@ -115,17 +115,16 @@ def train_from_config(config_dict: dict):
     freeze_transformer = bool(getattr(config, 'freeze_transformer', False))
     frozen_params = 0
     if freeze_transformer:
-        print("Freezing transformer parameters for flow-only training...")
-        # Freeze all transformer-related parameters
-        for name, param in model.named_parameters():
-            # Freeze transformer layers, embeddings, and heads (everything except flow)
-            if any(component in name for component in ['transformer', 'text_emb', 'image_emb', 
-                                                       'text_head', 'img_head', 'boi_emb', 
-                                                       'final_norm', 'proj', 'pre_proj']):
-                param.requires_grad = False
-                frozen_params += param.numel()
-        print(f"Frozen {frozen_params:,} transformer parameters")
-        print(f"Trainable parameters: {total_params - frozen_params:,} (flow only)")
+        print("Freezing transformer parameters for flow-only training via model.freeze_for_flow_only()...")
+        try:
+            frozen_params = int(getattr(model, 'freeze_for_flow_only')())
+        except Exception:
+            # Fallback: best-effort no-op if method is missing
+            try:
+                frozen_params = 0
+            except Exception:
+                frozen_params = 0
+        print(f"Frozen {frozen_params:,} parameters; trainable: {total_params - frozen_params:,}")
     
     wb_logger = WBLogger(wb_run, config)
     wb_logger.update_summary_config({
