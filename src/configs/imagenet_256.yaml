@@ -1,53 +1,52 @@
 vocab_size: 32000
 
 # Image/tokenization
-input_size: [32, 32]
-patch_size: 8
+input_size: [256, 256]
+patch_size: 64
 image_ar_dim: 128
 num_mixtures: 1024
-use_bfloat16_img_head: false
+use_bfloat16_img_head: true
+channel_repeat: 0
 
-# Flow (Jet) — post-flow factoring
+# Flow (Jet) — post-flow factoring, channel-wise only (Base scale per paper)
 jet_depth: 32
 jet_block_depth: 4
-jet_emb_dim: 256
+jet_emb_dim: 512
 jet_num_heads: 8
 flow_actnorm: true
-flow_invertible_dense: false
+flow_invertible_dense: true
 latent_projection: null
-pre_factor_dim: null  # keep POST-flow factoring
-# channel_repeat: 0  # note: currently unused by the model
+pre_factor_dim: null
 
-# AR Transformer
-d_model: 768
-n_heads: 12
-n_layers: 16
-d_ff: 2048
+# AR Transformer (Base scale per paper)
+d_model: 1024
+n_heads: 16
+n_layers: 24
+d_ff: 4096
 n_kv_heads: 1
 dropout: 0.1
-max_seq_len: 64
+max_seq_len: 96
 
-# Conditioning (class-conditional CIFAR-10)
-num_classes: 10
+# Conditioning (class-conditional ImageNet-1k)
+num_classes: 1000
 class_token_length: 16
-cfg_drop_prob: 0.0
+cfg_drop_prob: 0.1
 cfg_strength: 4.0
 cfg_mode: "reject"
 
 # Dataset / training target
-dataset: cifar10
+dataset: imagenet21k_folder
+imagenet21k_root: "/path/to/imagenet"  # required: folder with `train/` and `val/` class subfolders
 
 # Optimization / curriculum
-batch_size: 512
-learning_rate: 0.0005
-warmup_percent: 0.1
-use_cosine: true
+batch_size: 64
+learning_rate: 0.001
 weight_decay: 0.0001
 opt_b1: 0.9
 opt_b2: 0.95
 grad_clip_norm: 1.0
 num_epochs: 200
-precision: fp32
+precision: bf16
 torch_compile: false
 grad_checkpoint_transformer: false
 flow_grad_checkpoint: false
@@ -57,16 +56,16 @@ ema:
   enabled: false
 
 # Noise curriculum
-rgb_sigma0: 32.0
+rgb_sigma0: 64.0
 rgb_sigma_final: 0.0
-noise_curriculum_epochs: 40
+noise_curriculum_epochs: 100
 latent_noise_std: 0.3
 text_loss_weight: 0.0
 image_loss_weight: 1.0
 grad_accum_steps: 1
 
 # Epoch-level schedules
-sample_every_epochs: 5
+sample_every_epochs: 1
 val_every_epochs: 5
 
 # Evaluation controls
@@ -77,7 +76,7 @@ fid_is_num_samples: 0
 advanced_metrics: true
 
 # Dataloader / augmentation
-num_workers: 8
+num_workers: 16
 max_samples: null
 ignore_pad: false
 random_flip_prob: 0.5
@@ -89,6 +88,8 @@ device: auto
 # W&B
 wandb: true
 wandb_offline: false
-wandb_project: "jetformer-cifar10-32"
-wandb_run_name: "CIFAR10-32"
-wandb_tags: ["cifar10", "32x32", "small"]
+wandb_project: "jetformer-imagenet-256"
+wandb_run_name: "B-256"
+wandb_tags: ["imagenet", "256x256", "B"]
+
+
