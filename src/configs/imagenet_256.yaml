@@ -35,8 +35,7 @@ cfg_strength: 4.0
 cfg_mode: "reject"
 
 # Dataset / training target
-dataset: imagenet21k_folder
-imagenet21k_root: "/path/to/imagenet"  # required: folder with `train/` and `val/` class subfolders
+dataset: imagenet1k_hf
 
 # Optimization / curriculum
 batch_size: 512
