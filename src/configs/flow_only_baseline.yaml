@@ -1,23 +1,27 @@
+# Flow-only baseline configuration for CIFAR-10
+# Freeze AR transformer and train flow with Gaussian prior (no AR)
+
 vocab_size: 32000
 
-# Image/tokenization
+# Image/tokenization (CIFAR-10 specific)
 input_size: [32, 32]
 patch_size: 4
 image_ar_dim: 48
-num_mixtures: 256
+num_mixtures: 512
 use_bfloat16_img_head: true
+channel_repeat: 0
 
 # Flow (Jet) — post-flow factoring
-jet_depth: 16
-jet_block_depth: 2
-jet_emb_dim: 256
-jet_num_heads: 4
+jet_depth: 32
+jet_block_depth: 4
+jet_emb_dim: 512
+jet_num_heads: 8
 flow_actnorm: true
 flow_invertible_dense: false
 latent_projection: null
 pre_factor_dim: null  # keep POST-flow factoring
 
-# AR Transformer
+# AR Transformer (will be frozen for flow-only)
 d_model: 512
 n_heads: 8
 n_layers: 12
@@ -29,8 +33,8 @@ max_seq_len: 96  # 64 image tokens + class tokens + slack
 # Conditioning (class-conditional CIFAR-10)
 num_classes: 10
 class_token_length: 8
-cfg_drop_prob: 0.1
-cfg_strength: 4.0
+cfg_drop_prob: 0.0  # No CFG for flow-only
+cfg_strength: 0.0  # No CFG for flow-only
 cfg_mode: "reject"
 
 # Dataset / training target
@@ -55,14 +59,19 @@ flow_grad_checkpoint: false
 ema:
   enabled: false
 
-# Noise curriculum
-rgb_sigma0: 32.0
+# Noise curriculum (important for flow training)
+rgb_sigma0: 0.0
 rgb_sigma_final: 0.0
-noise_curriculum_epochs: 30
-latent_noise_std: 0.3
+noise_curriculum_epochs: 0
+latent_noise_std: 0.0  # No latent noise for flow-only
 text_loss_weight: 0.0
 image_loss_weight: 1.0
 grad_accum_steps: 1
+
+# Flow-only specific settings
+flow_only_mode: true  # New flag to enable flow-only training
+freeze_transformer: true  # Freeze AR transformer params
+gaussian_prior_for_ar: true  # Use Gaussian prior instead of AR predictions
 
 # Epoch-level schedules
 sample_every_epochs: 5
@@ -84,10 +93,11 @@ random_flip_prob: 0.5
 # Accelerator
 accelerator: auto
 device: auto
+distributed: false
 
 # W&B
 wandb: true
 wandb_offline: false
-wandb_project: "jetformer-cifar10-32"
-wandb_run_name: "CIFAR10-32-p4-AR512x12"
-wandb_tags: ["cifar10", "32x32", "p4", "small"]
+wandb_project: "jetformer-flow-only-cifar10"
+wandb_run_name: "flow-only-baseline-cifar10"
+wandb_tags: ["cifar10", "32x32", "p4", "flow-only", "baseline"]

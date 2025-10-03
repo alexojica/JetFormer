@@ -174,6 +174,93 @@ def gaussian_residual_nll(tilde_z: torch.Tensor) -> torch.Tensor:
     return nll
 
 
+def compute_flow_only_loss(model,
+                          batch,
+                          step: int,
+                          total_steps: int,
+                          *,
+                          rgb_sigma0: float,
+                          rgb_sigma_final: float,
+                          eval_no_rgb_noise: bool = False,
+                          advanced_metrics: bool = False):
+    """Flow-only training loss with Gaussian prior on all tokens.
+    
+    This function trains only the flow model with a simple Gaussian prior,
+    freezing the AR transformer completely.
+    """
+    device = next(model.parameters()).device
+    images = batch['image'].to(device, non_blocking=True)
+    
+    B = images.shape[0]
+    # Uniform dequantization to [0,1]
+    images_float = images.float()
+    u_uint8 = torch.rand_like(images_float)
+    images01 = (images_float + u_uint8) / 256.0
+    
+    # RGB noise curriculum
+    no_rgb_noise = bool(batch.get('no_rgb_noise', False) or eval_no_rgb_noise)
+    if no_rgb_noise:
+        sigma_t = torch.tensor(0.0, device=device)
+    else:
+        from src.utils.schedules import rgb_cosine_sigma
+        step_tensor = torch.tensor(int(step), device=device, dtype=torch.float32)
+        total_steps_tensor = torch.tensor(int(max(1, total_steps)), device=device, dtype=torch.float32)
+        nts = getattr(model, 'noise_total_steps', None)
+        sigma_t = rgb_cosine_sigma(step_tensor, total_steps_tensor, float(rgb_sigma0), float(rgb_sigma_final), nts)
+    gaussian = torch.randn_like(images01) * (sigma_t / 255.0)
+    images01_noisy = images01 + gaussian
+    
+    # Flow encode
+    from src.utils.training_helpers import flow_encode_images01_to_tokens
+    log_det, tokens_full = flow_encode_images01_to_tokens(model, images01_noisy)
+    
+    # For flow-only: ALL tokens are modeled with Gaussian prior
+    # No AR, no factorization
+    gaussian_nll = gaussian_residual_nll(tokens_full)  # NLL for all tokens as Gaussian
+    
+    C, H, W = 3, model.input_size[0], model.input_size[1]
+    denom = (H * W * C) * math.log(2.0)
+    const = (H * W * C) * math.log(256.0)
+    total_nll = gaussian_nll - log_det + const
+    flow_bpd_per_sample = (-log_det) / denom
+    gaussian_bpd_per_sample = (gaussian_nll + const) / denom
+    image_bpd_per_sample = total_nll / denom
+    image_loss = image_bpd_per_sample.mean()
+    
+    with torch.no_grad():
+        total_log_px_nats = -total_nll.mean()
+        tokens_rms = torch.sqrt(torch.mean(tokens_full.float() * tokens_full.float()))
+        if advanced_metrics:
+            try:
+                N = tokens_full.shape[1]  # Number of patches
+                flow_logdet_per_patch = (log_det.mean() / float(N)) if N > 0 else torch.tensor(float('nan'), device=device)
+            except Exception:
+                flow_logdet_per_patch = torch.tensor(float('nan'), device=device)
+    
+    return {
+        # Differentiable components
+        "loss": image_loss,
+        "text_loss": torch.tensor(0.0, device=device),
+        "image_loss": image_loss,
+        # Raw per-sample bpd components
+        "image_bpd_total_raw": image_bpd_per_sample,
+        "flow_bpd_raw": flow_bpd_per_sample,
+        "gaussian_bpd_raw": gaussian_bpd_per_sample,
+        # Detached metrics for logging
+        "image_loss_masked": image_loss.detach(),
+        "text_loss_masked": torch.tensor(0.0, device=device),
+        "flow_bpd_component": flow_bpd_per_sample.mean().detach(),
+        "gaussian_bpd_component": gaussian_bpd_per_sample.mean().detach(),
+        "image_bpd_total": image_bpd_per_sample.mean().detach(),
+        "total_nll_nats": total_nll.mean().detach(),
+        "flow_neg_logdet_nats": (-log_det).mean().detach(),
+        "total_log_px_nats": total_log_px_nats.detach(),
+        "tokens_rms": tokens_rms.detach(),
+        "sigma_t": sigma_t.detach(),
+        "flow_logdet_per_patch": flow_logdet_per_patch.detach() if advanced_metrics else torch.tensor(0.0, device=device),
+    }
+
+
 def compute_jetformer_loss(model,
                            batch,
                            step: int,

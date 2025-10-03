@@ -212,6 +212,23 @@ def unwrap_model(model_or_ddp: torch.nn.Module) -> torch.nn.Module:
     return base
 
 
+def generate_flow_only_samples(base_model, device: torch.device, num_samples: int = 4):
+    """Generate samples from flow-only model with Gaussian prior."""
+    from src.utils.sampling import sample_flow_images
+    try:
+        H, W = base_model.input_size
+        # Sample from Gaussian prior in latent space
+        pil_images = sample_flow_images(base_model.jet, device, num_samples, (H, W, 3))
+        samples = [{'prompt': f'Flow-only sample {i+1}', 'image': img} for i, img in enumerate(pil_images)]
+        return samples
+    except Exception as e:
+        print(f"Error generating flow-only samples: {e}")
+        # Return placeholder images on error
+        from PIL import Image
+        placeholder = Image.new('RGB', (32, 32), color='red')
+        return [{'prompt': f'Error {i+1}', 'image': placeholder} for i in range(num_samples)]
+
+
 def generate_and_log_samples(base_model,
                              dataset,
                              device: torch.device,
@@ -221,46 +238,52 @@ def generate_and_log_samples(base_model,
                              step: int,
                              stage_label: str,
                              num_samples: int,
-                             batch_idx: Optional[int] = None) -> None:
-    dataset_choice_l = str(dataset_choice).lower() if dataset_choice is not None else ''
-    if dataset_choice_l in ('imagenet64_tfds', 'imagenet21k_folder', 'cifar10'):
-        # Pick top-frequency classes actually present in the (possibly truncated) train subset
-        class_ids = None
-        try:
-            ds = dataset
-            # TFDSImagenetResized64 / ImageNet21kFolder expose `samples: List[(index_or_path, class_idx)]`
-            if hasattr(ds, 'samples') and isinstance(ds.samples, (list, tuple)) and len(ds.samples) > 0:
-                from collections import Counter
-                counts = Counter()
-                for item in ds.samples:
-                    try:
-                        if isinstance(item, (tuple, list)) and len(item) >= 2:
-                            counts[int(item[1])] += 1
-                    except Exception:
-                        continue
-                if len(counts) > 0:
-                    class_ids = [cid for cid, _ in counts.most_common(4)]
-            # Fallback: derive evenly spaced ids from available classes
-            if (not class_ids) and hasattr(ds, 'classes') and isinstance(ds.classes, list) and len(ds.classes) > 0:
-                n = len(ds.classes)
-                picks = [0, max(0, n // 3), max(0, (2 * n) // 3), n - 1]
-                class_ids = sorted(set(int(p) for p in picks if 0 <= p < n))
-        except Exception:
-            class_ids = None
-        if not class_ids or len(class_ids) == 0:
-            # Final fallback to legacy fixed ids
-            class_ids = [0, 250, 500, 750]
-        samples = generate_class_conditional_samples(
-            base_model, device, class_ids,
-            cfg_strength=float(cfg_strength), cfg_mode=str(cfg_mode)
-        )
+                             batch_idx: Optional[int] = None,
+                             flow_only_mode: bool = False) -> None:
+    # Handle flow-only mode
+    if flow_only_mode:
+        samples = generate_flow_only_samples(base_model, device, num_samples)
     else:
-        samples = generate_text_to_image_samples_cfg(
-            base_model, dataset, device,
-            num_samples=num_samples,
-            cfg_strength=float(cfg_strength),
-            cfg_mode=str(cfg_mode)
-        )
+        # Standard JetFormer generation
+        dataset_choice_l = str(dataset_choice).lower() if dataset_choice is not None else ''
+        if dataset_choice_l in ('imagenet64_tfds', 'imagenet21k_folder', 'cifar10'):
+            # Pick top-frequency classes actually present in the (possibly truncated) train subset
+            class_ids = None
+            try:
+                ds = dataset
+                # TFDSImagenetResized64 / ImageNet21kFolder expose `samples: List[(index_or_path, class_idx)]`
+                if hasattr(ds, 'samples') and isinstance(ds.samples, (list, tuple)) and len(ds.samples) > 0:
+                    from collections import Counter
+                    counts = Counter()
+                    for item in ds.samples:
+                        try:
+                            if isinstance(item, (tuple, list)) and len(item) >= 2:
+                                counts[int(item[1])] += 1
+                        except Exception:
+                            continue
+                    if len(counts) > 0:
+                        class_ids = [cid for cid, _ in counts.most_common(4)]
+                # Fallback: derive evenly spaced ids from available classes
+                if (not class_ids) and hasattr(ds, 'classes') and isinstance(ds.classes, list) and len(ds.classes) > 0:
+                    n = len(ds.classes)
+                    picks = [0, max(0, n // 3), max(0, (2 * n) // 3), n - 1]
+                    class_ids = sorted(set(int(p) for p in picks if 0 <= p < n))
+            except Exception:
+                class_ids = None
+            if not class_ids or len(class_ids) == 0:
+                # Final fallback to legacy fixed ids
+                class_ids = [0, 250, 500, 750]
+            samples = generate_class_conditional_samples(
+                base_model, device, class_ids,
+                cfg_strength=float(cfg_strength), cfg_mode=str(cfg_mode)
+            )
+        else:
+            samples = generate_text_to_image_samples_cfg(
+                base_model, dataset, device,
+                num_samples=num_samples,
+                cfg_strength=float(cfg_strength),
+                cfg_mode=str(cfg_mode)
+            )
 
     if batch_idx is not None:
         table = wandb.Table(columns=["Batch", "Sample ID", "Text Prompt", "Image"])
@@ -372,28 +395,50 @@ def train_step(model: torch.nn.Module,
                config: SimpleNamespace) -> Dict[str, Any]:
     rgb_sigma0 = float(getattr(config, 'rgb_sigma0'))
     rgb_sigma_final = float(getattr(config, 'rgb_sigma_final'))
-    latent_noise_std = float(getattr(config, 'latent_noise_std'))
-    cfg_drop_prob = float(getattr(config, 'cfg_drop_prob'))
-    text_loss_weight = float(getattr(config, 'text_loss_weight'))
-    image_loss_weight = float(getattr(config, 'image_loss_weight'))
     eval_no_rgb_noise = bool(batch.get('no_rgb_noise'))
     advanced_metrics = bool(getattr(config, 'advanced_metrics', False))
-
-    from src.utils.losses import compute_jetformer_loss
-    out = compute_jetformer_loss(
-        model,
-        batch,
-        step,
-        total_steps,
-        rgb_sigma0=rgb_sigma0,
-        rgb_sigma_final=rgb_sigma_final,
-        latent_noise_std=latent_noise_std,
-        cfg_drop_prob=cfg_drop_prob,
-        eval_no_rgb_noise=eval_no_rgb_noise,
-        advanced_metrics=advanced_metrics,
-    )
-    # Build weighted total from differentiable components
-    total = (text_loss_weight * out["text_loss"]) + (image_loss_weight * out["image_loss"])
-    out["loss"] = total
+    
+    # Check if we're in flow-only mode
+    flow_only_mode = bool(getattr(config, 'flow_only_mode', False))
+    
+    if flow_only_mode:
+        # Flow-only training with Gaussian prior
+        from src.utils.losses import compute_flow_only_loss
+        out = compute_flow_only_loss(
+            model,
+            batch,
+            step,
+            total_steps,
+            rgb_sigma0=rgb_sigma0,
+            rgb_sigma_final=rgb_sigma_final,
+            eval_no_rgb_noise=eval_no_rgb_noise,
+            advanced_metrics=advanced_metrics,
+        )
+        # For flow-only, image_loss_weight should be 1.0 and text_loss_weight should be 0.0
+        out["loss"] = out["image_loss"]
+    else:
+        # Standard JetFormer training
+        latent_noise_std = float(getattr(config, 'latent_noise_std'))
+        cfg_drop_prob = float(getattr(config, 'cfg_drop_prob'))
+        text_loss_weight = float(getattr(config, 'text_loss_weight'))
+        image_loss_weight = float(getattr(config, 'image_loss_weight'))
+        
+        from src.utils.losses import compute_jetformer_loss
+        out = compute_jetformer_loss(
+            model,
+            batch,
+            step,
+            total_steps,
+            rgb_sigma0=rgb_sigma0,
+            rgb_sigma_final=rgb_sigma_final,
+            latent_noise_std=latent_noise_std,
+            cfg_drop_prob=cfg_drop_prob,
+            eval_no_rgb_noise=eval_no_rgb_noise,
+            advanced_metrics=advanced_metrics,
+        )
+        # Build weighted total from differentiable components
+        total = (text_loss_weight * out["text_loss"]) + (image_loss_weight * out["image_loss"])
+        out["loss"] = total
+    
     return out
 
