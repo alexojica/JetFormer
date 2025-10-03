@@ -2,7 +2,7 @@ vocab_size: 32000
 
 # Image/tokenization
 input_size: [256, 256]
-patch_size: 64
+patch_size: 16
 image_ar_dim: 128
 num_mixtures: 1024
 use_bfloat16_img_head: true
@@ -14,7 +14,7 @@ jet_block_depth: 4
 jet_emb_dim: 512
 jet_num_heads: 8
 flow_actnorm: true
-flow_invertible_dense: true
+flow_invertible_dense: false
 latent_projection: null
 pre_factor_dim: null
 
@@ -25,7 +25,7 @@ n_layers: 24
 d_ff: 4096
 n_kv_heads: 1
 dropout: 0.1
-max_seq_len: 96
+max_seq_len: 320
 
 # Conditioning (class-conditional ImageNet-1k)
 num_classes: 1000
@@ -39,13 +39,13 @@ dataset: imagenet21k_folder
 imagenet21k_root: "/path/to/imagenet"  # required: folder with `train/` and `val/` class subfolders
 
 # Optimization / curriculum
-batch_size: 64
+batch_size: 512
 learning_rate: 0.001
 weight_decay: 0.0001
 opt_b1: 0.9
 opt_b2: 0.95
 grad_clip_norm: 1.0
-num_epochs: 200
+num_epochs: 500
 precision: bf16
 torch_compile: false
 grad_checkpoint_transformer: false
@@ -58,7 +58,7 @@ ema:
 # Noise curriculum
 rgb_sigma0: 64.0
 rgb_sigma_final: 0.0
-noise_curriculum_epochs: 100
+noise_curriculum_epochs: 500
 latent_noise_std: 0.3
 text_loss_weight: 0.0
 image_loss_weight: 1.0

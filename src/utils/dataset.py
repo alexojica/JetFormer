@@ -772,6 +772,125 @@ class TFDSImagenetResized64(TFDSImagenetResized):
     def __init__(self, **kwargs):
         super().__init__(resolution=64, **kwargs)
 
+
+class HFImagenet1k(Dataset):
+    """Hugging Face ILSVRC/imagenet-1k wrapper returning {image:uint8 CHW, label}.
+
+    Requires accepting dataset terms on Hugging Face and (optionally) providing
+    an auth token via the HF_TOKEN/HUGGINGFACE_TOKEN environment variables.
+    """
+    def __init__(self,
+                 split: str = 'train',
+                 resolution: int = 256,
+                 max_samples: Optional[int] = None,
+                 class_subset: Optional[Union[int, str]] = None,
+                 random_flip_prob: float = 0.0):
+        super().__init__()
+        if split == 'val':
+            split = 'validation'
+        self.split = split
+        self.resolution = int(resolution)
+        self._max_samples = int(max_samples) if max_samples is not None else None
+        self.class_subset = class_subset
+        self._flip_prob = float(random_flip_prob) if split == 'train' else 0.0
+
+        # Attempt auto-auth for gated dataset access
+        try:
+            hf_token = os.environ.get('HF_TOKEN') or os.environ.get('HUGGINGFACE_TOKEN')
+            if hf_token:
+                hf_login(token=hf_token, add_to_git_credential=False)
+        except Exception:
+            pass
+
+        # Load dataset (non-streaming)
+        try:
+            self._hf_ds = load_dataset("ILSVRC/imagenet-1k", split=self.split, streaming=False)
+        except Exception as e:
+            logger.error(f"Failed to load ILSVRC/imagenet-1k split='{self.split}': {e}")
+            raise
+
+        # Class names if available; otherwise numeric ids
+        try:
+            label_feat = self._hf_ds.features.get('label', None)
+            self.classes = list(getattr(label_feat, 'names', [])) if label_feat is not None else list(range(1000))
+        except Exception:
+            self.classes = list(range(1000))
+
+        # Optional class filtering: build index list only when requested
+        self._indices: Optional[List[int]] = None
+        target_idx: Optional[int] = None
+        if self.class_subset is not None:
+            try:
+                if isinstance(self.class_subset, str):
+                    if self.class_subset.isdigit():
+                        target_idx = int(self.class_subset)
+                    else:
+                        if isinstance(self.classes[0], str):
+                            name_to_idx = {n: i for i, n in enumerate(self.classes)}
+                            target_idx = name_to_idx.get(self.class_subset, None)
+                elif isinstance(self.class_subset, int):
+                    target_idx = int(self.class_subset)
+            except Exception:
+                target_idx = None
+
+            if target_idx is not None and 0 <= target_idx < len(self.classes):
+                self._indices = []
+                # Iterate once to collect indices; stop early if max_samples is set
+                for i, ex in enumerate(self._hf_ds):
+                    try:
+                        if int(ex['label']) == target_idx:
+                            self._indices.append(i)
+                            if self._max_samples is not None and len(self._indices) >= self._max_samples:
+                                break
+                    except Exception:
+                        continue
+            # If unable to resolve subset, fall back to default behavior
+
+        # Apply dataset-level truncation when no class subset indexing is used
+        if self._indices is None and self._max_samples is not None:
+            self._length = min(self._max_samples, len(self._hf_ds))
+        else:
+            self._length = len(self._indices) if self._indices is not None else len(self._hf_ds)
+
+    def __len__(self) -> int:
+        return int(self._length)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        # Resolve underlying index when class-subset is active
+        if self._indices is not None:
+            base_idx = self._indices[idx]
+        else:
+            base_idx = idx
+        ex = self._hf_ds[int(base_idx)]
+
+        try:
+            img_pil: Image.Image = ex['image'] if isinstance(ex['image'], Image.Image) else Image.fromarray(np.array(ex['image']))
+        except Exception:
+            # Return a zero image on failure to decode
+            img_tensor = torch.zeros((3, self.resolution, self.resolution), dtype=torch.uint8)
+            label_tensor = torch.tensor(-1, dtype=torch.long)
+            return {"image": img_tensor, "label": label_tensor}
+
+        # Optional random horizontal flip for training split
+        if self._flip_prob > 0.0 and random.random() < self._flip_prob:
+            try:
+                img_pil = img_pil.transpose(Image.FLIP_LEFT_RIGHT)
+            except Exception:
+                pass
+
+        # Aspect-preserving resize + center crop to target resolution
+        from src.utils.image import aspect_preserving_resize_and_center_crop
+        img_pil = aspect_preserving_resize_and_center_crop(img_pil, self.resolution)
+        img_np = np.array(img_pil, dtype=np.uint8)
+        img_tensor = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()
+
+        try:
+            lbl = int(ex['label'])
+        except Exception:
+            lbl = -1
+        label_tensor = torch.tensor(lbl, dtype=torch.long)
+        return {"image": img_tensor, "label": label_tensor}
+
 class TorchvisionCIFAR10(Dataset):
     """Wrapper around torchvision CIFAR-10 to return uint8 CHW images.
 
@@ -958,6 +1077,27 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
         flip_prob = float(getattr(config, 'random_flip_prob', 0.0))
         dataset = TorchvisionCIFAR10(split='train', download=True, random_flip_prob=flip_prob)
         val_dataset = TorchvisionCIFAR10(split='test', download=True, random_flip_prob=0.0)
+    elif str(dataset_choice).lower() == 'imagenet1k_hf':
+        # Use HF ILSVRC/imagenet-1k with user-specified resolution
+        H, W = tuple(getattr(config, 'input_size'))
+        res = int(H)
+        if res != int(W):
+            raise ValueError("imagenet1k_hf requires square input_size [H, W]")
+        flip_prob = float(getattr(config, 'random_flip_prob', 0.0))
+        dataset = HFImagenet1k(
+            split='train',
+            resolution=res,
+            max_samples=getattr(config, 'max_samples', None),
+            class_subset=getattr(config, 'class_subset', None),
+            random_flip_prob=flip_prob,
+        )
+        val_dataset = HFImagenet1k(
+            split='validation',
+            resolution=res,
+            max_samples=getattr(config, 'max_samples', None),
+            class_subset=getattr(config, 'class_subset', None),
+            random_flip_prob=0.0,
+        )
     else:
         dataset = LAIONPOPTextImageDataset(
             vocab_size=getattr(config, 'vocab_size'),

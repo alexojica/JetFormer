@@ -586,7 +586,7 @@ if __name__ == "__main__":
     parser.add_argument('--grad_accum_steps', type=int, default=1)
     parser.add_argument('--grad_clip_norm', type=float, default=1.0)
     # Dataset
-    parser.add_argument('--dataset', type=str, default='imagenet64_tfds', choices=['laion_pop','imagenet64_tfds','imagenet21k_folder'])
+    parser.add_argument('--dataset', type=str, default='imagenet64_tfds', choices=['laion_pop','imagenet64_tfds','imagenet21k_folder','imagenet1k_hf'])
     parser.add_argument('--imagenet21k_root', type=str, default=None)
     parser.add_argument('--class_subset', type=str, nargs='+', default=None, help='Restrict to one or more classes (ids or names)')
     parser.add_argument('--max_samples', type=int, default=None)
