@@ -5,17 +5,17 @@ vocab_size: 32000
 
 # Image/tokenization (CIFAR-10 specific)
 input_size: [32, 32]
-patch_size: 4
-image_ar_dim: 48
+patch_size: 2
+image_ar_dim: 12
 num_mixtures: 512
 use_bfloat16_img_head: true
 channel_repeat: 0
 
 # Flow (Jet) — post-flow factoring
-jet_depth: 32
+jet_depth: 24
 jet_block_depth: 4
-jet_emb_dim: 512
-jet_num_heads: 8
+jet_emb_dim: 384
+jet_num_heads: 6
 flow_actnorm: true
 flow_invertible_dense: false
 latent_projection: null
@@ -28,7 +28,7 @@ n_layers: 12
 d_ff: 2048
 n_kv_heads: 1
 dropout: 0.1
-max_seq_len: 96  # 64 image tokens + class tokens + slack
+max_seq_len: 320  # 64 image tokens + class tokens + slack
 
 # Conditioning (class-conditional CIFAR-10)
 num_classes: 10
@@ -45,7 +45,7 @@ batch_size: 2048
 learning_rate: 0.001
 warmup_percent: 0.1
 use_cosine: true
-weight_decay: 0.0001
+weight_decay: 0.0
 opt_b1: 0.9
 opt_b2: 0.95
 grad_clip_norm: 1.0
