@@ -3,7 +3,7 @@ vocab_size: 32000
 # Image/tokenization
 input_size: [32, 32]
 patch_size: 4
-image_ar_dim: 64
+image_ar_dim: 48
 num_mixtures: 256
 use_bfloat16_img_head: true
 
