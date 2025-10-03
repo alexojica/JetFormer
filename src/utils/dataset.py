@@ -24,7 +24,7 @@ import os
 import requests
 from io import BytesIO
 import hashlib
-from datasets import load_dataset
+from datasets import load_dataset, Image as HFImage
 from huggingface_hub import login as hf_login
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -785,7 +785,8 @@ class HFImagenet1k(Dataset):
                  max_samples: Optional[int] = None,
                  class_subset: Optional[Union[int, str]] = None,
                  random_flip_prob: float = 0.0,
-                 hf_cache_dir: Optional[str] = None):
+                 hf_cache_dir: Optional[str] = None,
+                 safe_decode: bool = True):
         super().__init__()
         if split == 'val':
             split = 'validation'
@@ -822,6 +823,15 @@ class HFImagenet1k(Dataset):
         except Exception as e:
             logger.error(f"Failed to load ILSVRC/imagenet-1k split='{self.split}': {e}")
             raise
+
+        # Optionally disable HF image decoding to avoid PIL EXIF/XMP decode errors
+        self._safe_decode = bool(safe_decode)
+        if self._safe_decode:
+            try:
+                self._hf_ds = self._hf_ds.cast_column('image', HFImage(decode=False))
+            except Exception:
+                # If casting fails for any reason, fall back to default decoding
+                self._safe_decode = False
 
         # Class names if available; otherwise numeric ids
         try:
@@ -878,7 +888,22 @@ class HFImagenet1k(Dataset):
         ex = self._hf_ds[int(base_idx)]
 
         try:
-            img_pil: Image.Image = ex['image'] if isinstance(ex['image'], Image.Image) else Image.fromarray(np.array(ex['image']))
+            if getattr(self, '_safe_decode', False):
+                # ex['image'] is a dict with optional 'bytes' and 'path'
+                img_info = ex.get('image')
+                if isinstance(img_info, dict):
+                    img_bytes = img_info.get('bytes', None)
+                    if img_bytes is not None:
+                        img_pil = Image.open(BytesIO(img_bytes))
+                    else:
+                        img_path = img_info.get('path')
+                        img_pil = Image.open(img_path)
+                else:
+                    # Unexpected structure; fall back to array/PIL paths
+                    img_pil = Image.fromarray(np.array(ex['image']))
+            else:
+                img_pil: Image.Image = ex['image'] if isinstance(ex['image'], Image.Image) else Image.fromarray(np.array(ex['image']))
+
             # Ensure RGB mode for consistency with class-conditional preprocessing
             if img_pil.mode != 'RGB':
                 img_pil = img_pil.convert('RGB')
@@ -1108,12 +1133,14 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
         if res != int(W):
             raise ValueError("imagenet1k_hf requires square input_size [H, W]")
         flip_prob = float(getattr(config, 'random_flip_prob', 0.0))
+        safe_decode = bool(getattr(config, 'hf_safe_image_decode', True))
         dataset = HFImagenet1k(
             split='train',
             resolution=res,
             max_samples=getattr(config, 'max_samples', None),
             class_subset=getattr(config, 'class_subset', None),
             random_flip_prob=flip_prob,
+            safe_decode=safe_decode,
         )
         val_dataset = HFImagenet1k(
             split='validation',
@@ -1121,6 +1148,7 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
             max_samples=getattr(config, 'max_samples', None),
             class_subset=getattr(config, 'class_subset', None),
             random_flip_prob=0.0,
+            safe_decode=safe_decode,
         )
     else:
         dataset = LAIONPOPTextImageDataset(
