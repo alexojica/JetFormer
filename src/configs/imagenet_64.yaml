@@ -36,6 +36,7 @@ cfg_mode: "reject"
 
 # Dataset / training target
 dataset: imagenet64_tfds
+class_subset: "0:100"
 
 # Optimization / curriculum
 batch_size: 4096

@@ -653,7 +653,7 @@ class TFDSImagenetResized(Dataset):
                  resolution: int = 64,
                  max_samples: Optional[int] = None,
                  data_dir: str = None,
-                 class_subset: Optional[Union[int, str]] = None):
+                 class_subset: Optional[Union[int, str, List[int], List[str]]] = None):
         super().__init__()
         if resolution != 64:
             raise ValueError("TFDSImagenetResized currently supports only 64x64 resolution.")
@@ -677,83 +677,77 @@ class TFDSImagenetResized(Dataset):
     def _prepare_list(self):
         self._images: List[np.ndarray] = []
         self._labels: List[int] = []
-        # Provide class-like attributes for compatibility with helpers
-        self.classes = list(range(1000))
         count = 0
-        # Default path: populate from (possibly pre-truncated) dataset
-        if self.class_subset is None or self._max_samples is None:
-            for example in self._tfds.as_numpy(self.tfds):
-                self._images.append(example['image'])
-                self._labels.append(int(example['label']))
-                count += 1
-                if self._length is not None and count >= self._length:
-                    break
-            self._length = count
-            self.samples = [(i, self._labels[i]) for i in range(self._length)]
-            return
 
-        # Resolve desired class id
-        cid: Optional[int] = None
-        try:
-            if isinstance(self.class_subset, str):
-                if self.class_subset.isdigit():
-                    cid = int(self.class_subset)
-            elif isinstance(self.class_subset, int):
-                cid = int(self.class_subset)
-        except Exception:
-            cid = None
+        # Parse class_subset into a set of integer class ids (supports int, str, list)
+        selected: Optional[set] = None
+        if self.class_subset is not None:
+            try:
+                # Allow comma-separated string, single int/str, or list of ints/strs
+                if isinstance(self.class_subset, (list, tuple)):
+                    vals = []
+                    for v in self.class_subset:
+                        if isinstance(v, str):
+                            s = v.strip()
+                            if ':' in s:
+                                try:
+                                    a, b = s.split(':', 1)
+                                    a_i = int(a.strip())
+                                    b_i = int(b.strip())
+                                    vals.extend(list(range(a_i, b_i)))
+                                except Exception:
+                                    pass
+                            elif s.isdigit():
+                                vals.append(int(s))
+                        elif isinstance(v, int):
+                            vals.append(int(v))
+                    selected = set(int(x) for x in vals if 0 <= int(x) < 1000)
+                elif isinstance(self.class_subset, str):
+                    s = self.class_subset.strip()
+                    # Support a single range string like "0:100" or comma-separated mix
+                    parts = [p.strip() for p in s.split(',')] if (',' in s) else [s]
+                    vals = []
+                    for p in parts:
+                        if ':' in p:
+                            try:
+                                a, b = p.split(':', 1)
+                                a_i = int(a.strip())
+                                b_i = int(b.strip())
+                                vals.extend(list(range(a_i, b_i)))
+                                continue
+                            except Exception:
+                                pass
+                        if p.isdigit():
+                            vals.append(int(p))
+                    selected = set(int(x) for x in vals if 0 <= int(x) < 1000)
+                elif isinstance(self.class_subset, int):
+                    selected = {int(self.class_subset)}
+            except Exception:
+                selected = None
+            if selected is not None and len(selected) == 0:
+                selected = None
 
-        if cid is None or not (0 <= cid < len(self.classes)):
-            # Fallback to default behavior
-            for example in self._tfds.as_numpy(self.tfds):
-                self._images.append(example['image'])
-                self._labels.append(int(example['label']))
-                count += 1
-                if self._length is not None and count >= self._length:
-                    break
-            self._length = count
-            self.samples = [(i, self._labels[i]) for i in range(self._length)]
-            return
+        # Default class list (full 1000). If a subset is provided, expose only those ids.
+        self.classes = list(sorted(selected)) if selected is not None else list(range(1000))
 
-        # First pass: count how many samples belong to the target class (avoid image decode)
-        try:
-            meta_ds = self._builder.as_dataset(
-                split=self._split,
-                shuffle_files=False,
-                decoders={"image": self._tfds.decode.SkipDecoding()},
-            )
-            total_in_class = 0
-            for ex in self._tfds.as_numpy(meta_ds):
-                try:
-                    if int(ex['label']) == cid:
-                        total_in_class += 1
-                except Exception:
-                    continue
-        except Exception:
-            total_in_class = None
+        # Build iterator with optional pre-truncation by max_samples
+        base_ds = self._builder.as_dataset(split=self._split, shuffle_files=False)
+        if self._max_samples is not None and (selected is None):
+            base_ds = base_ds.take(int(self._max_samples))
 
-        # If class has fewer than max_samples, collect only that class
-        if total_in_class is not None and total_in_class < int(self._max_samples):
-            full_ds = self._builder.as_dataset(split=self._split, shuffle_files=False)
-            for ex in self._tfds.as_numpy(full_ds):
-                try:
-                    if int(ex['label']) == cid:
-                        self._images.append(ex['image'])
-                        self._labels.append(cid)
-                except Exception:
-                    continue
-            self._length = len(self._labels)
-            self.samples = [(i, self._labels[i]) for i in range(self._length)]
-            return
-
-        # Otherwise, keep default multi-class behavior capped by max_samples
-        default_ds = self._builder.as_dataset(split=self._split, shuffle_files=False).take(int(self._max_samples))
-        for example in self._tfds.as_numpy(default_ds):
+        for example in self._tfds.as_numpy(base_ds):
+            try:
+                lbl = int(example['label'])
+            except Exception:
+                continue
+            if selected is not None and lbl not in selected:
+                continue
             self._images.append(example['image'])
-            self._labels.append(int(example['label']))
+            self._labels.append(lbl)
             count += 1
-            if self._length is not None and count >= self._length:
+            if self._max_samples is not None and selected is None and count >= int(self._max_samples):
                 break
+
         self._length = count
         self.samples = [(i, self._labels[i]) for i in range(self._length)]
 
