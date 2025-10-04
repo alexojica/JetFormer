@@ -2,48 +2,49 @@ vocab_size: 32000
 
 # Image/tokenization
 input_size: [64, 64]
-patch_size: 16                 
-image_ar_dim: 128             
-num_mixtures: 1024             
+patch_size: 4
+image_ar_dim: 8
+num_mixtures: 1024
 use_bfloat16_img_head: true
 channel_repeat: 0
 
-# Flow (Jet) — post-flow factoring, channel-wise only
+# Flow (Jet) — post-flow factoring, channel-wise only (Base scale per paper)
 jet_depth: 32
 jet_block_depth: 4
-jet_emb_dim: 512
+jet_emb_dim: 256
 jet_num_heads: 8
 flow_actnorm: true
-flow_invertible_dense: true
-pre_factor_dim: None              # keep POST-flow factoring (paper’s main setup)
+flow_invertible_dense: false
+latent_projection: null
+pre_factor_dim: null
 
-# AR Transformer (Gemma-style)
-d_model: 512
-n_heads: 8
-n_layers: 14
-d_ff: 2048
+# AR Transformer (Base scale per paper)
+d_model: 1024
+n_heads: 16
+n_layers: 24
+d_ff: 4096
 n_kv_heads: 1
 dropout: 0.1
-max_seq_len: 96                # 16 class + 16 image tokens fits comfortably
+max_seq_len: 64
 
-# Conditioning (class-conditional ImageNet)
+# Conditioning (class-conditional ImageNet-1k)
 num_classes: 1000
 class_token_length: 16
-cfg_drop_prob: 0.1             # classifier-free guidance training drop
-cfg_strength: 4.0              # used at sampling
+cfg_drop_prob: 0.1
+cfg_strength: 4.0
 cfg_mode: "reject"
 
 # Dataset / training target
 dataset: imagenet64_tfds
 
 # Optimization / curriculum
-batch_size: 768
-learning_rate: 0.001          
+batch_size: 4096
+learning_rate: 0.001
 weight_decay: 0.0001
 opt_b1: 0.9
 opt_b2: 0.95
 grad_clip_norm: 1.0
-num_epochs: 100
+num_epochs: 500
 precision: bf16
 torch_compile: false
 grad_checkpoint_transformer: false
@@ -53,37 +54,41 @@ flow_grad_checkpoint: false
 ema:
   enabled: false
 
+# Noise curriculum
 rgb_sigma0: 64.0
-rgb_sigma_final: 0.0          
-noise_curriculum_epochs: 100   
+rgb_sigma_final: 0.0
+noise_curriculum_epochs: 500
 latent_noise_std: 0.3
 text_loss_weight: 0.0
 image_loss_weight: 1.0
 grad_accum_steps: 1
 
 # Epoch-level schedules
-sample_every_epochs: 3
-val_every_epochs: 3            
+sample_every_epochs: 1
+val_every_epochs: 5
 
 # Evaluation controls
-eval_no_rgb_noise: true        # ensure σ=0 at validation to see “true” NLL/BPD
-fid_every_epochs: 5            # compute FID every N epochs (0 disables)
-is_every_epochs: 5             # compute Inception Score every N epochs (0 disables)
-fid_is_num_samples: 500       # number of samples for FID/IS
+eval_no_rgb_noise: true
+fid_every_epochs: 0
+is_every_epochs: 0
+fid_is_num_samples: 0
+advanced_metrics: true
 
 # Dataloader / augmentation
 num_workers: 16
 max_samples: null
 ignore_pad: false
-random_flip_prob: 0.5          # horizontal flip probability for ImageNet train set
+random_flip_prob: 0.5
 
 # Accelerator
 accelerator: auto
 device: auto
 
-# W&B (optional)
+# W&B
 wandb: true
 wandb_offline: false
 wandb_project: "jetformer-imagenet-64"
-wandb_run_name: "S-64"
-wandb_tags: ["imagenet64", "s"]
+wandb_run_name: "B-64"
+wandb_tags: ["imagenet", "64x64", "B"]
+
+

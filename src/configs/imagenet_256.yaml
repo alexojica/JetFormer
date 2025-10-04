@@ -2,9 +2,9 @@ vocab_size: 32000
 
 # Image/tokenization
 input_size: [256, 256]
-patch_size: 32
+patch_size: 16
 image_ar_dim: 128
-num_mixtures: 128
+num_mixtures: 1024
 use_bfloat16_img_head: true
 channel_repeat: 0
 
@@ -25,7 +25,7 @@ n_layers: 24
 d_ff: 4096
 n_kv_heads: 1
 dropout: 0.1
-max_seq_len: 96
+max_seq_len: 64
 
 # Conditioning (class-conditional ImageNet-1k)
 num_classes: 1000
@@ -39,7 +39,7 @@ dataset: imagenet1k_hf
 hf_safe_image_decode: true
 
 # Optimization / curriculum
-batch_size: 512
+batch_size: 4096
 learning_rate: 0.001
 weight_decay: 0.0001
 opt_b1: 0.9
@@ -56,9 +56,9 @@ ema:
   enabled: false
 
 # Noise curriculum
-rgb_sigma0: 0.0
+rgb_sigma0: 64.0
 rgb_sigma_final: 0.0
-noise_curriculum_epochs: 0
+noise_curriculum_epochs: 500
 latent_noise_std: 0.3
 text_loss_weight: 0.0
 image_loss_weight: 1.0
