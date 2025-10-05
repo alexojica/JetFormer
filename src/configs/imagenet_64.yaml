@@ -3,7 +3,7 @@ vocab_size: 32000
 # Image/tokenization
 input_size: [64, 64]
 patch_size: 4
-image_ar_dim: 8
+image_ar_dim: 48
 num_mixtures: 1024
 use_bfloat16_img_head: true
 channel_repeat: 0
@@ -11,7 +11,7 @@ channel_repeat: 0
 # Flow (Jet) — post-flow factoring, channel-wise only (Base scale per paper)
 jet_depth: 32
 jet_block_depth: 4
-jet_emb_dim: 256
+jet_emb_dim: 512
 jet_num_heads: 8
 flow_actnorm: true
 flow_invertible_dense: false
@@ -28,7 +28,7 @@ dropout: 0.1
 max_seq_len: 64
 
 # Conditioning (class-conditional ImageNet-1k)
-num_classes: 1000
+num_classes: 100
 class_token_length: 16
 cfg_drop_prob: 0.1
 cfg_strength: 4.0
