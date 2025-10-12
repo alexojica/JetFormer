@@ -28,7 +28,7 @@ dropout: 0.1
 max_seq_len: 64
 
 # Conditioning (class-conditional ImageNet subset)
-num_classes: 100
+num_classes: 50
 class_token_length: 16
 cfg_drop_prob: 0.1
 cfg_strength: 4.0
@@ -37,7 +37,7 @@ cfg_mode: "reject"
 # Dataset / training target
 dataset: imagenet1k_hf
 hf_safe_image_decode: true
-class_subset: "0:100"
+class_subset: "50:100"
 
 # Optimization / curriculum
 batch_size: 64
