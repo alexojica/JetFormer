@@ -16,7 +16,12 @@ def generate_text_to_image_samples(model, dataset, device, num_samples: int = 3,
         try:
             class_id = None
             if is_class_conditional and not hasattr(dataset, 'tokenize_text'):
-                class_id = int(i % int(getattr(model, 'num_classes', 1000)))
+                # Clamp class id to valid range
+                try:
+                    max_cls = int(getattr(model, 'num_classes', 0))
+                except Exception:
+                    max_cls = 0
+                class_id = int(i % max(1, max_cls)) if max_cls else 0
                 text_tokens = torch.zeros(1, getattr(model, 'class_token_length', 16), dtype=torch.long, device=device)
                 text_mask = torch.ones(1, getattr(model, 'class_token_length', 16), dtype=torch.bool, device=device)
                 prompt_label = None
@@ -136,7 +141,11 @@ def generate_text_to_image_samples_cfg(
         try:
             class_id = None
             if is_class_conditional and not hasattr(dataset, 'tokenize_text'):
-                class_id = int(i % int(getattr(model, 'num_classes', 1000)))
+                try:
+                    max_cls = int(getattr(model, 'num_classes', 0))
+                except Exception:
+                    max_cls = 0
+                class_id = int(i % max(1, max_cls)) if max_cls else 0
                 text_tokens = torch.zeros(1, getattr(model, 'class_token_length', 16), dtype=torch.long, device=device)
                 text_mask = torch.ones(1, getattr(model, 'class_token_length', 16), dtype=torch.bool, device=device)
                 prompt_label = None
@@ -283,7 +292,23 @@ def generate_class_conditional_samples(base,
         normal = torch.distributions.Normal(sel_means, sel_scales)
         return normal.sample()
 
-    for cls in class_ids:
+    # Ensure class ids are valid for the model's class token table
+    try:
+        max_cls = int(getattr(base, 'num_classes', 0))
+    except Exception:
+        max_cls = 0
+    safe_ids = []
+    for c in class_ids:
+        try:
+            ci = int(c)
+            if max_cls and 0 <= ci < max_cls:
+                safe_ids.append(ci)
+        except Exception:
+            continue
+    if len(safe_ids) == 0 and max_cls and max_cls > 0:
+        safe_ids = list(range(min(4, max_cls)))
+
+    for cls in safe_ids:
         try:
             text_tokens = torch.zeros(1, base.class_token_length, dtype=torch.long, device=device)
             text_mask = torch.ones(1, base.class_token_length, dtype=torch.bool, device=device)

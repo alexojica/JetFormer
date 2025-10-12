@@ -246,7 +246,7 @@ def generate_and_log_samples(base_model,
     else:
         # Standard JetFormer generation
         dataset_choice_l = str(dataset_choice).lower() if dataset_choice is not None else ''
-        if dataset_choice_l in ('imagenet64_tfds', 'imagenet21k_folder', 'cifar10'):
+        if dataset_choice_l in ('imagenet64_tfds', 'imagenet21k_folder', 'cifar10', 'imagenet1k_hf'):
             # Pick top-frequency classes actually present in the (possibly truncated) train subset
             class_ids = None
             try:
@@ -270,9 +270,19 @@ def generate_and_log_samples(base_model,
                     class_ids = sorted(set(int(p) for p in picks if 0 <= p < n))
             except Exception:
                 class_ids = None
+            # Clamp to model's valid class table
+            try:
+                max_cls = int(getattr(base_model, 'num_classes', 0))
+            except Exception:
+                max_cls = 0
+            if isinstance(class_ids, (list, tuple)) and max_cls and max_cls > 0:
+                class_ids = [int(c) for c in class_ids if 0 <= int(c) < max_cls]
             if not class_ids or len(class_ids) == 0:
-                # Final fallback to legacy fixed ids
-                class_ids = [0, 250, 500, 750]
+                # Final fallback: first few valid class ids
+                if max_cls and max_cls > 0:
+                    class_ids = list(range(min(4, max_cls)))
+                else:
+                    class_ids = [0, 1, 2, 3]
             samples = generate_class_conditional_samples(
                 base_model, device, class_ids,
                 cfg_strength=float(cfg_strength), cfg_mode=str(cfg_mode)
