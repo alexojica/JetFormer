@@ -777,7 +777,7 @@ class HFImagenet1k(Dataset):
                  split: str = 'train',
                  resolution: int = 256,
                  max_samples: Optional[int] = None,
-                 class_subset: Optional[Union[int, str]] = None,
+                 class_subset: Optional[Union[int, str, List[int], List[str]]] = None,
                  random_flip_prob: float = 0.0,
                  hf_cache_dir: Optional[str] = None,
                  safe_decode: bool = True):
@@ -834,35 +834,80 @@ class HFImagenet1k(Dataset):
         except Exception:
             self.classes = list(range(1000))
 
-        # Optional class filtering: build index list only when requested
+        # Optional class filtering: support single id/name, lists, and range strings like "0:100" or mixed comma lists
         self._indices: Optional[List[int]] = None
-        target_idx: Optional[int] = None
         if self.class_subset is not None:
+            selected: Optional[set] = None
             try:
-                if isinstance(self.class_subset, str):
-                    if self.class_subset.isdigit():
-                        target_idx = int(self.class_subset)
-                    else:
-                        if isinstance(self.classes[0], str):
-                            name_to_idx = {n: i for i, n in enumerate(self.classes)}
-                            target_idx = name_to_idx.get(self.class_subset, None)
+                if isinstance(self.class_subset, (list, tuple)):
+                    vals: List[int] = []
+                    for v in self.class_subset:
+                        if isinstance(v, str):
+                            s = v.strip()
+                            if ':' in s:
+                                try:
+                                    a, b = s.split(':', 1)
+                                    a_i = int(a.strip())
+                                    b_i = int(b.strip())
+                                    vals.extend(list(range(a_i, b_i)))
+                                except Exception:
+                                    pass
+                            elif s.isdigit():
+                                vals.append(int(s))
+                            else:
+                                # map class name to id when available
+                                if isinstance(self.classes[0], str):
+                                    name_to_idx = {n: i for i, n in enumerate(self.classes)}
+                                    idx = name_to_idx.get(s, None)
+                                    if idx is not None:
+                                        vals.append(int(idx))
+                        elif isinstance(v, int):
+                            vals.append(int(v))
+                    selected = set(int(x) for x in vals if 0 <= int(x) < 1000)
+                elif isinstance(self.class_subset, str):
+                    s = self.class_subset.strip()
+                    parts = [p.strip() for p in s.split(',')] if (',' in s) else [s]
+                    vals: List[int] = []
+                    for p in parts:
+                        if ':' in p:
+                            try:
+                                a, b = p.split(':', 1)
+                                a_i = int(a.strip())
+                                b_i = int(b.strip())
+                                vals.extend(list(range(a_i, b_i)))
+                                continue
+                            except Exception:
+                                pass
+                        if p.isdigit():
+                            vals.append(int(p))
+                        else:
+                            if isinstance(self.classes[0], str):
+                                name_to_idx = {n: i for i, n in enumerate(self.classes)}
+                                idx = name_to_idx.get(p, None)
+                                if idx is not None:
+                                    vals.append(int(idx))
+                    selected = set(int(x) for x in vals if 0 <= int(x) < 1000)
                 elif isinstance(self.class_subset, int):
-                    target_idx = int(self.class_subset)
+                    selected = {int(self.class_subset)}
             except Exception:
-                target_idx = None
+                selected = None
 
-            if target_idx is not None and 0 <= target_idx < len(self.classes):
+            if selected is not None and len(selected) == 0:
+                selected = None
+
+            if selected is not None:
                 self._indices = []
-                # Iterate once to collect indices; stop early if max_samples is set
+                count = 0
                 for i, ex in enumerate(self._hf_ds):
                     try:
-                        if int(ex['label']) == target_idx:
-                            self._indices.append(i)
-                            if self._max_samples is not None and len(self._indices) >= self._max_samples:
-                                break
+                        lbl = int(ex['label'])
                     except Exception:
                         continue
-            # If unable to resolve subset, fall back to default behavior
+                    if lbl in selected:
+                        self._indices.append(i)
+                        count += 1
+                        if self._max_samples is not None and count >= self._max_samples:
+                            break
 
         # Apply dataset-level truncation when no class subset indexing is used
         if self._indices is None and self._max_samples is not None:
