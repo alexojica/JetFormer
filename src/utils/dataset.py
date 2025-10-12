@@ -836,6 +836,8 @@ class HFImagenet1k(Dataset):
 
         # Optional class filtering: support single id/name, lists, and range strings like "0:100" or mixed comma lists
         self._indices: Optional[List[int]] = None
+        self._label_remap = None  # maps original label id -> [0..K-1] when subset active
+        self._selected_ids: Optional[List[int]] = None
         if self.class_subset is not None:
             selected: Optional[set] = None
             try:
@@ -896,6 +898,20 @@ class HFImagenet1k(Dataset):
                 selected = None
 
             if selected is not None:
+                # Build stable, contiguous remapping for selected classes
+                self._selected_ids = list(sorted(int(x) for x in selected))
+                self._label_remap = {orig: new for new, orig in enumerate(self._selected_ids)}
+
+                # Update human-readable classes when available
+                try:
+                    if isinstance(self.classes[0], str):
+                        self.classes = [self.classes[i] for i in self._selected_ids if 0 <= int(i) < len(self.classes)]
+                    else:
+                        # Fallback: expose 0..K-1
+                        self.classes = list(range(len(self._selected_ids)))
+                except Exception:
+                    self.classes = list(range(len(self._selected_ids)))
+
                 self._indices = []
                 count = 0
                 for i, ex in enumerate(self._hf_ds):
@@ -976,6 +992,9 @@ class HFImagenet1k(Dataset):
             lbl = int(ex['label'])
         except Exception:
             lbl = -1
+        # Remap labels into contiguous range when subset is active
+        if self._label_remap is not None and lbl in self._label_remap:
+            lbl = int(self._label_remap[lbl])
         label_tensor = torch.tensor(lbl, dtype=torch.long)
         return {"image": img_tensor, "label": label_tensor}
 
