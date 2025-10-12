@@ -267,7 +267,8 @@ def generate_class_conditional_samples(base,
                                        class_ids: List[int],
                                        cfg_strength: float = 4.0,
                                        cfg_mode: str = "reject",
-                                       fast_mixture_first: bool = False) -> List[Dict[str, Any]]:
+                                       fast_mixture_first: bool = False,
+                                       dataset: Any | None = None) -> List[Dict[str, Any]]:
     samples: List[Dict[str, Any]] = []
 
     def _mixture_log_prob(mix_logits, means, scales, x):
@@ -399,7 +400,16 @@ def generate_class_conditional_samples(base,
             tokens_full = torch.cat([img_tokens, torch.randn(1, base.image_seq_len, res_dim, device=device)], dim=-1) if res_dim > 0 else img_tokens
             image01_bchw = base.decode_tokens_to_image01(tokens_full)
             img = image01_bchw[0].permute(1,2,0).cpu().numpy()
-            samples.append({'prompt': f'class_{cls}', 'image': Image.fromarray((img*255).clip(0,255).astype('uint8'))})
+            # Prefer human-readable class names when available
+            prompt_name = None
+            try:
+                if dataset is not None and hasattr(dataset, 'classes') and isinstance(dataset.classes, list):
+                    if 0 <= int(cls) < len(dataset.classes):
+                        prompt_name = dataset.classes[int(cls)]
+            except Exception:
+                prompt_name = None
+            prompt_str = str(prompt_name) if (prompt_name is not None) else f'class_{int(cls)}'
+            samples.append({'prompt': prompt_str, 'image': Image.fromarray((img*255).clip(0,255).astype('uint8'))})
         except Exception:
             continue
     return samples

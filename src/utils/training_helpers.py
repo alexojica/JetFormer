@@ -285,7 +285,8 @@ def generate_and_log_samples(base_model,
                     class_ids = [0, 1, 2, 3]
             samples = generate_class_conditional_samples(
                 base_model, device, class_ids,
-                cfg_strength=float(cfg_strength), cfg_mode=str(cfg_mode)
+                cfg_strength=float(cfg_strength), cfg_mode=str(cfg_mode),
+                dataset=dataset
             )
         else:
             samples = generate_text_to_image_samples_cfg(
