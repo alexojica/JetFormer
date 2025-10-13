@@ -327,8 +327,8 @@ class JetFormer(nn.Module):
         padding_mask = padding_mask[:, :-1]
 
         seq_len = x.shape[1]
-        # Strictly causal mask (no self-attention) to enforce next-token prediction
-        causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=device, dtype=torch.bool), diagonal=-1)
+        # Standard causal mask (includes self); we shift inputs by one already
+        causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=device, dtype=torch.bool))
         causal_mask = causal_mask.unsqueeze(0).expand(batch_size, -1, -1)
         padding_mask_2d = padding_mask.unsqueeze(1) & padding_mask.unsqueeze(2)
         

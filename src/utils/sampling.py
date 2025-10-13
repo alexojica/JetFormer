@@ -270,6 +270,9 @@ def generate_class_conditional_samples(base,
                                        fast_mixture_first: bool = False,
                                        dataset: Any | None = None) -> List[Dict[str, Any]]:
     samples: List[Dict[str, Any]] = []
+    # Ensure deterministic sampling (disable dropout, etc.)
+    was_training = base.training
+    base.eval()
 
     def _mixture_log_prob(mix_logits, means, scales, x):
         B, k = mix_logits.shape
@@ -412,6 +415,9 @@ def generate_class_conditional_samples(base,
             samples.append({'prompt': prompt_str, 'image': Image.fromarray((img*255).clip(0,255).astype('uint8'))})
         except Exception:
             continue
+    # Restore original training state
+    if was_training:
+        base.train()
     return samples
 
 
