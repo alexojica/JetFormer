@@ -47,7 +47,8 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, grad_clip=1.0
         attention_mask = batch["attention_mask"].to(device)
 
         seq_len = input_ids.shape[1]
-        causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=input_ids.device, dtype=torch.bool))
+        # Strictly causal (no self) for next-token training
+        causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=input_ids.device, dtype=torch.bool), diagonal=-1)
         padding_mask = attention_mask.unsqueeze(1)
         combined_mask = causal_mask.unsqueeze(0) & (padding_mask & padding_mask.transpose(-1, -2))
         combined_mask = combined_mask.unsqueeze(1)
@@ -101,7 +102,8 @@ def evaluate(model, val_loader, device):
             attention_mask = batch["attention_mask"].to(device)
 
             seq_len = input_ids.shape[1]
-            causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=input_ids.device, dtype=torch.bool))
+            # Strictly causal (no self) for next-token eval
+            causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=input_ids.device, dtype=torch.bool), diagonal=-1)
             padding_mask = attention_mask.unsqueeze(1)
             combined_mask = causal_mask.unsqueeze(0) & (padding_mask & padding_mask.transpose(-1, -2))
             combined_mask = combined_mask.unsqueeze(1)
