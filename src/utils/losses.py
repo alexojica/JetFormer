@@ -503,25 +503,47 @@ def compute_jetformer_pca_loss(model,
                                cfg_drop_prob: float = 0.0,
                                loss_on_prefix: bool = True,
                                stop_grad_nvp_prefix: bool = False,
-                               advanced_metrics: bool = False):
+                               advanced_metrics: bool = False,
+                               noise_scale: float | None = None,
+                               rgb_noise_on_image_prefix: bool = True):
     """JetFormer loss over PatchPCA latents with optional Jet adaptor.
 
     Implements the paper's composition:
       image_bpd = ((nll_image_tokens + noise_nll)/num_subpix - (sum_log_det/num_subpix - ln(127.5))) / ln(2)
 
     Notes:
-      - Images are converted once to [-1,1] before PCA.
-      - No RGB curriculum noise is used here.
+      - Images are treated in 8-bit space with optional Gaussian noise schedule (JAX parity).
       - Optional extra Gaussian latent dims are accounted for via noise_nll.
     """
     device = next(model.parameters()).device
 
     images = batch['image'].to(device, non_blocking=True)
-    # Convert uint8 [0,255] to [0,1] with uniform dequant and then to [-1,1]
+    B = images.size(0)
+
+    # Sample text-first mask early for gating of noise if requested
+    Bsz = B
+    text_first_mask = torch.bernoulli(torch.full((Bsz,), float(text_first_prob), device=device)).bool()
+
+    # JAX-like RGB noise schedule in 8-bit space (if noise_scale provided)
+    # images expected as uint8 CHW; convert to [-1,1] via rounding recipe
     images_f = images.float()
-    u = torch.rand_like(images_f)
-    x01 = (images_f + u) / 256.0
-    x11 = (x01 * 2.0) - 1.0
+    # Build per-sample sigma schedule
+    if noise_scale is not None and float(noise_scale) > 0.0:
+        sigma = torch.full((Bsz,), float(noise_scale), device=device)
+        if not bool(rgb_noise_on_image_prefix):
+            # Skip noise on image prefix (i.e., only apply when text-first)
+            sigma = torch.where(text_first_mask, sigma, torch.zeros_like(sigma))
+        sigma = sigma.view(Bsz, 1, 1, 1)  # [B,1,1,1]
+        # Convert to [-1,1] via rounding through 8-bit domain with Gaussian noise
+        # images are uint8 CHW; map to [0,255], add noise, round, then back to [-1,1]
+        r = torch.round((images_f + 1.0) * 127.5)  # [B,C,H,W]
+        noisy = r + sigma * torch.randn_like(r)
+        noisy = torch.round(noisy)
+        x11 = (noisy / 127.5) - 1.0
+    else:
+        # No pixel noise; simple rounding path
+        r = torch.round((images_f + 1.0) * 127.5)
+        x11 = (r / 127.5) - 1.0
 
     # Encode via PatchPCA
     if not hasattr(model, 'patch_pca') or model.patch_pca is None:
@@ -530,7 +552,6 @@ def compute_jetformer_pca_loss(model,
     z = model.patch_pca.reparametrize(mu, logvar, train=model.training)
 
     # Optional Jet adaptor over latent grid
-    B = z.shape[0]
     H, W = model.input_size
     ps = model.patch_size
     H_patch, W_patch = (H // ps), (W // ps)
@@ -561,10 +582,9 @@ def compute_jetformer_pca_loss(model,
     if class_ids is not None:
         class_ids = class_ids.to(device, non_blocking=True)
     if (getattr(model, 'num_classes', None) is not None and getattr(model, 'num_classes') > 0) and class_ids is not None:
-        Bsz = images.size(0)
-        text_tokens = torch.zeros(Bsz, getattr(model, 'class_token_length', 16), dtype=torch.long, device=device)
-        text_mask = torch.ones(Bsz, getattr(model, 'class_token_length', 16), dtype=torch.bool, device=device)
-        text_loss_mask = torch.zeros(Bsz, getattr(model, 'class_token_length', 16), dtype=torch.bool, device=device)
+        text_tokens = torch.zeros(B, getattr(model, 'class_token_length', 16), dtype=torch.long, device=device)
+        text_mask = torch.ones(B, getattr(model, 'class_token_length', 16), dtype=torch.bool, device=device)
+        text_loss_mask = torch.zeros(B, getattr(model, 'class_token_length', 16), dtype=torch.bool, device=device)
     else:
         text_tokens = batch['text'].to(device, non_blocking=True)
         text_mask = batch['text_mask'].to(device, non_blocking=True)
@@ -572,27 +592,23 @@ def compute_jetformer_pca_loss(model,
 
     # Teacher forcing: AR input tokens
     img_in = hat_tokens
-    Bsz = img_in.shape[0]
-    text_first_mask = torch.bernoulli(torch.full((Bsz,), float(text_first_prob), device=device)).bool()
 
     # Stop gradients to NVP/adaptor when image is used as prefix (JAX parity)
     if stop_grad_nvp_prefix:
         img_in = torch.where(
             text_first_mask.view(-1, 1, 1),
             img_in,
-            img_in.detach()  # Stop grads when image is prefix (~text_first)
+            img_in.detach()
         )
 
     # Optional AR input noise when text is first - sample std uniformly at random per example (JAX parity)
     if float(input_noise_std) > 0.0:
-        # Sample noise std uniformly at random per example in [0, input_noise_std]
-        sampled_input_noise_std = torch.rand(Bsz, 1, 1, device=device) * float(input_noise_std)
-        # Only apply noise for image generation (when text is first)
+        sampled_input_noise_std = torch.rand(B, 1, 1, device=device) * float(input_noise_std)
         sampled_input_noise_std = torch.where(
             text_first_mask.view(-1, 1, 1), sampled_input_noise_std, torch.zeros_like(sampled_input_noise_std))
         img_in = img_in + (sampled_input_noise_std * torch.randn_like(img_in))
 
-    # CFG drop mask
+    # CFG drop mask (applied only when text-first inside model)
     drop_mask = (torch.rand(B, device=device) < float(cfg_drop_prob))
 
     # Forward AR

@@ -293,8 +293,38 @@ def train_from_config(config_dict: dict):
                     except Exception:
                         pass
                     base = unwrap_base_model(model)
-                    out = training_helpers.train_step(base, batch, step, total_opt_steps, config)
-                    loss = out["loss"]
+                    cfg_drop_prob = float(getattr(config, 'cfg_drop_prob', 0.1))
+                    advanced_metrics = bool(getattr(config, 'advanced_metrics', False))
+                    use_patch_pca = bool(getattr(config, 'use_patch_pca', False))
+                    if use_patch_pca:
+                        # Paper-aligned PCA latent path
+                        text_first_prob = float(getattr(config, 'text_prefix_prob', 0.5))
+                        input_noise_std = float(getattr(config, 'input_noise_std', 0.0))
+                        stop_grad_nvp_prefix = bool(getattr(config, 'stop_grad_nvp_prefix', False))
+                        # PCA pixel noise schedule parameters (JAX parity)
+                        noise_scale = None
+                        try:
+                            # cosine schedule precomputed above is specific to flow trainer; here we allow constant value
+                            noise_scale = float(getattr(config, 'noise_scale')) if hasattr(config, 'noise_scale') else None
+                        except Exception:
+                            noise_scale = None
+                        rgb_noise_on_image_prefix = bool(getattr(config, 'rgb_noise_on_image_prefix', True))
+                        from src.utils.losses import compute_jetformer_pca_loss
+                        out = compute_jetformer_pca_loss(
+                            model,
+                            batch,
+                            text_first_prob=text_first_prob,
+                            input_noise_std=input_noise_std,
+                            cfg_drop_prob=cfg_drop_prob,
+                            loss_on_prefix=bool(getattr(config, 'loss_on_prefix', True)),
+                            stop_grad_nvp_prefix=stop_grad_nvp_prefix,
+                            advanced_metrics=advanced_metrics,
+                            noise_scale=noise_scale,
+                            rgb_noise_on_image_prefix=rgb_noise_on_image_prefix,
+                        )
+                    else:
+                        out = training_helpers.train_step(base, batch, step, total_opt_steps, config)
+                        loss = out["loss"]
 
                 # Normalize loss for gradient accumulation
                 loss_to_backward = loss / float(max(1, grad_accum_steps))

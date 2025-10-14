@@ -115,5 +115,11 @@ wandb_project: "jetformer-imagenet-256"
 wandb_run_name: "B-256-first100"
 wandb_tags: ["imagenet", "256x256", "B", "first100"]
 
+# JAX parity controls
+rope_skip_pad: true
+# PCA pixel noise schedule (optional). If set, applies constant sigma per batch.
+noise_scale: 0.0
+rgb_noise_on_image_prefix: true
+
 
 

@@ -59,6 +59,13 @@ def build_jetformer_from_config(config: SimpleNamespace | Dict[str, Any], device
     rsp = _get_from_ns_or_dict(config, 'rope_skip_pad', None)
     if rsp is not None:
         kwargs['rope_skip_pad'] = bool(rsp)
+    else:
+        # Default to True for JAX parity in masked positions
+        kwargs['rope_skip_pad'] = True
+    # Optional strict_special_ids exposure
+    ssi = _get_from_ns_or_dict(config, 'strict_special_ids', None)
+    if ssi is not None:
+        kwargs['strict_special_ids'] = bool(ssi)
     inp = _get_from_ns_or_dict(config, 'input_size', None)
     if inp is not None:
         kwargs['input_size'] = tuple(inp)

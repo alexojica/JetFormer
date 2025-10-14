@@ -61,6 +61,8 @@ class JetFormer(nn.Module):
         scale_tol: float = 1e-6,
         # RoPE positions behavior
         rope_skip_pad: bool = False,
+        # Optional: enforce special token IDs (paper/JAX parity)
+        strict_special_ids: bool = False,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -120,9 +122,12 @@ class JetFormer(nn.Module):
         self.nolabel_id = int(nolabel_id) if nolabel_id is not None else None
         # Position id / alignment controls (default absolute positions; JAX uses absolute in training)
         self.rope_skip_pad = bool(rope_skip_pad)
+        self.strict_special_ids = bool(strict_special_ids)
         self.right_align_inputs = False  # when True, right-align tokens by input mask
         # Fallback learned special embeddings when ids are not provided
         self._use_learned_specials = not (isinstance(self.bos_id, int) and isinstance(self.nolabel_id, int))
+        if self.strict_special_ids and self._use_learned_specials:
+            raise RuntimeError("strict_special_ids=True requires integer bos_id and nolabel_id")
         if self._use_learned_specials:
             self.bos_emb = nn.Parameter(torch.randn(1, 1, d_model) * (1.0 / math.sqrt(d_model)))
             self.boi_emb = nn.Parameter(torch.randn(1, 1, d_model) * (1.0 / math.sqrt(d_model)))
@@ -491,12 +496,11 @@ class JetFormer(nn.Module):
             nolabel_single = self.nolabel_emb.expand(batch_size, 1, -1)
         # Image embeddings (computed before any optional drop so we can override if needed)
         image_emb = self.image_emb(image_tokens)
-        # CFG drop parity with JAX: only drop labels when text is first; when dropped,
-        # replace text embeddings with nolabel and force text mask to all True.
+        # CFG drop parity with JAX: drop labels only when text is first; never drop image prefix.
         if drop_text_cond_mask is not None:
             drop_b = drop_text_cond_mask.view(-1).bool()  # [B]
-            drop_txt = (text_first_mask & drop_b)         # [B]
-            drop_img = ((~text_first_mask) & drop_b)      # [B] — will be False if caller gates by text_first
+            # Only drop text embeddings when text is first (never drop image prefix)
+            drop_txt = (text_first_mask & drop_b)
             # Drop text embeddings when text-first
             if drop_txt.any():
                 # For repeated vocab, ensure nolabel covers the repeated text length
@@ -510,10 +514,6 @@ class JetFormer(nn.Module):
                 text_emb = torch.where(drop_txt.view(-1, 1, 1).expand_as(text_emb), nolabel_txt, text_emb)
                 # Force text mask to full True when dropped
                 x_txt_m = torch.where(drop_txt.view(-1, 1), torch.ones_like(x_txt_m), x_txt_m)
-            # (Kept for completeness) If image prefix were ever dropped, replace with nolabel (broadcasted over tokens)
-            if drop_img.any():
-                nolabel_img = nolabel_single.expand(batch_size, 1, -1)
-                image_emb = torch.where(drop_img.view(-1, 1, 1).expand_as(image_emb), nolabel_img, image_emb)
 
         x_img_m = torch.full(image_tokens.shape[:-1], True, device=device)
         bos_m = torch.full((batch_size, 1), True, device=device)
@@ -568,12 +568,9 @@ class JetFormer(nn.Module):
             x, _attn, padding_mask = self._right_align(x, _attn, padding_mask)
             attn_mask = _attn.unsqueeze(1)
 
-        # RoPE position ids: absolute by default (JAX parity). Allow optional skip-pad via flag.
-        if self.rope_skip_pad:
-            position_ids = torch.cumsum(padding_mask.to(torch.long), dim=1) - 1
-            position_ids = torch.clamp(position_ids, min=0)
-        else:
-            position_ids = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1)
+        # Positions derived from input mask (JAX parity): always cumsum
+        position_ids = torch.cumsum(padding_mask.to(torch.long), dim=1) - 1
+        position_ids = torch.clamp(position_ids, min=0)
 
         return x, attn_mask, position_ids
     
