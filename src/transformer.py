@@ -94,48 +94,6 @@ class MultiHeadAttention(nn.Module):
         
         return self.w_o(out)
 
-class TransformerBlock(nn.Module):
-    def __init__(self, d_model, n_heads, d_ff, dropout=0.1, max_seq_len=2048):
-        super().__init__()
-        self.attention = MultiHeadAttention(d_model, n_heads, dropout, max_seq_len)
-        self.feed_forward = nn.Sequential(
-            nn.Linear(d_model, d_ff),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_ff, d_model)
-        )
-        self.norm1 = nn.RMSNorm(d_model)
-        self.norm2 = nn.RMSNorm(d_model)
-        self.dropout = nn.Dropout(dropout)
-        
-    def forward(self, x, mask=None, position_ids=None):
-        attn_out = self.attention(x, x, x, mask, position_ids)
-        x = self.norm1(x + self.dropout(attn_out))
-        
-        ff_out = self.feed_forward(x)
-        x = self.norm2(x + self.dropout(ff_out))
-        
-        return x
-    
-class Transformer(nn.Module):
-    def __init__(self, d_model, n_heads, n_layers, d_ff, dropout=0.1, max_seq_len=2048):
-        super().__init__()
-        self.layers = nn.ModuleList([
-            TransformerBlock(d_model, n_heads, d_ff, dropout, max_seq_len) 
-            for _ in range(n_layers)
-        ])
-        self.norm = nn.RMSNorm(d_model)
-        
-    def forward(self, x, mask=None, position_ids=None):
-        for layer in self.layers:
-            x = layer(x, mask, position_ids)
-        x = self.norm(x)
-        return x
-
-    def freeze(self) -> None:
-        for p in self.parameters(recurse=True):
-            p.requires_grad = False
-
 class MultiQueryAttention(nn.Module):
     def __init__(self, d_model, n_heads, n_kv_heads, dropout=0.1, max_seq_len=2048, pe_type="rope"):
         super().__init__()

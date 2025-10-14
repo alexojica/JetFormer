@@ -438,6 +438,7 @@ def train_step(model: torch.nn.Module,
             # Paper-aligned PCA latent path
             text_first_prob = float(getattr(config, 'text_prefix_prob', 0.5))
             input_noise_std = float(getattr(config, 'input_noise_std', 0.0))
+            stop_grad_nvp_prefix = bool(getattr(config, 'stop_grad_nvp_prefix', False))
             from src.utils.losses import compute_jetformer_pca_loss
             out = compute_jetformer_pca_loss(
                 model,
@@ -446,6 +447,7 @@ def train_step(model: torch.nn.Module,
                 input_noise_std=input_noise_std,
                 cfg_drop_prob=cfg_drop_prob,
                 loss_on_prefix=bool(getattr(config, 'loss_on_prefix', True)),
+                stop_grad_nvp_prefix=stop_grad_nvp_prefix,
                 advanced_metrics=advanced_metrics,
             )
         else:

@@ -111,8 +111,8 @@ class JetFormer(nn.Module):
         self.bos_id = int(bos_id) if bos_id is not None else None
         self.boi_id = int(boi_id) if boi_id is not None else None
         self.nolabel_id = int(nolabel_id) if nolabel_id is not None else None
-        # Position id / alignment controls (defaults mirror JAX absolute positions)
-        self.rope_skip_pad = False  # when True, use cumsum over pads; otherwise absolute positions
+        # Position id / alignment controls (defaults mirror JAX which uses cumsum over input_mask)
+        self.rope_skip_pad = True  # when True, use cumsum over input_mask; JAX always uses this
         self.right_align_inputs = False  # when True, right-align tokens by input mask
         # Fallback learned special embeddings when ids are not provided
         self._use_learned_specials = not (isinstance(self.bos_id, int) and isinstance(self.nolabel_id, int))

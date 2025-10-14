@@ -213,11 +213,9 @@ def compute_flow_only_loss(model,
     images = batch['image'].to(device, non_blocking=True)
     
     B = images.shape[0]
-    # Uniform dequantization to [0,1]
-    images_float = images.float()
-    u_uint8 = torch.rand_like(images_float)
-    images01 = (images_float + u_uint8) / 256.0
-    
+    # RGB noise curriculum matching JAX: add noise in uint8 space BEFORE dequantization
+    images_float = images.float()  # [0, 255]
+
     # RGB noise curriculum
     no_rgb_noise = bool(batch.get('no_rgb_noise', False) or eval_no_rgb_noise)
     if no_rgb_noise:
@@ -228,8 +226,15 @@ def compute_flow_only_loss(model,
         total_steps_tensor = torch.tensor(int(max(1, total_steps)), device=device, dtype=torch.float32)
         nts = getattr(model, 'noise_total_steps', None)
         sigma_t = rgb_cosine_sigma(step_tensor, total_steps_tensor, float(rgb_sigma0), float(rgb_sigma_final), nts)
-    gaussian = torch.randn_like(images01) * (sigma_t / 255.0)
-    images01_noisy = images01 + gaussian
+
+    # Add RGB noise in uint8 space, then round and clamp
+    gaussian_uint8 = torch.randn_like(images_float) * sigma_t
+    images_noisy_uint8 = images_float + gaussian_uint8
+    images_noisy_uint8 = torch.clamp(torch.round(images_noisy_uint8), 0.0, 255.0)
+
+    # Now apply uniform dequantization to [0,1]
+    u_uint8 = torch.rand_like(images_noisy_uint8)
+    images01_noisy = (images_noisy_uint8 + u_uint8) / 256.0
     
     # Flow encode
     from src.utils.training_helpers import flow_encode_images01_to_tokens
@@ -325,11 +330,10 @@ def compute_jetformer_loss(model,
         text_first_mask = torch.bernoulli(torch.ones(B, device=device) * 0.5).bool()
     text_second_mask = ~text_first_mask
 
-    # Uniform dequantization to [0,1] matching FlowCore.training_step and the paper:
-    # x01 = (I + U) / 256, then add Gaussian RGB noise with sigma_t/255.
-    images_float = images.float()
-    u_uint8 = torch.rand_like(images_float)
-    images01 = (images_float + u_uint8) / 256.0
+    # RGB noise curriculum matching JAX paper implementation:
+    # Add Gaussian noise in uint8 space [0,255] BEFORE dequantization, then round and dequantize.
+    images_float = images.float()  # [0, 255]
+
     no_rgb_noise = bool(batch.get('no_rgb_noise', False) or eval_no_rgb_noise)
     if no_rgb_noise:
         sigma_t = torch.tensor(0.0, device=device)
@@ -339,8 +343,15 @@ def compute_jetformer_loss(model,
         total_steps_tensor = torch.tensor(int(max(1, total_steps)), device=device, dtype=torch.float32)
         nts = getattr(model, 'noise_total_steps', None)
         sigma_t = rgb_cosine_sigma(step_tensor, total_steps_tensor, float(rgb_sigma0), float(rgb_sigma_final), nts)
-    gaussian = torch.randn_like(images01) * (sigma_t / 255.0)
-    images01_noisy = images01 + gaussian
+
+    # Add RGB noise in uint8 space, then round and clamp
+    gaussian_uint8 = torch.randn_like(images_float) * sigma_t
+    images_noisy_uint8 = images_float + gaussian_uint8
+    images_noisy_uint8 = torch.clamp(torch.round(images_noisy_uint8), 0.0, 255.0)
+
+    # Now apply uniform dequantization to [0,1]
+    u_uint8 = torch.rand_like(images_noisy_uint8)
+    images01_noisy = (images_noisy_uint8 + u_uint8) / 256.0
 
     # Flow encode via utility
     from src.utils.training_helpers import flow_encode_images01_to_tokens
@@ -498,6 +509,7 @@ def compute_jetformer_pca_loss(model,
                                input_noise_std: float = 0.0,
                                cfg_drop_prob: float = 0.0,
                                loss_on_prefix: bool = True,
+                               stop_grad_nvp_prefix: bool = False,
                                advanced_metrics: bool = False):
     """JetFormer loss over PatchPCA latents with optional Jet adaptor.
 
@@ -567,15 +579,25 @@ def compute_jetformer_pca_loss(model,
 
     # Teacher forcing: AR input tokens
     img_in = hat_tokens
-    # Optional AR input noise when text is first
+    Bsz = img_in.shape[0]
+    text_first_mask = torch.bernoulli(torch.full((Bsz,), float(text_first_prob), device=device)).bool()
+
+    # Stop gradients to NVP/adaptor when image is used as prefix (JAX parity)
+    if stop_grad_nvp_prefix:
+        img_in = torch.where(
+            text_first_mask.view(-1, 1, 1),
+            img_in,
+            img_in.detach()  # Stop grads when image is prefix (~text_first)
+        )
+
+    # Optional AR input noise when text is first - sample std uniformly at random per example (JAX parity)
     if float(input_noise_std) > 0.0:
-        Bsz = img_in.shape[0]
-        text_first_mask = torch.bernoulli(torch.full((Bsz,), float(text_first_prob), device=device)).bool()
-        noise = torch.randn_like(img_in) * float(input_noise_std)
-        img_in = torch.where(text_first_mask.view(-1, 1, 1), img_in + noise, img_in)
-    else:
-        Bsz = img_in.shape[0]
-        text_first_mask = torch.bernoulli(torch.full((Bsz,), float(text_first_prob), device=device)).bool()
+        # Sample noise std uniformly at random per example in [0, input_noise_std]
+        sampled_input_noise_std = torch.rand(Bsz, 1, 1, device=device) * float(input_noise_std)
+        # Only apply noise for image generation (when text is first)
+        sampled_input_noise_std = torch.where(
+            text_first_mask.view(-1, 1, 1), sampled_input_noise_std, torch.zeros_like(sampled_input_noise_std))
+        img_in = img_in + (sampled_input_noise_std * torch.randn_like(img_in))
 
     # CFG drop mask
     drop_mask = (torch.rand(B, device=device) < float(cfg_drop_prob))
