@@ -29,7 +29,7 @@ class JetFormer(nn.Module):
         jet_num_heads: int = 8,
         patch_size: int = 4,
         input_size: Tuple[int, int] = (256, 256),
-        use_bfloat16_img_head: bool = True,
+        use_bfloat16_img_head: bool = False,
         image_ar_dim: int = 128,
         num_classes: int = None,
         class_token_length: int = 16,
@@ -359,8 +359,12 @@ class JetFormer(nn.Module):
         if drop_text_cond_mask is not None:
             drop = drop_text_cond_mask.view(-1, 1, 1)
             txt_first = text_first_mask.view(-1, 1, 1)
+            # Drop text embeddings when text-first
             nolabel_txt = nolabel_single.expand(batch_size, text_emb.shape[1], -1)
             text_emb = torch.where((txt_first & drop).expand_as(text_emb), nolabel_txt, text_emb)
+            # Drop image embeddings when image-first (replace all image tokens with nolabel)
+            nolabel_img = nolabel_single.expand(batch_size, 1, -1)
+            image_emb = torch.where(((~txt_first) & drop).expand_as(image_emb), nolabel_img, image_emb)
         image_emb = self.image_emb(image_tokens)
 
         x_img_m = torch.full(image_tokens.shape[:-1], True, device=device)
@@ -391,12 +395,10 @@ class JetFormer(nn.Module):
         padding_mask = padding_mask[:, :-1]
 
         seq_len = x.shape[1]
-        # Standard causal mask (includes self); we shift inputs by one already
+        # Causal mask [B, L, S]; includes self since inputs are shifted
         causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=device, dtype=torch.bool))
-        causal_mask = causal_mask.unsqueeze(0).expand(batch_size, -1, -1)
-        padding_mask_2d = padding_mask.unsqueeze(1) & padding_mask.unsqueeze(2)
-        
-        attn_mask = torch.logical_and(causal_mask, padding_mask_2d)
+        attn_mask = causal_mask.unsqueeze(0).expand(batch_size, -1, -1)
+        # Optionally unmask prefix tokens
         if not self.causal_mask_on_prefix:
             txt_len = text_emb.shape[1]
             img_len = image_emb.shape[1]
@@ -413,6 +415,9 @@ class JetFormer(nn.Module):
             img_prefix_mask[:, :img_prefix_len] = True
             prefix_mask = torch.where(mask_first_expanded, txt_prefix_mask, img_prefix_mask)
             attn_mask = torch.logical_or(attn_mask, prefix_mask.unsqueeze(1))
+        # Apply input mask on key/source dimension only
+        attn_mask = torch.logical_and(attn_mask, padding_mask.unsqueeze(1))
+        # Expand for MQA: [B,1,L,S]
         attn_mask = attn_mask.unsqueeze(1)
 
         # Per-sample RoPE position ids that skip pads

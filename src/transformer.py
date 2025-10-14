@@ -254,12 +254,16 @@ class GemmaBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
         
     def forward(self, x, mask=None, position_ids=None):
-        attn_out = self.attention(x, x, x, mask, position_ids)
-        x = self.norm1(x + self.dropout(attn_out))
-        
-        ff_out = self.feed_forward(x)
-        x = self.norm2(x + self.dropout(ff_out))
-        
+        # Pre-norm attention
+        h = self.norm1(x)
+        attn_out = self.attention(h, h, h, mask, position_ids)
+        x = x + self.dropout(attn_out)
+
+        # Pre-norm feed-forward
+        h2 = self.norm2(x)
+        ff_out = self.feed_forward(h2)
+        x = x + self.dropout(ff_out)
+
         return x
 
 class GemmaTransformer(nn.Module):
