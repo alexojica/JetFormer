@@ -5,7 +5,7 @@ from pathlib import Path
 from src.utils.logging import get_logger
 
 from src.jetformer import JetFormer
-from src.sampling import generate_text_to_image_samples_cfg, generate_class_conditional_samples, build_sentencepiece_tokenizer_dataset
+from src.utils.sampling import generate_text_to_image_samples_cfg, generate_class_conditional_samples, build_sentencepiece_tokenizer_dataset
 from src.accelerators import GPUAccelerator, TPUAccelerator, HAS_TPU as _HAS_TPU
 from src.utils.eval import compute_fid as _compute_fid
 

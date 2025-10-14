@@ -28,6 +28,27 @@ def cross_entropy_second_only(logits: torch.Tensor,
     denom = mask.sum().clamp_min(1.0)
     return masked_sum / denom
 
+def cross_entropy_masked(logits: torch.Tensor,
+                         tokens: torch.Tensor,
+                         token_mask: torch.Tensor,
+                         example_mask: torch.Tensor) -> torch.Tensor:
+    """Cross-entropy averaged with per-token and per-example masks.
+
+    Args:
+        logits: [B, T, V]
+        tokens: [B, T]
+        token_mask: [B, T] boolean — positions to include
+        example_mask: [B] boolean — per-example gating
+    Returns:
+        scalar CE loss
+    """
+    b, t, v = logits.shape
+    ce = F.cross_entropy(logits.reshape(b * t, v), tokens.reshape(b * t), reduction='none').view(b, t)
+    mask = token_mask.float() * example_mask.float().unsqueeze(1)
+    masked_sum = (ce * mask).sum()
+    denom = mask.sum().clamp_min(1.0)
+    return masked_sum / denom
+
 def bits_per_dim_flow(z: torch.Tensor, logdet: torch.Tensor, image_shape_hwc: tuple, reduce: bool = True):
     """Flow-only bits-per-dimension consistent with JetFormer/Jet paper.
 
@@ -270,6 +291,7 @@ def compute_jetformer_loss(model,
                            rgb_sigma_final: float,
                            latent_noise_std: float,
                            cfg_drop_prob: float,
+                           loss_on_prefix: bool = True,
                            eval_no_rgb_noise: bool = False,
                            advanced_metrics: bool = False):
     """Unified forward loss for JetFormer AR+flow training.
@@ -336,7 +358,13 @@ def compute_jetformer_loss(model,
     if (getattr(model, 'num_classes', None) is not None and getattr(model, 'num_classes') > 0) and class_ids is not None:
         text_loss = torch.tensor(0.0, device=device)
     else:
-        text_loss = cross_entropy_second_only(text_logits, text_tokens, text_loss_mask, text_second_mask)
+        if loss_on_prefix:
+            # valid_txt = (text_first & ~drop_prefix) | (~text_first)
+            drop_prefix = (text_first_mask & drop_mask)
+            valid_txt = (text_first_mask & (~drop_prefix)) | (~text_first_mask)
+            text_loss = cross_entropy_masked(text_logits, text_tokens, text_loss_mask, valid_txt)
+        else:
+            text_loss = cross_entropy_second_only(text_logits, text_tokens, text_loss_mask, text_second_mask)
 
     # Image loss components
     mix_logits, means, scales = gmm_params(image_logits, int(getattr(model, 'num_mixtures', 1024)), int(getattr(model, 'image_ar_dim', model.image_token_dim)))
@@ -353,7 +381,14 @@ def compute_jetformer_loss(model,
     flow_bpd_per_sample = (-log_det) / denom
     ar_bpd_per_sample = (gmm_nll + residual_nll + const) / denom
     image_bpd_per_sample = total_nll / denom
-    image_loss = (image_bpd_per_sample * text_first_mask.float()).mean()
+    if loss_on_prefix:
+        # valid_img = ((~text_first & ~drop_prefix) | text_first)
+        drop_prefix = (text_first_mask & drop_mask)
+        valid_img = ((~text_first_mask) & (~drop_prefix)) | (text_first_mask)
+        denom = valid_img.float().sum().clamp_min(1.0)
+        image_loss = (image_bpd_per_sample * valid_img.float()).sum() / denom
+    else:
+        image_loss = (image_bpd_per_sample * text_first_mask.float()).mean()
 
     with torch.no_grad():
         ar_log_pz_nats = -(gmm_nll + residual_nll).mean()
@@ -399,7 +434,12 @@ def compute_jetformer_loss(model,
             logits_flat = text_logits.reshape(Bsz * T, V)
             tokens_flat = text_tokens.reshape(Bsz * T)
             ce_all = F.cross_entropy(logits_flat, tokens_flat, reduction='none').view(Bsz, T)
-            mask_used = text_loss_mask.float() * text_second_mask.float().unsqueeze(1)
+            if loss_on_prefix:
+                drop_prefix = (text_first_mask & drop_mask)
+                valid_txt = (text_first_mask & (~drop_prefix)) | (~text_first_mask)
+                mask_used = text_loss_mask.float() * valid_txt.float().unsqueeze(1)
+            else:
+                mask_used = text_loss_mask.float() * text_second_mask.float().unsqueeze(1)
             text_ce_denom = mask_used.sum().clamp_min(1.0)
             text_loss_unmasked = (ce_all * text_loss_mask.float()).sum() / text_loss_mask.float().sum().clamp_min(1.0)
 
@@ -457,6 +497,7 @@ def compute_jetformer_pca_loss(model,
                                text_first_prob: float = 0.5,
                                input_noise_std: float = 0.0,
                                cfg_drop_prob: float = 0.0,
+                               loss_on_prefix: bool = True,
                                advanced_metrics: bool = False):
     """JetFormer loss over PatchPCA latents with optional Jet adaptor.
 
@@ -546,8 +587,13 @@ def compute_jetformer_pca_loss(model,
     if (getattr(model, 'num_classes', None) is not None and getattr(model, 'num_classes') > 0) and class_ids is not None:
         text_loss = torch.tensor(0.0, device=device)
     else:
-        text_second_mask = ~text_first_mask
-        text_loss = cross_entropy_second_only(text_logits, text_tokens, text_loss_mask, text_second_mask)
+        if loss_on_prefix:
+            drop_prefix = (text_first_mask & drop_mask)
+            valid_txt = (text_first_mask & (~drop_prefix)) | (~text_first_mask)
+            text_loss = cross_entropy_masked(text_logits, text_tokens, text_loss_mask, valid_txt)
+        else:
+            text_second_mask = ~text_first_mask
+            text_loss = cross_entropy_second_only(text_logits, text_tokens, text_loss_mask, text_second_mask)
 
     # Image NLL via GMM on hat_tokens
     mix_logits, means, scales = gmm_params(image_logits, int(getattr(model, 'num_mixtures', 1024)), D_ar)
@@ -568,7 +614,13 @@ def compute_jetformer_pca_loss(model,
     total_nll = gmm_nll + residual_nll + noise_nll
     # ((total_nll)/num_subpix - (sum_log_det/num_subpix - ln(127.5))) / ln 2
     image_bpd_per_sample = ((total_nll / num_subpix) - (sum_log_det / num_subpix - ln1275)) / ln2
-    image_loss = (image_bpd_per_sample * text_first_mask.float()).mean()
+    if loss_on_prefix:
+        drop_prefix = (text_first_mask & drop_mask)
+        valid_img = ((~text_first_mask) & (~drop_prefix)) | (text_first_mask)
+        denom = valid_img.float().sum().clamp_min(1.0)
+        image_loss = (image_bpd_per_sample * valid_img.float()).sum() / denom
+    else:
+        image_loss = (image_bpd_per_sample * text_first_mask.float()).mean()
 
     with torch.no_grad():
         small_scales_rate = (scales < 1e-4).float().mean()

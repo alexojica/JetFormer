@@ -16,6 +16,8 @@ ALIASES = {
     'warmup': 'warmup_percent',
     'warmup_pct': 'warmup_percent',
     'cosine': 'use_cosine',
+    # CFG/drop labels naming parity
+    'drop_labels_probability': 'cfg_drop_prob',
 }
 
 

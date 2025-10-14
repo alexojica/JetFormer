@@ -355,17 +355,24 @@ class JetFormer(nn.Module):
             bos_emb = self.lookup_token(self.bos_id, batch_size)
             boi_emb = self.lookup_token(self.boi_id if self.use_boi_token else -1, batch_size)
             nolabel_single = self.lookup_token(self.nolabel_id, batch_size)
-        # CFG drop symmetry: drop text when text-first; drop image prefix when image-first
-        if drop_text_cond_mask is not None:
-            drop = drop_text_cond_mask.view(-1, 1, 1)
-            txt_first = text_first_mask.view(-1, 1, 1)
-            # Drop text embeddings when text-first
-            nolabel_txt = nolabel_single.expand(batch_size, text_emb.shape[1], -1)
-            text_emb = torch.where((txt_first & drop).expand_as(text_emb), nolabel_txt, text_emb)
-            # Drop image embeddings when image-first (replace all image tokens with nolabel)
-            nolabel_img = nolabel_single.expand(batch_size, 1, -1)
-            image_emb = torch.where(((~txt_first) & drop).expand_as(image_emb), nolabel_img, image_emb)
+        # Image embeddings (computed before any optional drop so we can override if needed)
         image_emb = self.image_emb(image_tokens)
+        # CFG drop parity with JAX: only drop labels when text is first; when dropped,
+        # replace text embeddings with nolabel and force text mask to all True.
+        if drop_text_cond_mask is not None:
+            drop_b = drop_text_cond_mask.view(-1).bool()  # [B]
+            drop_txt = (text_first_mask & drop_b)         # [B]
+            drop_img = ((~text_first_mask) & drop_b)      # [B] — will be False if caller gates by text_first
+            # Drop text embeddings when text-first
+            if drop_txt.any():
+                nolabel_txt = nolabel_single.expand(batch_size, text_emb.shape[1], -1)
+                text_emb = torch.where(drop_txt.view(-1, 1, 1).expand_as(text_emb), nolabel_txt, text_emb)
+                # Force text mask to full True when dropped
+                x_txt_m = torch.where(drop_txt.view(-1, 1), torch.ones_like(x_txt_m), x_txt_m)
+            # (Kept for completeness) If image prefix were ever dropped, replace with nolabel (broadcasted over tokens)
+            if drop_img.any():
+                nolabel_img = nolabel_single.expand(batch_size, 1, -1)
+                image_emb = torch.where(drop_img.view(-1, 1, 1).expand_as(image_emb), nolabel_img, image_emb)
 
         x_img_m = torch.full(image_tokens.shape[:-1], True, device=device)
         bos_m = torch.full((batch_size, 1), True, device=device)

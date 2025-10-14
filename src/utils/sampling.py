@@ -49,7 +49,11 @@ def generate_text_to_image_samples(model, dataset, device, num_samples: int = 3,
                     _, image_logits = model(text_tokens, image_tokens, text_first_mask, full_mask)
 
                 if pos < image_logits.shape[1]:
-                    mix_logits, means, scales = gmm_params(image_logits[:, pos:pos+1], int(getattr(model, 'num_mixtures', 1024)), int(getattr(model, 'image_ar_dim', model.image_token_dim)))
+                    # Prefer model's gmm_params to respect its scale_tol
+                    if hasattr(model, 'gmm_params'):
+                        mix_logits, means, scales = model.gmm_params(image_logits[:, pos:pos+1])
+                    else:
+                        mix_logits, means, scales = gmm_params(image_logits[:, pos:pos+1], int(getattr(model, 'num_mixtures', 1024)), int(getattr(model, 'image_ar_dim', model.image_token_dim)))
                     mix = torch.distributions.Categorical(logits=mix_logits.squeeze(1))
                     comp_idx = mix.sample()
                     bidx = torch.arange(comp_idx.shape[0], device=device)
@@ -188,9 +192,12 @@ def generate_text_to_image_samples_cfg(
                         image_tokens[0, pos] = sampled[0, 0]
                     elif cfg_mode == "interp":
                         guided_logits = image_logits_u + cfg_strength * (image_logits_c - image_logits_u)
-                        mix_logits, means, scales = gmm_params(
-                            guided_logits[:, pos:pos+1], int(getattr(model, 'num_mixtures', 1024)), int(getattr(model, 'image_ar_dim', model.image_token_dim))
-                        )
+                        if hasattr(model, 'gmm_params'):
+                            mix_logits, means, scales = model.gmm_params(guided_logits[:, pos:pos+1])
+                        else:
+                            mix_logits, means, scales = gmm_params(
+                                guided_logits[:, pos:pos+1], int(getattr(model, 'num_mixtures', 1024)), int(getattr(model, 'image_ar_dim', model.image_token_dim))
+                            )
                         mix_s = mix_logits.squeeze(1)
                         means_s = means.squeeze(1)
                         scales_s = scales.squeeze(1)
@@ -228,9 +235,12 @@ def generate_text_to_image_samples_cfg(
                                 break
                         if not accepted:
                             guided_logits = image_logits_u + cfg_strength * (image_logits_c - image_logits_u)
-                            mix_logits, means, scales = gmm_params(
-                                guided_logits[:, pos:pos+1], int(getattr(model, 'num_mixtures', 1024)), int(getattr(model, 'image_ar_dim', model.image_token_dim))
-                            )
+                            if hasattr(model, 'gmm_params'):
+                                mix_logits, means, scales = model.gmm_params(guided_logits[:, pos:pos+1])
+                            else:
+                                mix_logits, means, scales = gmm_params(
+                                    guided_logits[:, pos:pos+1], int(getattr(model, 'num_mixtures', 1024)), int(getattr(model, 'image_ar_dim', model.image_token_dim))
+                                )
                             mix_s = mix_logits.squeeze(1)
                             means_s = means.squeeze(1)
                             scales_s = scales.squeeze(1)
@@ -348,9 +358,12 @@ def generate_class_conditional_samples(base,
                         img_tokens[0, pos] = sampled[0, 0]
                     elif cfg_mode == "interp":
                         guided_logits = image_logits_u + cfg_strength * (image_logits_c - image_logits_u)
-                        mix_logits, means, scales = gmm_params(
-                            guided_logits[:, pos:pos+1], int(getattr(base, 'num_mixtures', 1024)), int(getattr(base, 'image_ar_dim', base.image_token_dim))
-                        )
+                        if hasattr(base, 'gmm_params'):
+                            mix_logits, means, scales = base.gmm_params(guided_logits[:, pos:pos+1])
+                        else:
+                            mix_logits, means, scales = gmm_params(
+                                guided_logits[:, pos:pos+1], int(getattr(base, 'num_mixtures', 1024)), int(getattr(base, 'image_ar_dim', base.image_token_dim))
+                            )
                         mix = torch.distributions.Categorical(logits=mix_logits.squeeze(1))
                         comp_idx = mix.sample()
                         bidx = torch.arange(comp_idx.shape[0], device=device)
@@ -363,12 +376,16 @@ def generate_class_conditional_samples(base,
                         # Reject mode
                         gamma = float(cfg_strength) / (float(cfg_strength) + 1.0)
                         gamma = max(0.0, min(0.999, gamma))
-                        mix_c, means_c, scales_c = gmm_params(
-                            image_logits_c[:, pos:pos+1], int(getattr(base, 'num_mixtures', 1024)), int(getattr(base, 'image_ar_dim', base.image_token_dim))
-                        )
-                        mix_u, means_u, scales_u = gmm_params(
-                            image_logits_u[:, pos:pos+1], int(getattr(base, 'num_mixtures', 1024)), int(getattr(base, 'image_ar_dim', base.image_token_dim))
-                        )
+                        if hasattr(base, 'gmm_params'):
+                            mix_c, means_c, scales_c = base.gmm_params(image_logits_c[:, pos:pos+1])
+                            mix_u, means_u, scales_u = base.gmm_params(image_logits_u[:, pos:pos+1])
+                        else:
+                            mix_c, means_c, scales_c = gmm_params(
+                                image_logits_c[:, pos:pos+1], int(getattr(base, 'num_mixtures', 1024)), int(getattr(base, 'image_ar_dim', base.image_token_dim))
+                            )
+                            mix_u, means_u, scales_u = gmm_params(
+                                image_logits_u[:, pos:pos+1], int(getattr(base, 'num_mixtures', 1024)), int(getattr(base, 'image_ar_dim', base.image_token_dim))
+                            )
                         mix_c = mix_c.squeeze(1); means_c = means_c.squeeze(1); scales_c = scales_c.squeeze(1)
                         mix_u = mix_u.squeeze(1); means_u = means_u.squeeze(1); scales_u = scales_u.squeeze(1)
                         max_tries = 64
@@ -387,9 +404,12 @@ def generate_class_conditional_samples(base,
                                 break
                         if not accepted:
                             guided_logits = image_logits_u + cfg_strength * (image_logits_c - image_logits_u)
-                            mix_logits, means, scales = gmm_params(
-                                guided_logits[:, pos:pos+1], int(getattr(base, 'num_mixtures', 1024)), int(getattr(base, 'image_ar_dim', base.image_token_dim))
-                            )
+                            if hasattr(base, 'gmm_params'):
+                                mix_logits, means, scales = base.gmm_params(guided_logits[:, pos:pos+1])
+                            else:
+                                mix_logits, means, scales = gmm_params(
+                                    guided_logits[:, pos:pos+1], int(getattr(base, 'num_mixtures', 1024)), int(getattr(base, 'image_ar_dim', base.image_token_dim))
+                                )
                             mix = torch.distributions.Categorical(logits=mix_logits.squeeze(1))
                             comp_idx = mix.sample()
                             bidx = torch.arange(comp_idx.shape[0], device=device)
@@ -442,7 +462,7 @@ def build_sentencepiece_tokenizer_dataset(max_length: int = 64):
     """
     try:
         from sentencepiece import SentencePieceProcessor
-        from src.tokenizer import download_sentencepiece_model
+        from src.utils.tokenizer import download_sentencepiece_model
     except Exception as exc:
         raise RuntimeError("SentencePiece is required for text tokenization. Please install sentencepiece.") from exc
 

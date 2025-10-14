@@ -445,6 +445,7 @@ def train_step(model: torch.nn.Module,
                 text_first_prob=text_first_prob,
                 input_noise_std=input_noise_std,
                 cfg_drop_prob=cfg_drop_prob,
+                loss_on_prefix=bool(getattr(config, 'loss_on_prefix', True)),
                 advanced_metrics=advanced_metrics,
             )
         else:
@@ -460,6 +461,7 @@ def train_step(model: torch.nn.Module,
                 rgb_sigma_final=rgb_sigma_final,
                 latent_noise_std=latent_noise_std,
                 cfg_drop_prob=cfg_drop_prob,
+                loss_on_prefix=bool(getattr(config, 'loss_on_prefix', True)),
                 eval_no_rgb_noise=eval_no_rgb_noise,
                 advanced_metrics=advanced_metrics,
             )
