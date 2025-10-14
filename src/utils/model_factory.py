@@ -55,6 +55,10 @@ def build_jetformer_from_config(config: SimpleNamespace | Dict[str, Any], device
                 kwargs[name] = v
         elif val is not None:
             kwargs[name] = val
+    # Optional rope_skip_pad exposure (default False)
+    rsp = _get_from_ns_or_dict(config, 'rope_skip_pad', None)
+    if rsp is not None:
+        kwargs['rope_skip_pad'] = bool(rsp)
     inp = _get_from_ns_or_dict(config, 'input_size', None)
     if inp is not None:
         kwargs['input_size'] = tuple(inp)

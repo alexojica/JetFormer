@@ -468,6 +468,8 @@ def train_step(model: torch.nn.Module,
                 loss_on_prefix=bool(getattr(config, 'loss_on_prefix', True)),
                 eval_no_rgb_noise=eval_no_rgb_noise,
                 advanced_metrics=advanced_metrics,
+                text_first_prob=float(getattr(config, 'text_prefix_prob', 0.5)),
+                stop_grad_nvp_prefix=bool(getattr(config, 'stop_grad_nvp_prefix', False)),
             )
         # Build weighted total from differentiable components
         total = (text_loss_weight * out["text_loss"]) + (image_loss_weight * out["image_loss"])

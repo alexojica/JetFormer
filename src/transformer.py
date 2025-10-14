@@ -160,8 +160,9 @@ class MultiQueryAttention(nn.Module):
         # Optional pre-attn normalization on queries (Gemma: rsqrt_head_dim)
         if self.query_pre_attn_norm == "rsqrt_head_dim":
             # Multiply queries by 1/sqrt(d_k) before dot-products instead of after
+            # Apply scaling directly to Q before reshaping to per-head tensors.
             scale = 1.0 / math.sqrt(self.d_k)
-            q = q * scale
+            Q = Q * scale
         # Use PyTorch SDPA for fast fused attention (FlashAttention/MemEff kernels on CUDA)
         # Q, K, V are [B, H, L, Dk] and [B, H, S, Dk]; SDPA expects (..., L, E) etc.,
         # so reshape to (B*H, L, Dk) forms and call SDPA per head via batch dims.

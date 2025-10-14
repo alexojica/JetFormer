@@ -56,6 +56,8 @@ class JetFormer(nn.Module):
         boi_id: int = None,
         nolabel_id: int = None,
         scale_tol: float = 1e-6,
+        # RoPE positions behavior
+        rope_skip_pad: bool = False,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -111,8 +113,8 @@ class JetFormer(nn.Module):
         self.bos_id = int(bos_id) if bos_id is not None else None
         self.boi_id = int(boi_id) if boi_id is not None else None
         self.nolabel_id = int(nolabel_id) if nolabel_id is not None else None
-        # Position id / alignment controls (defaults mirror JAX which uses cumsum over input_mask)
-        self.rope_skip_pad = True  # when True, use cumsum over input_mask; JAX always uses this
+        # Position id / alignment controls (default absolute positions; JAX uses absolute in training)
+        self.rope_skip_pad = bool(rope_skip_pad)
         self.right_align_inputs = False  # when True, right-align tokens by input mask
         # Fallback learned special embeddings when ids are not provided
         self._use_learned_specials = not (isinstance(self.bos_id, int) and isinstance(self.nolabel_id, int))
@@ -483,7 +485,7 @@ class JetFormer(nn.Module):
             x, _attn, padding_mask = self._right_align(x, _attn, padding_mask)
             attn_mask = _attn.unsqueeze(1)
 
-        # RoPE position ids: absolute by default (JAX parity); skip-pad optional
+        # RoPE position ids: absolute by default (JAX parity). Allow optional skip-pad via flag.
         if self.rope_skip_pad:
             position_ids = torch.cumsum(padding_mask.to(torch.long), dim=1) - 1
             position_ids = torch.clamp(position_ids, min=0)
