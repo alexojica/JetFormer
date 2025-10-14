@@ -101,7 +101,8 @@ class JetFormer(nn.Module):
         assert head_dim % 2 == 0, "Head dimension must be even for RoPE"
         
         # JAX parity flags
-        self.use_boi_token = bool(use_boi_token)
+        # Gate BOI usage strictly by presence of boi_id (parity with JAX)
+        self.use_boi_token = bool(boi_id is not None)
         self.causal_mask_on_prefix = bool(causal_mask_on_prefix)
         self.untie_output_vocab = bool(untie_output_vocab)
         self.per_modality_final_norm = bool(per_modality_final_norm)
@@ -110,6 +111,9 @@ class JetFormer(nn.Module):
         self.bos_id = int(bos_id) if bos_id is not None else None
         self.boi_id = int(boi_id) if boi_id is not None else None
         self.nolabel_id = int(nolabel_id) if nolabel_id is not None else None
+        # Position id / alignment controls (defaults mirror JAX absolute positions)
+        self.rope_skip_pad = False  # when True, use cumsum over pads; otherwise absolute positions
+        self.right_align_inputs = False  # when True, right-align tokens by input mask
         # Fallback learned special embeddings when ids are not provided
         self._use_learned_specials = not (isinstance(self.bos_id, int) and isinstance(self.nolabel_id, int))
         if self._use_learned_specials:
@@ -304,6 +308,41 @@ class JetFormer(nn.Module):
         tok = torch.full((batch_size, 1), int(token_id), device=self.text_emb.weight.device, dtype=torch.long)
         return self.text_emb(tok)
 
+    def _right_align(self, x: torch.Tensor, attn_mask_l_s: torch.Tensor, input_mask_l: torch.Tensor):
+        """Right-align tokens and masks per-sample to match JAX helper.
+
+        x: [B, L, D], attn_mask_l_s: [B, L, S], input_mask_l: [B, L] (bool)
+        Returns aligned (x, attn_mask_l_s, input_mask_l).
+        """
+        B, L, D = x.shape
+        # Compute final positions for each token: tokens with False mask get -1 and will be dropped
+        m_cumsum = torch.cumsum(input_mask_l.to(torch.long), dim=1)
+        seqlen = m_cumsum[:, -1]
+        x_pos = (L - seqlen).unsqueeze(1) + m_cumsum
+        x_pos = x_pos * input_mask_l.to(torch.long) - 1  # [B,L]
+
+        # Build permutation matrices per batch via one-hot
+        perm = torch.zeros(B, L, L, device=x.device, dtype=torch.bool)
+        rows = torch.arange(L, device=x.device).view(1, L).expand(B, -1)
+        valid = x_pos >= 0
+        # scatter: for valid positions set perm[b, pos, src]=True
+        for b in range(B):
+            pos_b = x_pos[b]
+            mask_b = valid[b]
+            src_idx = rows[b][mask_b]
+            dst_idx = pos_b[mask_b]
+            perm[b, dst_idx, src_idx] = True
+
+        # Apply permutation: x' = P @ x; attn' = P @ attn @ P^T
+        x_aligned = torch.einsum('bld,blm->bmd', x, perm)
+        attn_rows = torch.einsum('bls,blm->bms', attn_mask_l_s, perm)
+        attn_perm = torch.einsum('bms,bsn->bmn', attn_rows, perm)
+
+        # Rebuild input_mask: right-most seqlen tokens True
+        rng = torch.arange(L, device=x.device).unsqueeze(0).expand(B, -1)
+        input_mask_aligned = rng >= (L - seqlen).unsqueeze(1)
+        return x_aligned, attn_perm, input_mask_aligned
+
     def factor_tokens(self, full_tokens: torch.Tensor):
         """Split full flow tokens [B,N,Cps^2] into autoregressive dims and Gaussian residual dims."""
         if full_tokens.shape[-1] < self.image_ar_dim:
@@ -346,15 +385,25 @@ class JetFormer(nn.Module):
             else:
                 text_emb = self.text_emb(text_tokens)
                 x_txt_m = input_mask
-        # Special tokens
-        if self._use_learned_specials:
+        # Special tokens: prefer embedding lookup like JAX; fallback learned only if ids missing
+        if not self._use_learned_specials:
+            bos_emb = self.lookup_token(self.bos_id, batch_size)
+            boi_emb = self.lookup_token(self.boi_id if self.use_boi_token else -1, batch_size)
+            # Repeat-aware nolabel embeddings when repeats > 1: build a nolabel token sequence
+            if self.num_vocab_repeats > 1:
+                # Build nolabel token ids per repeated vocab
+                base = torch.full((batch_size, 1), int(self.nolabel_id) if self.nolabel_id is not None else -1, device=device, dtype=torch.long)
+                reps = [base + off for off in offsets]
+                nolabel_tokens = torch.cat(reps, dim=1)
+                nolabel_emb_full = self.text_emb(nolabel_tokens)
+                # Take only one position when used for image prefix replacement; for text replacement we expand below
+                nolabel_single = nolabel_emb_full[:, :1, :]
+            else:
+                nolabel_single = self.lookup_token(self.nolabel_id, batch_size)
+        else:
             bos_emb = self.bos_emb.expand(batch_size, 1, -1)
             boi_emb = self.boi_emb.expand(batch_size, 1, -1)
             nolabel_single = self.nolabel_emb.expand(batch_size, 1, -1)
-        else:
-            bos_emb = self.lookup_token(self.bos_id, batch_size)
-            boi_emb = self.lookup_token(self.boi_id if self.use_boi_token else -1, batch_size)
-            nolabel_single = self.lookup_token(self.nolabel_id, batch_size)
         # Image embeddings (computed before any optional drop so we can override if needed)
         image_emb = self.image_emb(image_tokens)
         # CFG drop parity with JAX: only drop labels when text is first; when dropped,
@@ -365,7 +414,14 @@ class JetFormer(nn.Module):
             drop_img = ((~text_first_mask) & drop_b)      # [B] — will be False if caller gates by text_first
             # Drop text embeddings when text-first
             if drop_txt.any():
-                nolabel_txt = nolabel_single.expand(batch_size, text_emb.shape[1], -1)
+                # For repeated vocab, ensure nolabel covers the repeated text length
+                if (not self._use_learned_specials) and self.num_vocab_repeats > 1 and text_emb.shape[1] == (text_tokens.shape[1] * self.num_vocab_repeats):
+                    base = torch.full((batch_size, text_tokens.shape[1]), int(self.nolabel_id) if self.nolabel_id is not None else -1, device=device, dtype=torch.long)
+                    reps = [base + off for off in offsets]
+                    nolabel_tokens = torch.cat(reps, dim=1)
+                    nolabel_txt = self.text_emb(nolabel_tokens)
+                else:
+                    nolabel_txt = nolabel_single.expand(batch_size, text_emb.shape[1], -1)
                 text_emb = torch.where(drop_txt.view(-1, 1, 1).expand_as(text_emb), nolabel_txt, text_emb)
                 # Force text mask to full True when dropped
                 x_txt_m = torch.where(drop_txt.view(-1, 1), torch.ones_like(x_txt_m), x_txt_m)
@@ -427,9 +483,19 @@ class JetFormer(nn.Module):
         # Expand for MQA: [B,1,L,S]
         attn_mask = attn_mask.unsqueeze(1)
 
-        # Per-sample RoPE position ids that skip pads
-        position_ids = torch.cumsum(padding_mask.to(torch.long), dim=1) - 1
-        position_ids = torch.clamp(position_ids, min=0)
+        # Optional right-align (parity with JAX helper)
+        if self.right_align_inputs:
+            # Convert attn mask to [B,L,S] for permutation, then restore shape
+            _attn = attn_mask.squeeze(1)
+            x, _attn, padding_mask = self._right_align(x, _attn, padding_mask)
+            attn_mask = _attn.unsqueeze(1)
+
+        # RoPE position ids: absolute by default (JAX parity); skip-pad optional
+        if self.rope_skip_pad:
+            position_ids = torch.cumsum(padding_mask.to(torch.long), dim=1) - 1
+            position_ids = torch.clamp(position_ids, min=0)
+        else:
+            position_ids = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1)
 
         return x, attn_mask, position_ids
     
@@ -487,11 +553,9 @@ class JetFormer(nn.Module):
         if self.untie_output_vocab:
             text_logits = self.text_head(text_feats)
         else:
-            # Tied to embedding table
-            weight = self.text_emb.weight
-            if self.num_vocab_repeats == 1:
-                weight = weight[: self.vocab_size]
-            text_logits = torch.matmul(text_feats, weight.t())
+            # Tied to entire embedding table (supports repeated vocab)
+            weight = self.text_emb.weight  # [V_total, D]
+            text_logits = torch.matmul(text_feats, weight.t())  # [B, L_txt, V_total]
 
         if self.use_bfloat16_img_head:
             image_logits_bf16 = image_feats.to(torch.bfloat16)
@@ -518,8 +582,12 @@ class JetFormer(nn.Module):
 
         text_seq_len = text_tokens.shape[1]
         image_seq_len = image_tokens.shape[1]
-        image_out_when_second = x[:, text_seq_len+1:text_seq_len+1+image_seq_len]
-        image_out_when_first = x[:, :image_seq_len]
+        if self.use_boi_token:
+            image_out_when_second = x[:, text_seq_len+1:text_seq_len+1+image_seq_len]
+            image_out_when_first = x[:, :image_seq_len]
+        else:
+            image_out_when_second = x[:, :image_seq_len]
+            image_out_when_first = x[:, :image_seq_len]
         text_first_expanded = text_first_mask.reshape(batch_size, 1, 1).to(device)
         image_hidden = torch.where(
             text_first_expanded.expand(-1, image_seq_len, x.shape[-1]),
