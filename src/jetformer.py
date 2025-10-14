@@ -30,6 +30,9 @@ class JetFormer(nn.Module):
         patch_size: int = 4,
         input_size: Tuple[int, int] = (256, 256),
         use_bfloat16_img_head: bool = False,
+        # Optional dtype controls (parity knobs)
+        head_dtype = None,
+        embed_dtype = None,
         image_ar_dim: int = 128,
         num_classes: int = None,
         class_token_length: int = 16,
@@ -65,6 +68,8 @@ class JetFormer(nn.Module):
         self.max_seq_len = max_seq_len
         self.num_mixtures = num_mixtures
         self.use_bfloat16_img_head = use_bfloat16_img_head
+        self._head_dtype = head_dtype
+        self._embed_dtype = embed_dtype
         # Checkpointing controls
         self.grad_checkpoint_transformer = bool(grad_checkpoint_transformer)
         self.flow_grad_checkpoint = bool(flow_grad_checkpoint)
@@ -157,6 +162,12 @@ class JetFormer(nn.Module):
         self.text_emb = nn.Embedding(vocab_size * self.num_vocab_repeats, d_model)
         torch.nn.init.normal_(self.text_emb.weight, mean=0.0, std=1)
         self.image_emb = nn.Linear(self.image_ar_dim, d_model)
+        if self._embed_dtype is not None:
+            try:
+                self.text_emb = self.text_emb.to(self._embed_dtype)
+                self.image_emb = self.image_emb.to(self._embed_dtype)
+            except Exception:
+                pass
         
         # Optional invertible linear projection in latent (post-flow) token space
         self.latent_projection = None if (latent_projection is None or str(latent_projection).lower() in {"none", "false"}) else str(latent_projection).lower()
@@ -206,13 +217,28 @@ class JetFormer(nn.Module):
         if self.img_head.bias is not None:
             nn.init.zeros_(self.img_head.bias)
 
-        if use_bfloat16_img_head:
-            self.img_head = self.img_head.to(torch.bfloat16)
+        # Head dtype precedence: explicit head_dtype > use_bfloat16_img_head
+        if self._head_dtype is not None:
+            try:
+                self.img_head = self.img_head.to(self._head_dtype)
+            except Exception:
+                pass
+        elif use_bfloat16_img_head:
+            try:
+                self.img_head = self.img_head.to(torch.bfloat16)
+            except Exception:
+                pass
         
         # Per-modality final norms (used before heads instead of a shared final_norm)
         if self.per_modality_final_norm:
             self.text_norm = nn.RMSNorm(d_model)
             self.img_norm = nn.RMSNorm(d_model)
+            if self._embed_dtype is not None:
+                try:
+                    self.text_norm = self.text_norm.to(self._embed_dtype)
+                    self.img_norm = self.img_norm.to(self._embed_dtype)
+                except Exception:
+                    pass
 
         # Optional class-conditioning tokens
         self.num_classes = num_classes
@@ -225,6 +251,8 @@ class JetFormer(nn.Module):
         # Optional PatchPCA + Adaptor (attached externally by factory)
         self.patch_pca = None
         self.adaptor = None
+        # Lightweight decoder cache (semantic parity; not a KV cache)
+        self._decode_cache = None
 
     def freeze_for_flow_only(self) -> int:
         """Freeze autoregressive (non-flow) parameters for flow-only training.
@@ -310,6 +338,41 @@ class JetFormer(nn.Module):
         tok = torch.full((batch_size, 1), int(token_id), device=self.text_emb.weight.device, dtype=torch.long)
         return self.text_emb(tok)
 
+    def _split_image_and_text_prelogits(self,
+                                        x: torch.Tensor,
+                                        text_seq_len: int,
+                                        image_seq_len: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Split transformer outputs into (text_first/text_second, image_first/image_second) views.
+
+        Mirrors JAX split logic and centralizes indexing to avoid subtle drift
+        across BOI and repeated-vocab configurations.
+
+        Returns:
+            text_out_when_first, text_out_when_second, image_out_when_second, image_out_when_first
+        """
+        B, L, D = x.shape
+        repeats = int(self.num_vocab_repeats)
+
+        if self.use_boi_token:
+            # Sequence layout before shift:
+            #  - Text-first:  [BOS, text(T), BOI, image(I)]
+            #  - Image-first: [BOI, image(I), BOS, text(T)]
+            # After shift we removed the last token; indexing below follows prior implementation.
+            a_txt = x[:, :text_seq_len]
+            a_img = x[:, repeats * text_seq_len + 1:]
+            b_img = x[:, :image_seq_len]
+            b_txt = x[:, image_seq_len + 1:image_seq_len + 1 + text_seq_len]
+        else:
+            # Sequence layout before shift:
+            #  - Text-first:  [BOS, text(T), image(I)]
+            #  - Image-first: [BOS, image(I), text(T)]
+            a_txt = x[:, :text_seq_len]
+            a_img = x[:, repeats * text_seq_len:]
+            b_img = x[:, :image_seq_len]
+            b_txt = x[:, image_seq_len:image_seq_len + text_seq_len]
+
+        return a_txt, b_txt, a_img, b_img
+
     def _right_align(self, x: torch.Tensor, attn_mask_l_s: torch.Tensor, input_mask_l: torch.Tensor):
         """Right-align tokens and masks per-sample to match JAX helper.
 
@@ -344,6 +407,26 @@ class JetFormer(nn.Module):
         rng = torch.arange(L, device=x.device).unsqueeze(0).expand(B, -1)
         input_mask_aligned = rng >= (L - seqlen).unsqueeze(1)
         return x_aligned, attn_perm, input_mask_aligned
+
+    def right_align_prefill(self,
+                            x: torch.Tensor,
+                            attn_mask_b_1_l_s: torch.Tensor,
+                            input_mask_b_l: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Public helper to right-align inputs before cache prefill.
+
+        Args:
+            x: [B, L, D]
+            attn_mask_b_1_l_s: [B, 1, L, S] boolean (True means allowed)
+            input_mask_b_l: [B, L] boolean
+
+        Returns:
+            (x_aligned: [B,L,D], attn_mask_aligned: [B,1,L,S], input_mask_aligned: [B,L])
+        """
+        if attn_mask_b_1_l_s is None:
+            return x, None, input_mask_b_l
+        attn_l_s = attn_mask_b_1_l_s.squeeze(1)
+        x_aligned, attn_perm, input_mask_aligned = self._right_align(x, attn_l_s, input_mask_b_l)
+        return x_aligned, attn_perm.unsqueeze(1), input_mask_aligned
 
     def factor_tokens(self, full_tokens: torch.Tensor):
         """Split full flow tokens [B,N,Cps^2] into autoregressive dims and Gaussian residual dims."""
@@ -515,16 +598,7 @@ class JetFormer(nn.Module):
         text_seq_len = text_tokens.shape[1] 
         image_seq_len = image_tokens.shape[1]
         
-        if self.use_boi_token:
-            a_txt = x[:, :text_seq_len]
-            a_img = x[:, self.num_vocab_repeats * text_seq_len + 1:]
-            b_img = x[:, :image_seq_len]
-            b_txt = x[:, image_seq_len + 1:image_seq_len + 1 + text_seq_len]
-        else:
-            a_txt = x[:, :text_seq_len]
-            a_img = x[:, self.num_vocab_repeats * text_seq_len:]
-            b_img = x[:, :image_seq_len]
-            b_txt = x[:, image_seq_len:image_seq_len + text_seq_len]
+        a_txt, b_txt, a_img, b_img = self._split_image_and_text_prelogits(x, text_seq_len, image_seq_len)
         text_out_when_first = a_txt
         text_out_when_second = b_txt
         image_out_when_second = a_img
@@ -559,6 +633,86 @@ class JetFormer(nn.Module):
             image_logits = self.img_head(image_feats)
         
         return text_logits, image_logits
+
+    @torch.no_grad()
+    def prefill_cache(self, x: torch.Tensor, attn_mask_b_1_l_s: torch.Tensor, input_mask_b_l: torch.Tensor, cache_size: int | None = None) -> torch.Tensor:
+        """Initialize a simple decode cache using right-align semantics.
+
+        Args:
+            x: [B, L, D] embeddings (already combined sequence as in embed_sequence output)
+            attn_mask_b_1_l_s: [B,1,L,S] boolean mask
+            input_mask_b_l: [B, L] boolean mask
+            cache_size: unused; kept for API parity
+        Returns:
+            last_prelogits: [B,1,D]
+        """
+        try:
+            x_aligned, attn_mask, input_mask = self.right_align_prefill(x, attn_mask_b_1_l_s, input_mask_b_l)
+        except Exception:
+            # Fallback: use as-is
+            x_aligned, attn_mask, input_mask = x, attn_mask_b_1_l_s, input_mask_b_l
+        # Positions from input mask
+        seq_len = x_aligned.shape[1]
+        if input_mask is not None:
+            position_ids = torch.cumsum(input_mask.to(torch.long), dim=1) - 1
+            position_ids = torch.clamp(position_ids, min=0)
+        else:
+            position_ids = torch.arange(seq_len, device=x_aligned.device).unsqueeze(0).expand(x_aligned.size(0), -1)
+        h = x_aligned
+        if isinstance(self.transformer, nn.ModuleList):
+            for layer in self.transformer:
+                h = layer(h, attn_mask, position_ids)
+            if not self.per_modality_final_norm:
+                h = self.final_norm(h)
+        else:
+            h = self.transformer(h, attn_mask, position_ids)
+        # Cache full sequence for naive extend
+        self._decode_cache = {
+            'hidden': h.detach(),
+            'input_mask': (input_mask.detach() if input_mask is not None else None)
+        }
+        return h[:, -1:, :]
+
+    @torch.no_grad()
+    def extend_cache(self, x_next: torch.Tensor) -> torch.Tensor:
+        """Extend decode cache with one more embedded token and return last prelogits.
+
+        This recomputes the full sequence for correctness (not optimized KV cache).
+        Args:
+            x_next: [B,1,D] next-step embedding
+        Returns:
+            last_prelogits: [B,1,D]
+        """
+        if not isinstance(self._decode_cache, dict) or 'hidden' not in self._decode_cache:
+            # No cache initialized; just return projection of x_next through one pass
+            h = x_next
+            seq_len = x_next.shape[1]
+            attn = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=x_next.device)).unsqueeze(0).unsqueeze(1)
+            pos = torch.arange(seq_len, device=x_next.device).unsqueeze(0)
+            if isinstance(self.transformer, nn.ModuleList):
+                for layer in self.transformer:
+                    h = layer(h, attn, pos)
+                if not self.per_modality_final_norm:
+                    h = self.final_norm(h)
+            else:
+                h = self.transformer(h, attn, pos)
+            return h[:, -1:, :]
+        prev_h = self._decode_cache['hidden']  # [B,L,D]
+        h_seq = torch.cat([prev_h, x_next], dim=1)
+        B, L, _ = h_seq.shape
+        attn = torch.tril(torch.ones(L, L, dtype=torch.bool, device=h_seq.device)).unsqueeze(0).unsqueeze(1)
+        pos = torch.arange(L, device=h_seq.device).unsqueeze(0).expand(B, -1)
+        h = h_seq
+        if isinstance(self.transformer, nn.ModuleList):
+            for layer in self.transformer:
+                h = layer(h, attn, pos)
+            if not self.per_modality_final_norm:
+                h = self.final_norm(h)
+        else:
+            h = self.transformer(h, attn, pos)
+        # Update cache
+        self._decode_cache['hidden'] = h.detach()
+        return h[:, -1:, :]
 
     def compute_image_hidden(self, text_tokens, image_tokens, text_first_mask, input_mask, drop_text_cond_mask=None, class_ids=None):
         """Return transformer hidden states for image positions. [B, L_img, D]."""

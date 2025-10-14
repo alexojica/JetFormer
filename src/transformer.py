@@ -180,7 +180,15 @@ class MultiQueryAttention(nn.Module):
             # SDPA boolean semantics are True=disallow. Build additive mask for robustness across backends.
             disallowed = ~allowed
             attn_mask = disallowed.to(q.dtype) * torch.finfo(q.dtype).min
-        # If using pre-attn normalization, pass is_causal=False and avoid double-scaling.
+
+        # SDPA call. If a softcap on attention logits is requested, emulate via
+        # a pre-softmax clamp by using the built-in scaling=1 and an additive mask.
+        # PyTorch SDPA does not expose raw logits; mimic by limiting q,k magnitudes.
+        if self.attn_logits_softcap is not None:
+            cap = float(self.attn_logits_softcap)
+            q = torch.clamp(q, min=-cap, max=cap)
+            k = torch.clamp(k, min=-cap, max=cap)
+
         out = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=attn_mask,

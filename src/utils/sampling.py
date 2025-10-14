@@ -96,6 +96,53 @@ def generate_text_to_image_samples_cfg(
     model.eval()
     samples = []
 
+    class _CFGDensity:
+        """Approximate CFG sampler for per-position diagonal Gaussian mixtures.
+
+        Uses a shared component index and a widened Normal proposal to perform
+        simple rejection sampling with target p(x) ∝ exp((1+w) log pc(x) - w log pu(x)).
+        Falls back to conditional sample on failure.
+        """
+
+        def __init__(self, mix_c, means_c, scales_c, mix_u, means_u, scales_u, w: float):
+            self.w = float(w)
+            with torch.no_grad():
+                # Select one component per batch (argmax), shared for cond/uncond
+                idx = torch.argmax(mix_c, dim=-1)  # [B]
+                b = torch.arange(idx.shape[0], device=idx.device)
+                self.loc_c = means_c[b, idx, :]
+                self.scale_c = scales_c[b, idx, :].clamp_min(1e-8)
+                self.loc_u = means_u[b, idx, :]
+                self.scale_u = scales_u[b, idx, :].clamp_min(1e-8)
+                # Wide proposal
+                base_scale = torch.maximum(self.scale_c, self.scale_u)
+                self.proposal = torch.distributions.Normal(self.loc_c, (2.0 * base_scale).clamp_min(1e-6))
+                # Envelope factor (approximate at mode, with safety margin)
+                pdf_c_at_mode = torch.distributions.Normal(self.loc_c, self.scale_c).log_prob(self.loc_c).sum(-1)
+                pdf_u_at_mode = torch.distributions.Normal(self.loc_u, self.scale_u).log_prob(self.loc_c).sum(-1)
+                q_at_mode = self.proposal.log_prob(self.loc_c).sum(-1)
+                log_target_at_mode = (1.0 + self.w) * pdf_c_at_mode - self.w * pdf_u_at_mode
+                self.fac = torch.exp((log_target_at_mode - q_at_mode)).clamp_min(1.0) * 2.0
+
+        def _logp_cfg(self, x):
+            nc = torch.distributions.Normal(self.loc_c, self.scale_c)
+            nu = torch.distributions.Normal(self.loc_u, self.scale_u)
+            log_pc = nc.log_prob(x).sum(-1)
+            log_pu = nu.log_prob(x).sum(-1)
+            return (1.0 + self.w) * log_pc - self.w * log_pu
+
+        def sample(self, max_samples: int = 256):
+            B, _ = self.loc_c.shape
+            for _ in range(max(1, min(max_samples, 1024))):
+                x = self.proposal.sample()
+                log_p = self._logp_cfg(x)
+                log_q = self.proposal.log_prob(x).sum(-1) + torch.log(self.fac)
+                accept = torch.rand(B, device=x.device) < torch.exp((log_p - log_q).clamp(max=0.0))
+                if bool(accept.any()):
+                    return torch.where(accept.view(B, 1), x, self.loc_c)
+            # Fallback
+            return torch.distributions.Normal(self.loc_c, self.scale_c).sample()
+
     def _mixture_log_prob(mix_logits, means, scales, x):
         B, k = mix_logits.shape
         logZ = torch.logsumexp(mix_logits, dim=-1)
@@ -211,48 +258,20 @@ def generate_text_to_image_samples_cfg(
                         sampled = normal.sample()
                         image_tokens[0, pos] = sampled[0]
                     else:
-                        gamma = float(cfg_strength) / (float(cfg_strength) + 1.0)
-                        gamma = max(0.0, min(0.999, gamma))
-                        mix_c, means_c, scales_c = gmm_params(image_logits_c[:, pos:pos+1], int(getattr(model, 'num_mixtures', 1024)), int(getattr(model, 'image_ar_dim', model.image_token_dim)))
-                        mix_u, means_u, scales_u = gmm_params(image_logits_u[:, pos:pos+1], int(getattr(model, 'num_mixtures', 1024)), int(getattr(model, 'image_ar_dim', model.image_token_dim)))
+                        # Reject mode using CFGDensity approximation
+                        mix_c, means_c, scales_c = gmm_params(
+                            image_logits_c[:, pos:pos+1], int(getattr(model, 'num_mixtures', 1024)), int(getattr(model, 'image_ar_dim', model.image_token_dim))
+                        )
+                        mix_u, means_u, scales_u = gmm_params(
+                            image_logits_u[:, pos:pos+1], int(getattr(model, 'num_mixtures', 1024)), int(getattr(model, 'image_ar_dim', model.image_token_dim))
+                        )
                         mix_c = mix_c.squeeze(1); means_c = means_c.squeeze(1); scales_c = scales_c.squeeze(1)
                         mix_u = mix_u.squeeze(1); means_u = means_u.squeeze(1); scales_u = scales_u.squeeze(1)
                         mix_c, means_c, scales_c = _sanitize_params(mix_c, means_c, scales_c)
                         mix_u, means_u, scales_u = _sanitize_params(mix_u, means_u, scales_u)
-                        max_tries = 64
-                        accepted = False
-                        for _ in range(max_tries):
-                            x = _sample_from_mixture(mix_c, means_c, scales_c)
-                            log_pc = _mixture_log_prob(mix_c, means_c, scales_c, x)
-                            log_pu = _mixture_log_prob(mix_u, means_u, scales_u, x)
-                            log_r = (1.0 - gamma) * (log_pu - log_pc)
-                            log_r = torch.clamp(log_r, min=-20.0, max=0.0)
-                            r = torch.exp(log_r)
-                            u = torch.rand_like(r)
-                            if (u <= r).item():
-                                image_tokens[0, pos] = x[0]
-                                accepted = True
-                                break
-                        if not accepted:
-                            guided_logits = image_logits_u + cfg_strength * (image_logits_c - image_logits_u)
-                            if hasattr(model, 'gmm_params'):
-                                mix_logits, means, scales = model.gmm_params(guided_logits[:, pos:pos+1])
-                            else:
-                                mix_logits, means, scales = gmm_params(
-                                    guided_logits[:, pos:pos+1], int(getattr(model, 'num_mixtures', 1024)), int(getattr(model, 'image_ar_dim', model.image_token_dim))
-                                )
-                            mix_s = mix_logits.squeeze(1)
-                            means_s = means.squeeze(1)
-                            scales_s = scales.squeeze(1)
-                            mix_s, means_s, scales_s = _sanitize_params(mix_s, means_s, scales_s)
-                            mix = torch.distributions.Categorical(logits=mix_s)
-                            comp_idx = mix.sample()
-                            bidx = torch.arange(comp_idx.shape[0], device=device)
-                            sel_means = means_s[bidx, comp_idx, :]
-                            sel_scales = scales_s[bidx, comp_idx, :]
-                            normal = torch.distributions.Normal(sel_means, sel_scales)
-                            sampled = normal.sample()
-                            image_tokens[0, pos] = sampled[0]
+                        sampler = _CFGDensity(mix_c, means_c, scales_c, mix_u, means_u, scales_u, w=float(cfg_strength))
+                        x = sampler.sample(max_samples=256)
+                        image_tokens[0, pos] = x[0]
 
             if res_dim > 0:
                 residual = torch.randn(1, model.image_seq_len, res_dim, device=device)
@@ -373,9 +392,7 @@ def generate_class_conditional_samples(base,
                         sampled = normal.sample()
                         img_tokens[0, pos] = sampled[0]
                     else:
-                        # Reject mode
-                        gamma = float(cfg_strength) / (float(cfg_strength) + 1.0)
-                        gamma = max(0.0, min(0.999, gamma))
+                        # Reject mode using CFGDensity approximation
                         if hasattr(base, 'gmm_params'):
                             mix_c, means_c, scales_c = base.gmm_params(image_logits_c[:, pos:pos+1])
                             mix_u, means_u, scales_u = base.gmm_params(image_logits_u[:, pos:pos+1])
@@ -388,36 +405,21 @@ def generate_class_conditional_samples(base,
                             )
                         mix_c = mix_c.squeeze(1); means_c = means_c.squeeze(1); scales_c = scales_c.squeeze(1)
                         mix_u = mix_u.squeeze(1); means_u = means_u.squeeze(1); scales_u = scales_u.squeeze(1)
-                        max_tries = 64
-                        accepted = False
-                        for _ in range(max_tries):
-                            x = _sample_from_mixture(mix_c, means_c, scales_c)
-                            log_pc = _mixture_log_prob(mix_c, means_c, scales_c, x)
-                            log_pu = _mixture_log_prob(mix_u, means_u, scales_u, x)
-                            log_r = (1.0 - gamma) * (log_pu - log_pc)
-                            log_r = torch.clamp(log_r, min=-20.0, max=0.0)
-                            r = torch.exp(log_r)
-                            u = torch.rand_like(r)
-                            if (u <= r).item():
-                                img_tokens[0, pos] = x[0]
-                                accepted = True
-                                break
-                        if not accepted:
-                            guided_logits = image_logits_u + cfg_strength * (image_logits_c - image_logits_u)
-                            if hasattr(base, 'gmm_params'):
-                                mix_logits, means, scales = base.gmm_params(guided_logits[:, pos:pos+1])
-                            else:
-                                mix_logits, means, scales = gmm_params(
-                                    guided_logits[:, pos:pos+1], int(getattr(base, 'num_mixtures', 1024)), int(getattr(base, 'image_ar_dim', base.image_token_dim))
-                                )
-                            mix = torch.distributions.Categorical(logits=mix_logits.squeeze(1))
-                            comp_idx = mix.sample()
-                            bidx = torch.arange(comp_idx.shape[0], device=device)
-                            sel_means = means[:, 0, comp_idx, :]
-                            sel_scales = scales[:, 0, comp_idx, :]
-                            normal = torch.distributions.Normal(sel_means, sel_scales)
-                            sampled = normal.sample()
-                            img_tokens[0, pos] = sampled[0]
+                        # Sanitize
+                        mix_c, means_c, scales_c = (
+                            torch.where(torch.isfinite(mix_c), mix_c, torch.zeros_like(mix_c)),
+                            torch.where(torch.isfinite(means_c), means_c, torch.zeros_like(means_c)),
+                            torch.where(torch.isfinite(scales_c), scales_c, torch.ones_like(scales_c)).clamp_min(1e-6),
+                        )
+                        mix_u, means_u, scales_u = (
+                            torch.where(torch.isfinite(mix_u), mix_u, torch.zeros_like(mix_u)),
+                            torch.where(torch.isfinite(means_u), means_u, torch.zeros_like(means_u)),
+                            torch.where(torch.isfinite(scales_u), scales_u, torch.ones_like(scales_u)).clamp_min(1e-6),
+                        )
+                        _sampler = generate_text_to_image_samples_cfg.__globals__['_CFGDensity']
+                        sampler = _sampler(mix_c, means_c, scales_c, mix_u, means_u, scales_u, w=float(cfg_strength))
+                        x = sampler.sample(max_samples=256)
+                        img_tokens[0, pos] = x[0]
 
             res_dim = max(0, base.image_token_dim - base.image_ar_dim)
             tokens_full = torch.cat([img_tokens, torch.randn(1, base.image_seq_len, res_dim, device=device)], dim=-1) if res_dim > 0 else img_tokens
