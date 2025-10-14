@@ -429,7 +429,9 @@ def train_step(model: torch.nn.Module,
         out["loss"] = out["image_loss"]
     else:
         # Determine JetFormer mode: legacy flow+AR (RGB noise curriculum) or PCA+Adaptor
-        use_patch_pca = bool(getattr(model, 'patch_pca', None) is not None)
+        # Training-mode gate (default 'pca') can force PCA path independent of attachment failures
+        training_mode = str(getattr(config, 'jetformer_training_mode', 'pca') or 'pca').lower()
+        use_patch_pca = (training_mode == 'pca') and bool(getattr(model, 'patch_pca', None) is not None)
         text_loss_weight = float(getattr(config, 'text_loss_weight'))
         image_loss_weight = float(getattr(config, 'image_loss_weight'))
         cfg_drop_prob = float(getattr(config, 'cfg_drop_prob'))

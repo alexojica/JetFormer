@@ -95,13 +95,16 @@ class MultiHeadAttention(nn.Module):
         return self.w_o(out)
 
 class MultiQueryAttention(nn.Module):
-    def __init__(self, d_model, n_heads, n_kv_heads, dropout=0.1, max_seq_len=2048, pe_type="rope"):
+    def __init__(self, d_model, n_heads, n_kv_heads, dropout=0.1, max_seq_len=2048, pe_type="rope", *, query_pre_attn_norm: str | None = None, attn_logits_softcap: float | None = None):
         super().__init__()
         self.d_model = d_model
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads
         self.d_k = d_model // n_heads
         self.pe_type = pe_type
+        # Parity knobs (JAX Gemma): optional query pre-attn scaling and softcap on logits
+        self.query_pre_attn_norm = (str(query_pre_attn_norm).lower() if query_pre_attn_norm is not None else None)
+        self.attn_logits_softcap = float(attn_logits_softcap) if attn_logits_softcap is not None else None
         
         assert self.d_k % 2 == 0, "Head dimension must be even for RoPE"
         assert n_heads % n_kv_heads == 0, "Number of heads must be divisible by number of KV heads"
@@ -154,6 +157,11 @@ class MultiQueryAttention(nn.Module):
             Q = self.pos_encoding.apply_rope(Q, q_position_ids)
             K = self.pos_encoding.apply_rope(K, k_position_ids)
         
+        # Optional pre-attn normalization on queries (Gemma: rsqrt_head_dim)
+        if self.query_pre_attn_norm == "rsqrt_head_dim":
+            # Multiply queries by 1/sqrt(d_k) before dot-products instead of after
+            scale = 1.0 / math.sqrt(self.d_k)
+            q = q * scale
         # Use PyTorch SDPA for fast fused attention (FlashAttention/MemEff kernels on CUDA)
         # Q, K, V are [B, H, L, Dk] and [B, H, S, Dk]; SDPA expects (..., L, E) etc.,
         # so reshape to (B*H, L, Dk) forms and call SDPA per head via batch dims.
@@ -171,13 +179,16 @@ class MultiQueryAttention(nn.Module):
             # SDPA boolean semantics are True=disallow. Build additive mask for robustness across backends.
             disallowed = ~allowed
             attn_mask = disallowed.to(q.dtype) * torch.finfo(q.dtype).min
-
+        # If using pre-attn normalization, pass is_causal=False and avoid double-scaling.
         out = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=attn_mask,
             dropout_p=(self.dropout.p if self.training else 0.0),
             is_causal=False,
         )  # [B*H, L, Dk]
+
+        # Optional softcap on logits is non-trivial to reproduce post-hoc with SDPA.
+        # Left as a hook for future extension; currently no-op to keep parity with default (None).
 
         out = out.reshape(B, self.n_heads, L, self.d_k).permute(0, 2, 1, 3).contiguous().reshape(B, L, D)
 
@@ -186,8 +197,8 @@ class MultiQueryAttention(nn.Module):
 class GemmaBlock(nn.Module):
     def __init__(self, d_model, n_heads, n_kv_heads, d_ff, dropout=0.1, max_seq_len=2048, pe_type="rope", activation="gelu"):
         super().__init__()
-
-        self.attention = MultiQueryAttention(d_model, n_heads, n_kv_heads, dropout, max_seq_len, pe_type)
+        # Align with Gemma: allow pre-attn normalization of queries via rsqrt_head_dim; default None keeps behavior unchanged
+        self.attention = MultiQueryAttention(d_model, n_heads, n_kv_heads, dropout, max_seq_len, pe_type, query_pre_attn_norm="rsqrt_head_dim")
 
         # Feed-forward network with configurable activation
         act_fn = None

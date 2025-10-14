@@ -458,30 +458,23 @@ class JetFormer(nn.Module):
         padding_mask = padding_mask[:, :-1]
 
         seq_len = x.shape[1]
-        # Causal mask [B, L, S]; includes self since inputs are shifted
-        causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=device, dtype=torch.bool))
-        attn_mask = causal_mask.unsqueeze(0).expand(batch_size, -1, -1)
-        # Optionally unmask prefix tokens
+        # Build attention mask: causal with optional prefix unmasking, then apply input padding on key dimension
+        causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=device, dtype=torch.bool))  # [L,S]
+        attn_mask = causal_mask.unsqueeze(0).expand(batch_size, -1, -1)  # [B,L,S]
         if not self.causal_mask_on_prefix:
             txt_len = text_emb.shape[1]
             img_len = image_emb.shape[1]
-            if self.use_boi_token:
-                txt_prefix_len = 1 + txt_len
-                img_prefix_len = 1 + img_len
-            else:
-                txt_prefix_len = 1 + txt_len
-                img_prefix_len = 1 + img_len
+            txt_prefix_len = 1 + txt_len
+            img_prefix_len = 1 + img_len
             total_len = attn_mask.shape[-1]
             txt_prefix_mask = torch.zeros(batch_size, total_len, dtype=torch.bool, device=device)
             img_prefix_mask = torch.zeros(batch_size, total_len, dtype=torch.bool, device=device)
             txt_prefix_mask[:, :txt_prefix_len] = True
             img_prefix_mask[:, :img_prefix_len] = True
             prefix_mask = torch.where(mask_first_expanded, txt_prefix_mask, img_prefix_mask)
-            attn_mask = torch.logical_or(attn_mask, prefix_mask.unsqueeze(1))
-        # Apply input mask on key/source dimension only
-        attn_mask = torch.logical_and(attn_mask, padding_mask.unsqueeze(1))
-        # Expand for MQA: [B,1,L,S]
-        attn_mask = attn_mask.unsqueeze(1)
+            attn_mask = torch.logical_or(attn_mask, prefix_mask.unsqueeze(1))  # [B,L,S]
+        attn_mask = torch.logical_and(attn_mask, padding_mask.unsqueeze(1))  # [B,L,S]
+        attn_mask = attn_mask.unsqueeze(1)  # [B,1,L,S]
 
         # Optional right-align (parity with JAX helper)
         if self.right_align_inputs:

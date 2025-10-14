@@ -1,4 +1,5 @@
 import torch
+import math
 
 from src.losses import (
     cross_entropy_second_only,
@@ -40,6 +41,25 @@ def test_bits_per_dim_flow_monotonic_in_logdet():
     bpd_large, _, _ = bits_per_dim_flow(z, ld_large, (H, W, C), reduce=True)
     # Larger forward logdet should reduce bits-per-dim
     assert bpd_large.item() < bpd_small.item()
+
+
+def test_paper_flow_bpd_formula_matches_components():
+    torch.manual_seed(0)
+    B, H, W, C = 2, 32, 32, 3
+    z = torch.randn(B, H, W, C)
+    logdet = torch.randn(B)
+    # Compute via helper
+    total_bpd, nll_bpd, flow_bpd, logdet_bpd = bits_per_dim_flow(z, logdet, (H, W, C), reduce=True)
+    # Manually recompose
+    ln2 = math.log(2.0)
+    D = H * W * C
+    normal = torch.distributions.Normal(0.0, 1.0)
+    nll = -normal.log_prob(z)
+    nll_plus_ln256 = nll + math.log(256.0)
+    nll_summed = nll_plus_ln256.view(B, -1).sum(dim=1)
+    total_nats = nll_summed - logdet
+    total_bpd_manual = (total_nats / (ln2 * D)).mean()
+    assert abs(total_bpd.item() - total_bpd_manual.item()) < 1e-6
 
 
 def test_gmm_params_dtype_and_scales_positive_and_sampling():

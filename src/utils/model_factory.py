@@ -60,17 +60,27 @@ def build_jetformer_from_config(config: SimpleNamespace | Dict[str, Any], device
         kwargs['input_size'] = tuple(inp)
     model = JetFormer(**kwargs).to(device)
 
-    # Optional: attach PatchPCA and Adaptor from nested config blocks if provided
+    # Training-mode gate: default to PCA+Adaptor (paper path) unless explicitly set to 'legacy'
+    training_mode = str(_get_from_ns_or_dict(config, 'jetformer_training_mode', 'pca') or 'pca').lower()
+
+    # Attach PatchPCA and Adaptor either from nested blocks or sensible defaults when training_mode=='pca'
     try:
-        # Expect config.patch_pca: dict-like
+        from src.latents.patch_pca import PatchPCA
         pca_cfg = _get_from_ns_or_dict(config, 'patch_pca', None)
+        if training_mode == 'pca' and not isinstance(pca_cfg, (dict, SimpleNamespace)):
+            # Build with defaults if no explicit block provided
+            pca_cfg = {
+                'pca_init_file': None,
+                'whiten': True,
+                'noise_std': 0.0,
+                'add_dequant_noise': False,
+                'input_size': _get_from_ns_or_dict(config, 'input_size', (256, 256)),
+                'patch_size': _get_from_ns_or_dict(config, 'patch_size', 16),
+                'depth_to_seq': 1,
+                'skip_pca': False,
+            }
         if isinstance(pca_cfg, (dict, SimpleNamespace)):
-            from src.latents.patch_pca import PatchPCA
-            if isinstance(pca_cfg, dict):
-                pcakw = dict(pca_cfg)
-            else:
-                pcakw = {k: getattr(pca_cfg, k) for k in dir(pca_cfg) if not k.startswith('_')}
-            # Map defaults
+            pcakw = dict(pca_cfg) if isinstance(pca_cfg, dict) else {k: getattr(pca_cfg, k) for k in dir(pca_cfg) if not k.startswith('_')}
             model.patch_pca = PatchPCA(
                 pca_init_file=pcakw.get('pca_init_file'),
                 whiten=bool(pcakw.get('whiten', True)),
@@ -85,24 +95,33 @@ def build_jetformer_from_config(config: SimpleNamespace | Dict[str, Any], device
         pass
 
     try:
+        from src.latents.jet_adaptor import build_adaptor
         adaptor_cfg = _get_from_ns_or_dict(config, 'adaptor', None)
+        H, W = kwargs.get('input_size', tuple(_get_from_ns_or_dict(config, 'input_size', (256, 256))))
+        ps = int(kwargs.get('patch_size', _get_from_ns_or_dict(config, 'patch_size', 16)))
+        grid_h, grid_w = (H // ps, W // ps)
+        # For adaptor over patch latents, the channel dim must match full patch token dim
+        full_token_dim = 3 * ps * ps
+
+        # Build default adaptor when training_mode=='pca' and none provided
+        if training_mode == 'pca' and not isinstance(adaptor_cfg, (dict, SimpleNamespace)):
+            adaptor_cfg = {'kind': 'jet', 'depth': 8, 'block_depth': 2, 'emb_dim': 256, 'num_heads': 4}
+
         if isinstance(adaptor_cfg, (dict, SimpleNamespace)):
-            kind = adaptor_cfg.get('kind') if isinstance(adaptor_cfg, dict) else getattr(adaptor_cfg, 'kind', 'none')
-            if kind is not None and str(kind).lower() != 'none':
-                from src.latents.jet_adaptor import build_adaptor
-                H, W = kwargs.get('input_size', tuple(_get_from_ns_or_dict(config, 'input_size', (256, 256))))
-                ps = int(kwargs.get('patch_size', _get_from_ns_or_dict(config, 'patch_size', 16)))
-                grid_h, grid_w = (H // ps, W // ps)
-                dim = int(_get_from_ns_or_dict(config, 'image_ar_dim', kwargs.get('image_ar_dim', 128)))
-                # Use full token dim if provided via adaptor config
-                dim = int(adaptor_cfg.get('dim', dim)) if isinstance(adaptor_cfg, dict) else int(getattr(adaptor_cfg, 'dim', dim))
-                model._latent_noise_dim = int(adaptor_cfg.get('latent_noise_dim', 0)) if isinstance(adaptor_cfg, dict) else int(getattr(adaptor_cfg, 'latent_noise_dim', 0))
+            ak = dict(adaptor_cfg) if isinstance(adaptor_cfg, dict) else {k: getattr(adaptor_cfg, k) for k in dir(adaptor_cfg) if not k.startswith('_')}
+            kind = str(ak.get('kind', 'none') or 'none').lower()
+            if kind != 'none':
+                dim = int(ak.get('dim', full_token_dim))
+                model._latent_noise_dim = int(ak.get('latent_noise_dim', 0))
                 model.adaptor = build_adaptor(kind, grid_h, grid_w, dim,
-                                              depth=int(adaptor_cfg.get('depth', 8)) if isinstance(adaptor_cfg, dict) else int(getattr(adaptor_cfg, 'depth', 8)),
-                                              block_depth=int(adaptor_cfg.get('block_depth', 2)) if isinstance(adaptor_cfg, dict) else int(getattr(adaptor_cfg, 'block_depth', 2)),
-                                              emb_dim=int(adaptor_cfg.get('emb_dim', 256)) if isinstance(adaptor_cfg, dict) else int(getattr(adaptor_cfg, 'emb_dim', 256)),
-                                              num_heads=int(adaptor_cfg.get('num_heads', 4)) if isinstance(adaptor_cfg, dict) else int(getattr(adaptor_cfg, 'num_heads', 4)))
+                                              depth=int(ak.get('depth', 8)),
+                                              block_depth=int(ak.get('block_depth', 2)),
+                                              emb_dim=int(ak.get('emb_dim', 256)),
+                                              num_heads=int(ak.get('num_heads', 4)))
                 model.adaptor = model.adaptor.to(device)
+        # If explicitly legacy, ensure no adaptor by default
+        if training_mode != 'pca' and not isinstance(adaptor_cfg, (dict, SimpleNamespace)):
+            model.adaptor = None
     except Exception:
         pass
     return model

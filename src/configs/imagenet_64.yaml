@@ -51,6 +51,26 @@ torch_compile: false
 grad_checkpoint_transformer: false
 flow_grad_checkpoint: false
 
+# Training mode (paper path)
+jetformer_training_mode: pca
+
+patch_pca:
+  pca_init_file: null
+  whiten: true
+  noise_std: 0.0
+  add_dequant_noise: false
+  input_size: [64, 64]
+  patch_size: 4
+  depth_to_seq: 1
+  skip_pca: false
+
+adaptor:
+  kind: jet
+  depth: 8
+  block_depth: 2
+  emb_dim: 256
+  num_heads: 4
+
 # EMA
 ema:
   enabled: false
