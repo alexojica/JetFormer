@@ -428,25 +428,41 @@ def train_step(model: torch.nn.Module,
         # For flow-only, image_loss_weight should be 1.0 and text_loss_weight should be 0.0
         out["loss"] = out["image_loss"]
     else:
-        # Standard JetFormer training
-        latent_noise_std = float(getattr(config, 'latent_noise_std'))
-        cfg_drop_prob = float(getattr(config, 'cfg_drop_prob'))
+        # Determine JetFormer mode: legacy flow+AR (RGB noise curriculum) or PCA+Adaptor
+        use_patch_pca = bool(getattr(model, 'patch_pca', None) is not None)
         text_loss_weight = float(getattr(config, 'text_loss_weight'))
         image_loss_weight = float(getattr(config, 'image_loss_weight'))
-        
-        from src.utils.losses import compute_jetformer_loss
-        out = compute_jetformer_loss(
-            model,
-            batch,
-            step,
-            total_steps,
-            rgb_sigma0=rgb_sigma0,
-            rgb_sigma_final=rgb_sigma_final,
-            latent_noise_std=latent_noise_std,
-            cfg_drop_prob=cfg_drop_prob,
-            eval_no_rgb_noise=eval_no_rgb_noise,
-            advanced_metrics=advanced_metrics,
-        )
+        cfg_drop_prob = float(getattr(config, 'cfg_drop_prob'))
+
+        if use_patch_pca:
+            # Paper-aligned PCA latent path
+            text_first_prob = float(getattr(config, 'text_prefix_prob', 0.5))
+            input_noise_std = float(getattr(config, 'input_noise_std', 0.0))
+            from src.utils.losses import compute_jetformer_pca_loss
+            out = compute_jetformer_pca_loss(
+                model,
+                batch,
+                text_first_prob=text_first_prob,
+                input_noise_std=input_noise_std,
+                cfg_drop_prob=cfg_drop_prob,
+                advanced_metrics=advanced_metrics,
+            )
+        else:
+            # Legacy pipeline that uses RGB noise curriculum and flow encode
+            latent_noise_std = float(getattr(config, 'latent_noise_std'))
+            from src.utils.losses import compute_jetformer_loss
+            out = compute_jetformer_loss(
+                model,
+                batch,
+                step,
+                total_steps,
+                rgb_sigma0=rgb_sigma0,
+                rgb_sigma_final=rgb_sigma_final,
+                latent_noise_std=latent_noise_std,
+                cfg_drop_prob=cfg_drop_prob,
+                eval_no_rgb_noise=eval_no_rgb_noise,
+                advanced_metrics=advanced_metrics,
+            )
         # Build weighted total from differentiable components
         total = (text_loss_weight * out["text_loss"]) + (image_loss_weight * out["image_loss"])
         out["loss"] = total

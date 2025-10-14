@@ -25,7 +25,10 @@ def build_jetformer_from_config(config: SimpleNamespace | Dict[str, Any], device
         'jet_depth','jet_block_depth','jet_emb_dim','jet_num_heads','patch_size','image_ar_dim','use_bfloat16_img_head',
         'num_classes','class_token_length','latent_projection','latent_proj_matrix_path','pre_latent_projection',
         'pre_latent_proj_matrix_path','pre_factor_dim','flow_actnorm','flow_invertible_dense',
-        'grad_checkpoint_transformer','flow_grad_checkpoint'
+        'grad_checkpoint_transformer','flow_grad_checkpoint',
+        # New parity flags
+        'use_boi_token','causal_mask_on_prefix','untie_output_vocab','per_modality_final_norm',
+        'num_vocab_repeats','bos_id','boi_id','nolabel_id','scale_tol'
     ]
     kwargs: Dict[str, Any] = {}
     for name in param_names:
@@ -56,6 +59,52 @@ def build_jetformer_from_config(config: SimpleNamespace | Dict[str, Any], device
     if inp is not None:
         kwargs['input_size'] = tuple(inp)
     model = JetFormer(**kwargs).to(device)
+
+    # Optional: attach PatchPCA and Adaptor from nested config blocks if provided
+    try:
+        # Expect config.patch_pca: dict-like
+        pca_cfg = _get_from_ns_or_dict(config, 'patch_pca', None)
+        if isinstance(pca_cfg, (dict, SimpleNamespace)):
+            from src.latents.patch_pca import PatchPCA
+            if isinstance(pca_cfg, dict):
+                pcakw = dict(pca_cfg)
+            else:
+                pcakw = {k: getattr(pca_cfg, k) for k in dir(pca_cfg) if not k.startswith('_')}
+            # Map defaults
+            model.patch_pca = PatchPCA(
+                pca_init_file=pcakw.get('pca_init_file'),
+                whiten=bool(pcakw.get('whiten', True)),
+                noise_std=float(pcakw.get('noise_std', 0.0)),
+                add_dequant_noise=bool(pcakw.get('add_dequant_noise', False)),
+                input_size=tuple(pcakw.get('input_size', getattr(config, 'input_size', (256, 256)))),
+                patch_size=int(pcakw.get('patch_size', getattr(config, 'patch_size', 16))),
+                depth_to_seq=int(pcakw.get('depth_to_seq', 1)),
+                skip_pca=bool(pcakw.get('skip_pca', False)),
+            ).to(device)
+    except Exception:
+        pass
+
+    try:
+        adaptor_cfg = _get_from_ns_or_dict(config, 'adaptor', None)
+        if isinstance(adaptor_cfg, (dict, SimpleNamespace)):
+            kind = adaptor_cfg.get('kind') if isinstance(adaptor_cfg, dict) else getattr(adaptor_cfg, 'kind', 'none')
+            if kind is not None and str(kind).lower() != 'none':
+                from src.latents.jet_adaptor import build_adaptor
+                H, W = kwargs.get('input_size', tuple(_get_from_ns_or_dict(config, 'input_size', (256, 256))))
+                ps = int(kwargs.get('patch_size', _get_from_ns_or_dict(config, 'patch_size', 16)))
+                grid_h, grid_w = (H // ps, W // ps)
+                dim = int(_get_from_ns_or_dict(config, 'image_ar_dim', kwargs.get('image_ar_dim', 128)))
+                # Use full token dim if provided via adaptor config
+                dim = int(adaptor_cfg.get('dim', dim)) if isinstance(adaptor_cfg, dict) else int(getattr(adaptor_cfg, 'dim', dim))
+                model._latent_noise_dim = int(adaptor_cfg.get('latent_noise_dim', 0)) if isinstance(adaptor_cfg, dict) else int(getattr(adaptor_cfg, 'latent_noise_dim', 0))
+                model.adaptor = build_adaptor(kind, grid_h, grid_w, dim,
+                                              depth=int(adaptor_cfg.get('depth', 8)) if isinstance(adaptor_cfg, dict) else int(getattr(adaptor_cfg, 'depth', 8)),
+                                              block_depth=int(adaptor_cfg.get('block_depth', 2)) if isinstance(adaptor_cfg, dict) else int(getattr(adaptor_cfg, 'block_depth', 2)),
+                                              emb_dim=int(adaptor_cfg.get('emb_dim', 256)) if isinstance(adaptor_cfg, dict) else int(getattr(adaptor_cfg, 'emb_dim', 256)),
+                                              num_heads=int(adaptor_cfg.get('num_heads', 4)) if isinstance(adaptor_cfg, dict) else int(getattr(adaptor_cfg, 'num_heads', 4)))
+                model.adaptor = model.adaptor.to(device)
+    except Exception:
+        pass
     return model
 
 

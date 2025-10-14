@@ -46,6 +46,16 @@ class JetFormer(nn.Module):
         # Gradient checkpointing toggles
         grad_checkpoint_transformer: bool = False,
         flow_grad_checkpoint: bool = False,
+        # JAX parity flags
+        use_boi_token: bool = True,
+        causal_mask_on_prefix: bool = True,
+        untie_output_vocab: bool = False,
+        per_modality_final_norm: bool = False,
+        num_vocab_repeats: int = 1,
+        bos_id: int = None,
+        boi_id: int = None,
+        nolabel_id: int = None,
+        scale_tol: float = 1e-6,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -90,9 +100,22 @@ class JetFormer(nn.Module):
         head_dim = d_model // n_heads
         assert head_dim % 2 == 0, "Head dimension must be even for RoPE"
         
-        # Learned BOS/BOI embeddings to avoid ID conflicts with tokenizer
-        self.bos_emb = nn.Parameter(torch.randn(1, 1, d_model) * (1.0 / math.sqrt(d_model)))
-        self.boi_emb = nn.Parameter(torch.randn(1, 1, d_model) * (1.0 / math.sqrt(d_model)))
+        # JAX parity flags
+        self.use_boi_token = bool(use_boi_token)
+        self.causal_mask_on_prefix = bool(causal_mask_on_prefix)
+        self.untie_output_vocab = bool(untie_output_vocab)
+        self.per_modality_final_norm = bool(per_modality_final_norm)
+        self.num_vocab_repeats = int(max(1, num_vocab_repeats))
+        self.scale_tol = float(scale_tol)
+        self.bos_id = int(bos_id) if bos_id is not None else None
+        self.boi_id = int(boi_id) if boi_id is not None else None
+        self.nolabel_id = int(nolabel_id) if nolabel_id is not None else None
+        # Fallback learned special embeddings when ids are not provided
+        self._use_learned_specials = not (isinstance(self.bos_id, int) and isinstance(self.nolabel_id, int))
+        if self._use_learned_specials:
+            self.bos_emb = nn.Parameter(torch.randn(1, 1, d_model) * (1.0 / math.sqrt(d_model)))
+            self.boi_emb = nn.Parameter(torch.randn(1, 1, d_model) * (1.0 / math.sqrt(d_model)))
+            self.nolabel_emb = nn.Parameter(torch.randn(1, 1, d_model) * (1.0 / math.sqrt(d_model)))
         
         # Use Jet normalizing flow (JetModel). Two modes:
         # - Default (post-flow factoring): flow runs on pixel grid NHWC with ps=patch_size
@@ -124,7 +147,8 @@ class JetFormer(nn.Module):
                 use_grad_checkpoint=self.flow_grad_checkpoint,
             )
         
-        self.text_emb = nn.Embedding(vocab_size, d_model)
+        # Support num_vocab_repeats in embedding table
+        self.text_emb = nn.Embedding(vocab_size * self.num_vocab_repeats, d_model)
         torch.nn.init.normal_(self.text_emb.weight, mean=0.0, std=1)
         self.image_emb = nn.Linear(self.image_ar_dim, d_model)
         
@@ -169,6 +193,7 @@ class JetFormer(nn.Module):
             self.transformer = Transformer(d_model, n_heads, n_layers, d_ff, dropout, max_total_len)
             self.final_norm = None
 
+        # Text head (untied option); default is tied via embedding weight
         self.text_head = nn.Linear(d_model, vocab_size, bias=False)
         self.img_head = nn.Linear(d_model, num_mixtures + 2 * num_mixtures * self.image_ar_dim)
         nn.init.zeros_(self.img_head.weight)
@@ -178,8 +203,10 @@ class JetFormer(nn.Module):
         if use_bfloat16_img_head:
             self.img_head = self.img_head.to(torch.bfloat16)
         
-        # Learned [NOLABEL] for CFG
-        self.nolabel_emb = nn.Parameter(torch.randn(1, 1, d_model) * (1.0 / math.sqrt(d_model)))
+        # Per-modality final norms (used before heads instead of a shared final_norm)
+        if self.per_modality_final_norm:
+            self.text_norm = nn.RMSNorm(d_model)
+            self.img_norm = nn.RMSNorm(d_model)
 
         # Optional class-conditioning tokens
         self.num_classes = num_classes
@@ -188,6 +215,10 @@ class JetFormer(nn.Module):
             self.class_tokens_table = nn.Parameter(
                 torch.randn(num_classes, class_token_length, d_model) * (1.0 / math.sqrt(d_model))
             )
+
+        # Optional PatchPCA + Adaptor (attached externally by factory)
+        self.patch_pca = None
+        self.adaptor = None
 
     def freeze_for_flow_only(self) -> int:
         """Freeze autoregressive (non-flow) parameters for flow-only training.
@@ -264,6 +295,15 @@ class JetFormer(nn.Module):
         """Convert [B, N_patches, 3*ps*ps] tokens back to NHWC images of size HxW."""
         return tk_unpatchify(tokens, H, W, self.patch_size)
 
+    def lookup_token(self, token_id: int, batch_size: int) -> torch.Tensor:
+        """Embedding lookup for a special token id; returns [B,1,D]."""
+        if token_id is None or token_id < 0:
+            if self._use_learned_specials and hasattr(self, 'nolabel_emb'):
+                return self.nolabel_emb.expand(batch_size, 1, -1)
+            return torch.zeros(batch_size, 1, self.d_model, device=self.text_emb.weight.device, dtype=self.text_emb.weight.dtype)
+        tok = torch.full((batch_size, 1), int(token_id), device=self.text_emb.weight.device, dtype=torch.long)
+        return self.text_emb(tok)
+
     def factor_tokens(self, full_tokens: torch.Tensor):
         """Split full flow tokens [B,N,Cps^2] into autoregressive dims and Gaussian residual dims."""
         if full_tokens.shape[-1] < self.image_ar_dim:
@@ -286,9 +326,11 @@ class JetFormer(nn.Module):
         batch_size = text_tokens.shape[0]
         device = text_tokens.device
         
-        # Use learned special embeddings
-        bos_emb = self.bos_emb.expand(batch_size, 1, -1)
-        boi_emb = self.boi_emb.expand(batch_size, 1, -1)
+        # Prepare text with optional repeats
+        if self.num_vocab_repeats > 1:
+            offsets = [i * self.vocab_size for i in range(self.num_vocab_repeats)]
+        else:
+            offsets = [0]
         if (self.num_classes is not None and self.num_classes > 0) and class_ids is not None and hasattr(self, 'class_tokens_table'):
             # Use class tokens instead of text tokens
             ct = self.class_tokens_table[class_ids]  # [B, Tcls, D]
@@ -296,26 +338,48 @@ class JetFormer(nn.Module):
             # Build text mask: all ones for class tokens
             x_txt_m = torch.ones(batch_size, self.class_token_length, dtype=torch.bool, device=device)
         else:
-            text_emb = self.text_emb(text_tokens)
-            x_txt_m = input_mask
+            if self.num_vocab_repeats > 1:
+                reps = [text_tokens + off for off in offsets]
+                text_tokens_rep = torch.cat(reps, dim=1)
+                text_emb = self.text_emb(text_tokens_rep)
+                x_txt_m = input_mask.repeat(1, self.num_vocab_repeats)
+            else:
+                text_emb = self.text_emb(text_tokens)
+                x_txt_m = input_mask
+        # Special tokens
+        if self._use_learned_specials:
+            bos_emb = self.bos_emb.expand(batch_size, 1, -1)
+            boi_emb = self.boi_emb.expand(batch_size, 1, -1)
+            nolabel_single = self.nolabel_emb.expand(batch_size, 1, -1)
+        else:
+            bos_emb = self.lookup_token(self.bos_id, batch_size)
+            boi_emb = self.lookup_token(self.boi_id if self.use_boi_token else -1, batch_size)
+            nolabel_single = self.lookup_token(self.nolabel_id, batch_size)
+        # CFG drop symmetry: drop text when text-first; drop image prefix when image-first
         if drop_text_cond_mask is not None:
-            # Only drop conditioning when text is first
-            apply = (text_first_mask & drop_text_cond_mask).view(-1, 1, 1)
-            nolabel_full = self.nolabel_emb.expand(batch_size, text_tokens.shape[1], -1)
-            text_emb = torch.where(apply, nolabel_full, text_emb)
+            drop = drop_text_cond_mask.view(-1, 1, 1)
+            txt_first = text_first_mask.view(-1, 1, 1)
+            nolabel_txt = nolabel_single.expand(batch_size, text_emb.shape[1], -1)
+            text_emb = torch.where((txt_first & drop).expand_as(text_emb), nolabel_txt, text_emb)
         image_emb = self.image_emb(image_tokens)
 
         x_img_m = torch.full(image_tokens.shape[:-1], True, device=device)
         bos_m = torch.full((batch_size, 1), True, device=device)
         boi_m = torch.full((batch_size, 1), True, device=device)
         
-        # Text-first: [BOS, text, BOI, image]
-        text_first_seq = torch.cat([bos_emb, text_emb, boi_emb, image_emb], dim=1).to(device)
-        text_first_mask_seq = torch.cat([bos_m, x_txt_m, boi_m, x_img_m], dim=1).to(device)
-
-        # Image-first: [BOI, image, BOS, text]  
-        image_first_seq = torch.cat([boi_emb, image_emb, bos_emb, text_emb], dim=1).to(device)
-        image_first_mask_seq = torch.cat([boi_m, x_img_m, bos_m, x_txt_m], dim=1).to(device)
+        if self.use_boi_token:
+            # Text-first: [BOS, text, BOI, image]
+            text_first_seq = torch.cat([bos_emb, text_emb, boi_emb, image_emb], dim=1).to(device)
+            text_first_mask_seq = torch.cat([bos_m, x_txt_m, boi_m, x_img_m], dim=1).to(device)
+            # Image-first: [BOI, image, BOS, text]
+            image_first_seq = torch.cat([boi_emb, image_emb, bos_emb, text_emb], dim=1).to(device)
+            image_first_mask_seq = torch.cat([boi_m, x_img_m, bos_m, x_txt_m], dim=1).to(device)
+        else:
+            # No-BOI: [BOS, text, image] vs [BOS, image, text]
+            text_first_seq = torch.cat([bos_emb, text_emb, image_emb], dim=1).to(device)
+            text_first_mask_seq = torch.cat([bos_m, x_txt_m, x_img_m], dim=1).to(device)
+            image_first_seq = torch.cat([bos_emb, image_emb, text_emb], dim=1).to(device)
+            image_first_mask_seq = torch.cat([bos_m, x_img_m, x_txt_m], dim=1).to(device)
         
         text_first_expanded = text_first_mask.reshape(batch_size, 1, 1).expand(-1, text_first_seq.shape[1], text_first_seq.shape[2]).to(device)
         mask_first_expanded = text_first_mask.reshape(batch_size, 1).expand(-1, text_first_mask_seq.shape[1]).to(device)
@@ -333,6 +397,22 @@ class JetFormer(nn.Module):
         padding_mask_2d = padding_mask.unsqueeze(1) & padding_mask.unsqueeze(2)
         
         attn_mask = torch.logical_and(causal_mask, padding_mask_2d)
+        if not self.causal_mask_on_prefix:
+            txt_len = text_emb.shape[1]
+            img_len = image_emb.shape[1]
+            if self.use_boi_token:
+                txt_prefix_len = 1 + txt_len
+                img_prefix_len = 1 + img_len
+            else:
+                txt_prefix_len = 1 + txt_len
+                img_prefix_len = 1 + img_len
+            total_len = attn_mask.shape[-1]
+            txt_prefix_mask = torch.zeros(batch_size, total_len, dtype=torch.bool, device=device)
+            img_prefix_mask = torch.zeros(batch_size, total_len, dtype=torch.bool, device=device)
+            txt_prefix_mask[:, :txt_prefix_len] = True
+            img_prefix_mask[:, :img_prefix_len] = True
+            prefix_mask = torch.where(mask_first_expanded, txt_prefix_mask, img_prefix_mask)
+            attn_mask = torch.logical_or(attn_mask, prefix_mask.unsqueeze(1))
         attn_mask = attn_mask.unsqueeze(1)
 
         # Per-sample RoPE position ids that skip pads
@@ -354,39 +434,58 @@ class JetFormer(nn.Module):
                     x = checkpoint.checkpoint(layer, x, attn_mask, position_ids)
                 else:
                     x = layer(x, attn_mask, position_ids)
-            x = self.final_norm(x)
+            if not self.per_modality_final_norm:
+                x = self.final_norm(x)
         else:
             x = self.transformer(x, attn_mask, position_ids)
         
         text_seq_len = text_tokens.shape[1] 
         image_seq_len = image_tokens.shape[1]
         
-        text_out_when_first = x[:, :text_seq_len] 
-        text_out_when_second = x[:, image_seq_len+1:image_seq_len+1+text_seq_len] 
-        
-        image_out_when_second = x[:, text_seq_len+1:text_seq_len+1+image_seq_len] 
-        image_out_when_first = x[:, :image_seq_len] 
+        if self.use_boi_token:
+            a_txt = x[:, :text_seq_len]
+            a_img = x[:, self.num_vocab_repeats * text_seq_len + 1:]
+            b_img = x[:, :image_seq_len]
+            b_txt = x[:, image_seq_len + 1:image_seq_len + 1 + text_seq_len]
+        else:
+            a_txt = x[:, :text_seq_len]
+            a_img = x[:, self.num_vocab_repeats * text_seq_len:]
+            b_img = x[:, :image_seq_len]
+            b_txt = x[:, image_seq_len:image_seq_len + text_seq_len]
+        text_out_when_first = a_txt
+        text_out_when_second = b_txt
+        image_out_when_second = a_img
+        image_out_when_first = b_img
         
         text_first_expanded = text_first_mask.reshape(batch_size, 1, 1).to(device)
-        text_logits = torch.where(
+        text_feats = torch.where(
             text_first_expanded.expand(-1, text_seq_len, x.shape[-1]),
             text_out_when_first, 
             text_out_when_second
         )
         
-        image_logits = torch.where(
+        image_feats = torch.where(
             text_first_expanded.expand(-1, image_seq_len, x.shape[-1]),
             image_out_when_second,
             image_out_when_first
         )
-
-        text_logits = self.text_head(text_logits)
+        if self.per_modality_final_norm:
+            text_feats = self.text_norm(text_feats)
+            image_feats = self.img_norm(image_feats)
+        if self.untie_output_vocab:
+            text_logits = self.text_head(text_feats)
+        else:
+            # Tied to embedding table
+            weight = self.text_emb.weight
+            if self.num_vocab_repeats == 1:
+                weight = weight[: self.vocab_size]
+            text_logits = torch.matmul(text_feats, weight.t())
 
         if self.use_bfloat16_img_head:
-            image_logits_bf16 = image_logits.to(torch.bfloat16)
+            image_logits_bf16 = image_feats.to(torch.bfloat16)
             image_logits = self.img_head(image_logits_bf16).float()
         else:
-            image_logits = self.img_head(image_logits)
+            image_logits = self.img_head(image_feats)
         
         return text_logits, image_logits
 
@@ -463,7 +562,7 @@ class JetFormer(nn.Module):
 
     def gmm_params(self, image_logits):
         """Delegates to utils to extract mixture parameters."""
-        return mix_gmm_params(image_logits, self.num_mixtures, self.image_ar_dim)
+        return mix_gmm_params(image_logits, self.num_mixtures, self.image_ar_dim, scale_tol=self.scale_tol)
 
     def sample_gmm_fast(self, mix_logits_pos, means_pos, scales_pos):
         """Sample from GMM at a single position via utility function."""
@@ -492,6 +591,22 @@ class JetFormer(nn.Module):
         # Inverse latent projection on full tokens if used
         if self.latent_projection is not None:
             tokens, _ = self.proj.inverse(tokens)
+
+        # If PatchPCA+Adaptor are present, favor that inversion path
+        if self.patch_pca is not None:
+            N = tokens.shape[1]
+            D_full = tokens.shape[-1]
+            H_patch = H // ps
+            W_patch = W // ps
+            # If adaptor exists, invert it first
+            if self.adaptor is not None:
+                z_grid = tokens.transpose(1, 2).contiguous().view(B, D_full, H_patch, W_patch).permute(0, 2, 3, 1).contiguous()
+                x_grid, _ = self.adaptor.inverse(z_grid)
+                tokens = x_grid.permute(0, 3, 1, 2).contiguous().view(B, D_full, N).transpose(1, 2).contiguous()
+            # Decode back via PCA
+            x_chw = self.patch_pca.decode(tokens)
+            x01 = (x_chw + 1.0) * 0.5
+            return torch.clamp(x01, 0.0, 1.0)
 
         if self.pre_factor_dim is None:
             # Default path: inverse flow on pixel grid

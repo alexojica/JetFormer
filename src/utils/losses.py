@@ -90,7 +90,7 @@ def _square_plus(x: torch.Tensor) -> torch.Tensor:
     return (x + torch.sqrt(x * x + torch.tensor(4.0, dtype=x.dtype, device=x.device))) / 2.0
 
 
-def gmm_params(image_logits: torch.Tensor, num_mixtures: int, ar_dim: int):
+def gmm_params(image_logits: torch.Tensor, num_mixtures: int, ar_dim: int, *, scale_tol: float = 1e-6):
     """Extract mixture parameters from image head logits.
 
     Args:
@@ -110,7 +110,7 @@ def gmm_params(image_logits: torch.Tensor, num_mixtures: int, ar_dim: int):
     means = other[..., 0, :]
     raw_scales = other[..., 1, :]
     scales = _square_plus(raw_scales)
-    scales = torch.clamp(scales, min=1e-6)
+    scales = torch.clamp(scales, min=float(scale_tol))
     return mix_logits, means, scales
 
 
@@ -438,4 +438,147 @@ def compute_jetformer_loss(model,
             "flow_logdet_per_patch": flow_logdet_per_patch.detach(),
             "image_logits_rms": image_logits_rms.detach(),
         } if 'mix_entropy' in locals() else {}),
+    }
+
+
+def _get_from_cfg_or_default(cfg, key: str, default_val):
+    try:
+        return float(getattr(cfg, key))
+    except Exception:
+        try:
+            return float(cfg.get(key, default_val))
+        except Exception:
+            return default_val
+
+
+def compute_jetformer_pca_loss(model,
+                               batch,
+                               *,
+                               text_first_prob: float = 0.5,
+                               input_noise_std: float = 0.0,
+                               cfg_drop_prob: float = 0.0,
+                               advanced_metrics: bool = False):
+    """JetFormer loss over PatchPCA latents with optional Jet adaptor.
+
+    Implements the paper's composition:
+      image_bpd = ((nll_image_tokens + noise_nll)/num_subpix - (sum_log_det/num_subpix - ln(127.5))) / ln(2)
+
+    Notes:
+      - Images are converted once to [-1,1] before PCA.
+      - No RGB curriculum noise is used here.
+      - Optional extra Gaussian latent dims are accounted for via noise_nll.
+    """
+    device = next(model.parameters()).device
+
+    images = batch['image'].to(device, non_blocking=True)
+    # Convert uint8 [0,255] to [0,1] with uniform dequant and then to [-1,1]
+    images_f = images.float()
+    u = torch.rand_like(images_f)
+    x01 = (images_f + u) / 256.0
+    x11 = (x01 * 2.0) - 1.0
+
+    # Encode via PatchPCA
+    if not hasattr(model, 'patch_pca') or model.patch_pca is None:
+        raise RuntimeError("PatchPCA module not attached to model. Configure config.patch_pca.")
+    mu, logvar = model.patch_pca.encode(x11, train=model.training)
+    z = model.patch_pca.reparametrize(mu, logvar, train=model.training)
+
+    # Optional Jet adaptor over latent grid
+    B = z.shape[0]
+    H, W = model.input_size
+    ps = model.patch_size
+    H_patch, W_patch = (H // ps), (W // ps)
+    D_full = z.shape[-1]
+    z_grid = z.transpose(1, 2).contiguous().view(B, D_full, H_patch, W_patch).permute(0, 2, 3, 1).contiguous()
+    if hasattr(model, 'adaptor') and model.adaptor is not None:
+        y_grid, logdet = model.adaptor(z_grid)
+        sum_log_det = logdet  # [B]
+        y = y_grid.permute(0, 3, 1, 2).contiguous().view(B, D_full, -1).transpose(1, 2).contiguous()
+    else:
+        sum_log_det = torch.zeros(B, device=device, dtype=z.dtype)
+        y = z
+
+    # Split AR and residual dims; add optional Gaussian extra dims
+    D_ar = int(getattr(model, 'image_ar_dim', D_full))
+    D_ar = min(D_ar, D_full)
+    hat_tokens = y[..., :D_ar]
+    residual_latent = (y[..., D_ar:] if (D_full - D_ar) > 0 else None)
+    latent_noise_dim = int(getattr(model, '_latent_noise_dim', 0))
+    noise_nll = torch.zeros(B, device=device, dtype=z.dtype)
+    if latent_noise_dim > 0:
+        eps = torch.randn(B, y.shape[1], latent_noise_dim, device=device, dtype=z.dtype)
+        normal = torch.distributions.Normal(0.0, 1.0)
+        noise_nll = -normal.log_prob(eps).view(B, -1).sum(dim=1)
+
+    # Build text tokens/masks
+    class_ids = batch.get('label', None)
+    if class_ids is not None:
+        class_ids = class_ids.to(device, non_blocking=True)
+    if (getattr(model, 'num_classes', None) is not None and getattr(model, 'num_classes') > 0) and class_ids is not None:
+        Bsz = images.size(0)
+        text_tokens = torch.zeros(Bsz, getattr(model, 'class_token_length', 16), dtype=torch.long, device=device)
+        text_mask = torch.ones(Bsz, getattr(model, 'class_token_length', 16), dtype=torch.bool, device=device)
+        text_loss_mask = torch.zeros(Bsz, getattr(model, 'class_token_length', 16), dtype=torch.bool, device=device)
+    else:
+        text_tokens = batch['text'].to(device, non_blocking=True)
+        text_mask = batch['text_mask'].to(device, non_blocking=True)
+        text_loss_mask = batch['text_loss'].to(device, non_blocking=True)
+
+    # Teacher forcing: AR input tokens
+    img_in = hat_tokens
+    # Optional AR input noise when text is first
+    if float(input_noise_std) > 0.0:
+        Bsz = img_in.shape[0]
+        text_first_mask = torch.bernoulli(torch.full((Bsz,), float(text_first_prob), device=device)).bool()
+        noise = torch.randn_like(img_in) * float(input_noise_std)
+        img_in = torch.where(text_first_mask.view(-1, 1, 1), img_in + noise, img_in)
+    else:
+        Bsz = img_in.shape[0]
+        text_first_mask = torch.bernoulli(torch.full((Bsz,), float(text_first_prob), device=device)).bool()
+
+    # CFG drop mask
+    drop_mask = (torch.rand(B, device=device) < float(cfg_drop_prob))
+
+    # Forward AR
+    text_logits, image_logits = model.forward(text_tokens, img_in, text_first_mask, text_mask, drop_text_cond_mask=drop_mask, class_ids=class_ids)
+
+    # Text loss (class-cond: zero)
+    if (getattr(model, 'num_classes', None) is not None and getattr(model, 'num_classes') > 0) and class_ids is not None:
+        text_loss = torch.tensor(0.0, device=device)
+    else:
+        text_second_mask = ~text_first_mask
+        text_loss = cross_entropy_second_only(text_logits, text_tokens, text_loss_mask, text_second_mask)
+
+    # Image NLL via GMM on hat_tokens
+    mix_logits, means, scales = gmm_params(image_logits, int(getattr(model, 'num_mixtures', 1024)), D_ar)
+    comps, targets_flat = gmm_distribution(mix_logits, means, scales, hat_tokens)
+    gmm_nll_flat = -comps.log_prob(targets_flat)
+    N = gmm_nll_flat.shape[0] // B
+    gmm_nll = gmm_nll_flat.view(B, N).sum(dim=1)
+
+    # Residual dims (whitened) contribute Gaussian NLL if present
+    residual_nll = gaussian_residual_nll(residual_latent)
+
+    # BPD composition per paper constants
+    H, W = model.input_size
+    num_subpix = H * W * 3
+    ln2 = math.log(2.0)
+    ln1275 = math.log(127.5)
+
+    total_nll = gmm_nll + residual_nll + noise_nll
+    # ((total_nll)/num_subpix - (sum_log_det/num_subpix - ln(127.5))) / ln 2
+    image_bpd_per_sample = ((total_nll / num_subpix) - (sum_log_det / num_subpix - ln1275)) / ln2
+    image_loss = (image_bpd_per_sample * text_first_mask.float()).mean()
+
+    with torch.no_grad():
+        small_scales_rate = (scales < 1e-4).float().mean()
+
+    return {
+        "loss": image_loss + 0.0 * text_loss,
+        "text_loss": text_loss,
+        "image_loss": image_loss,
+        "image_bpd_total": image_bpd_per_sample.mean().detach(),
+        "image_bpd_total_raw": image_bpd_per_sample,
+        "total_nll_nats": total_nll.mean().detach(),
+        "gmm_small_scales_rate": small_scales_rate.detach(),
     }
