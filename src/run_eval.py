@@ -29,6 +29,9 @@ def _save_t2i_samples(model: JetFormer, prompts, device: torch.device, out_dir: 
     os.makedirs(out_dir, exist_ok=True)
     ds = build_sentencepiece_tokenizer_dataset(max_length=64)
     try:
+        # Forward CLI temperatures via globals-bound args (set in main)
+        t_scales = args.temperature_scales if 'args' in globals() else None
+        t_probs = args.temperature_probs if 'args' in globals() else None
         samples = generate_text_to_image_samples_cfg(
             model,
             ds,
@@ -37,6 +40,8 @@ def _save_t2i_samples(model: JetFormer, prompts, device: torch.device, out_dir: 
             cfg_strength=float(cfg_strength),
             cfg_mode=str(cfg_mode),
             prompts=list(prompts),
+            temperature_scales=t_scales,
+            temperature_probs=t_probs,
         )
     except Exception:
         samples = []
@@ -71,10 +76,12 @@ def main():
     parser.add_argument('--num_images', type=int, default=32)
     parser.add_argument('--out_dir', type=str, default='./eval_out')
     parser.add_argument('--cfg_strength', type=float, default=4.0)
-    parser.add_argument('--cfg_mode', type=str, default='reject', choices=['reject','interp'])
     parser.add_argument('--prompts_file', type=str, default=None)
     parser.add_argument('--ref_dir', type=str, default=None)
     parser.add_argument('--ref_stats', type=str, default=None)
+    parser.add_argument('--temperature_scales', type=float, default=None)
+    parser.add_argument('--temperature_probs', type=float, default=None)
+    parser.add_argument('--right_align_inputs', type=bool, default=None)
     args = parser.parse_args()
 
     logger = get_logger(__name__)
@@ -111,16 +118,16 @@ def main():
                 prompts = [line.strip() for line in f if line.strip()]
         else:
             prompts = ["a car", "a cat", "a dog", "a house", "a mountain", "a city" ]
-        _save_t2i_samples(model, prompts, device, out_dir, args.cfg_strength, args.num_images, args.cfg_mode)
+        _save_t2i_samples(model, prompts, device, out_dir, args.cfg_strength, args.num_images, "interp")
         logger.info(f"Saved {args.num_images} samples to {out_dir}")
     elif args.task == 'class_cond':
-        _save_class_cond_samples(model, device, out_dir, args.num_images, args.cfg_strength, args.cfg_mode)
+        _save_class_cond_samples(model, device, out_dir, args.num_images, args.cfg_strength, "interp")
         logger.info(f"Saved class-conditional samples to {out_dir}")
     elif args.task == 'fid':
         # Expect images already generated under out_dir, or generate from prompts file
         if len(list(out_dir.glob('*.png'))) == 0:
             prompts = ["a photo of a %d" % i for i in range(args.num_images)]
-            _save_t2i_samples(model, prompts, device, out_dir, args.cfg_strength, args.num_images, args.cfg_mode)
+            _save_t2i_samples(model, prompts, device, out_dir, args.cfg_strength, args.num_images, "interp")
         fid = _compute_fid(out_dir, Path(args.ref_dir) if args.ref_dir else None, Path(args.ref_stats) if args.ref_stats else None)
         if fid is None:
             logger.warning("FID computation unavailable; please install clean-fid or torch-fidelity, or provide ref_dir/ref_stats.")

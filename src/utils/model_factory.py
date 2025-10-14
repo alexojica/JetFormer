@@ -4,6 +4,11 @@ from typing import Any, Dict, Tuple
 import torch
 
 from src.jetformer import JetFormer
+try:
+    from src.utils.logging import get_logger as _get_logger
+    _mf_logger = _get_logger(__name__)
+except Exception:
+    _mf_logger = None
 
 
 def _get_from_ns_or_dict(config: SimpleNamespace | Dict[str, Any], key: str, default=None):
@@ -22,13 +27,13 @@ def build_jetformer_from_config(config: SimpleNamespace | Dict[str, Any], device
     """
     param_names = [
         'vocab_size','d_model','n_heads','n_kv_heads','n_layers','d_ff','max_seq_len','num_mixtures','dropout',
-        'jet_depth','jet_block_depth','jet_emb_dim','jet_num_heads','patch_size','image_ar_dim','use_bfloat16_img_head',
+        'patch_size','image_ar_dim','use_bfloat16_img_head',
         'num_classes','class_token_length','latent_projection','latent_proj_matrix_path','pre_latent_projection',
-        'pre_latent_proj_matrix_path','pre_factor_dim','flow_actnorm','flow_invertible_dense',
+        'pre_latent_proj_matrix_path','pre_factor_dim',
         'grad_checkpoint_transformer','flow_grad_checkpoint',
         # New parity flags
         'use_boi_token','causal_mask_on_prefix','untie_output_vocab','per_modality_final_norm',
-        'num_vocab_repeats','bos_id','boi_id','nolabel_id','scale_tol'
+        'num_vocab_repeats','bos_id','boi_id','nolabel_id','scale_tol','right_align_inputs'
     ]
     kwargs: Dict[str, Any] = {}
     for name in param_names:
@@ -55,6 +60,81 @@ def build_jetformer_from_config(config: SimpleNamespace | Dict[str, Any], device
                 kwargs[name] = v
         elif val is not None:
             kwargs[name] = val
+
+    # Handle jet config from a nested block
+    jet_cfg = _get_from_ns_or_dict(config, 'jet', {})
+    jet_params_for_constructor = {
+        'jet_depth': _get_from_ns_or_dict(jet_cfg, 'depth'),
+        'jet_block_depth': _get_from_ns_or_dict(jet_cfg, 'block_depth'),
+        'jet_emb_dim': _get_from_ns_or_dict(jet_cfg, 'emb_dim'),
+        'jet_num_heads': _get_from_ns_or_dict(jet_cfg, 'num_heads'),
+        'flow_actnorm': _get_from_ns_or_dict(jet_cfg, 'actnorm'),
+        'flow_invertible_dense': _get_from_ns_or_dict(jet_cfg, 'invertible_dense'),
+    }
+    kwargs.update({k: v for k, v in jet_params_for_constructor.items() if v is not None})
+
+    # Enforce strict special tokens: require ids when flag true; else warn
+    bos_id = _get_from_ns_or_dict(config, 'bos_id', None)
+    nolabel_id = _get_from_ns_or_dict(config, 'nolabel_id', None)
+    boi_id = _get_from_ns_or_dict(config, 'boi_id', None)
+    ssi_cfg = _get_from_ns_or_dict(config, 'strict_special_ids', True)
+    if ssi_cfg and not (isinstance(bos_id, int) and isinstance(nolabel_id, int)):
+        # Hard default to strict parity; if missing ids, set safe defaults and continue
+        bos_id = 0 if bos_id is None else bos_id
+        nolabel_id = 0 if nolabel_id is None else nolabel_id
+        try:
+            if _mf_logger is not None:
+                _mf_logger.warning("strict_special_ids=True but missing bos_id/nolabel_id; defaulting missing ids to 0 for parity.")
+        except Exception:
+            pass
+    kwargs['bos_id'] = bos_id
+    kwargs['nolabel_id'] = nolabel_id
+    if boi_id is not None:
+        kwargs['boi_id'] = boi_id
+    # Pass through explicit intent to use BOI token (default True for parity) and enforce under strict mode
+    use_boi = _get_from_ns_or_dict(config, 'use_boi_token', True)
+    kwargs['use_boi_token'] = bool(use_boi)
+    kwargs['strict_special_ids'] = bool(ssi_cfg)
+
+    # Optional dtype parsing for heads/embeddings
+    def _to_torch_dtype(v):
+        if v is None:
+            return None
+        if isinstance(v, torch.dtype):
+            return v
+        if isinstance(v, str):
+            s = v.strip().lower()
+            return {
+                'fp32': torch.float32,
+                'float32': torch.float32,
+                'f32': torch.float32,
+                'bf16': torch.bfloat16,
+                'bfloat16': torch.bfloat16,
+                'fp16': torch.float16,
+                'float16': torch.float16,
+            }.get(s, None)
+        return None
+
+    hd = _get_from_ns_or_dict(config, 'head_dtype', None)
+    ed = _get_from_ns_or_dict(config, 'embed_dtype', None)
+    if hd is not None:
+        kwargs['head_dtype'] = _to_torch_dtype(hd)
+    if ed is not None:
+        kwargs['embed_dtype'] = _to_torch_dtype(ed)
+    # Attention logits softcap
+    sc = _get_from_ns_or_dict(config, 'attn_logits_softcap', None)
+    if sc is not None:
+        try:
+            kwargs['attn_logits_softcap'] = float(sc)
+        except Exception:
+            kwargs['attn_logits_softcap'] = None
+    # Multivariate head flags
+    mv = _get_from_ns_or_dict(config, 'multivariate', None)
+    if mv is not None:
+        kwargs['multivariate'] = bool(mv)
+    mv_d = _get_from_ns_or_dict(config, 'out_dim', None)
+    if mv_d is not None:
+        kwargs['multivariate_out_dim'] = int(mv_d)
     # Optional rope_skip_pad exposure (default False)
     rsp = _get_from_ns_or_dict(config, 'rope_skip_pad', None)
     if rsp is not None:
@@ -123,12 +203,13 @@ def build_jetformer_from_config(config: SimpleNamespace | Dict[str, Any], device
             kind = str(ak.get('kind', 'none') or 'none').lower()
             if kind != 'none':
                 dim = int(ak.get('dim', full_token_dim))
-                model._latent_noise_dim = int(ak.get('latent_noise_dim', 0))
-                model.adaptor = build_adaptor(kind, grid_h, grid_w, dim,
-                                              depth=int(ak.get('depth', 8)),
-                                              block_depth=int(ak.get('block_depth', 2)),
-                                              emb_dim=int(ak.get('emb_dim', 256)),
-                                              num_heads=int(ak.get('num_heads', 4)))
+                # Pass through latent_noise_dim
+                model._latent_noise_dim = int(ak.get('latent_noise_dim', _get_from_ns_or_dict(config, 'latent_noise_dim', 0)))
+
+                # Use shared jet config for adaptor params
+                jet_params_for_adaptor = dict(jet_cfg) if isinstance(jet_cfg, dict) else {k: getattr(jet_cfg, k) for k in dir(jet_cfg) if not k.startswith('_')}
+
+                model.adaptor = build_adaptor(kind, grid_h, grid_w, dim, **jet_params_for_adaptor)
                 model.adaptor = model.adaptor.to(device)
         # If explicitly legacy, ensure no adaptor by default
         if training_mode != 'pca' and not isinstance(adaptor_cfg, (dict, SimpleNamespace)):

@@ -10,10 +10,11 @@ dropout: 0.1
 num_mixtures: 1024
 
 # Flow (Jet)
-jet_depth: 32
-jet_block_depth: 4
-jet_emb_dim: 512
-jet_num_heads: 8
+jet:
+  depth: 32
+  block_depth: 4
+  emb_dim: 512
+  num_heads: 8
 
 # Image tokenization
 patch_size: 16

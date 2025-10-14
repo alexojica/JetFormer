@@ -303,11 +303,16 @@ def train_from_config(config_dict: dict):
                         stop_grad_nvp_prefix = bool(getattr(config, 'stop_grad_nvp_prefix', False))
                         # PCA pixel noise schedule parameters (JAX parity)
                         noise_scale = None
+                        noise_min = None
                         try:
                             # cosine schedule precomputed above is specific to flow trainer; here we allow constant value
                             noise_scale = float(getattr(config, 'noise_scale')) if hasattr(config, 'noise_scale') else None
                         except Exception:
                             noise_scale = None
+                        try:
+                            noise_min = float(getattr(config, 'noise_min')) if hasattr(config, 'noise_min') else None
+                        except Exception:
+                            noise_min = None
                         rgb_noise_on_image_prefix = bool(getattr(config, 'rgb_noise_on_image_prefix', True))
                         from src.utils.losses import compute_jetformer_pca_loss
                         out = compute_jetformer_pca_loss(
@@ -320,6 +325,7 @@ def train_from_config(config_dict: dict):
                             stop_grad_nvp_prefix=stop_grad_nvp_prefix,
                             advanced_metrics=advanced_metrics,
                             noise_scale=noise_scale,
+                            noise_min=noise_min,
                             rgb_noise_on_image_prefix=rgb_noise_on_image_prefix,
                         )
                     else:
@@ -635,12 +641,18 @@ if __name__ == "__main__":
     parser.add_argument('--image_loss_weight', type=float, default=1.0)
     parser.add_argument('--cfg_drop_prob', type=float, default=0.1)
     parser.add_argument('--cfg_strength', type=float, default=4.0)
-    parser.add_argument('--cfg_mode', type=str, default='reject', choices=['reject','interp'])
     parser.add_argument('--log_every_batches', type=int, default=10)
     parser.add_argument('--grad_logging', type=str, default='false', choices=['true','false'])
     parser.add_argument('--sample_every_batches', type=int, default=100)
     parser.add_argument('--warmup_percent', type=float, default=0.0)
     parser.add_argument('--use_cosine', type=str, default='true', choices=['true','false'])
+    # Special tokens and strict parity
+    parser.add_argument('--bos_id', type=int, default=None)
+    parser.add_argument('--boi_id', type=int, default=None)
+    parser.add_argument('--nolabel_id', type=int, default=None)
+    parser.add_argument('--strict_special_ids', type=str, default='true', choices=['true','false'])
+    # Latent noise dims for PCA+Adaptor path
+    parser.add_argument('--latent_noise_dim', type=int, default=0)
     # Diagnostics
     parser.add_argument('--advanced_metrics', type=str, default='false', choices=['true','false'])
     # FID / IS

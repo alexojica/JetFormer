@@ -148,6 +148,15 @@ class PatchPCA(nn.Module):
         else:
             mu = tokens
 
+        # Optional depth_to_seq: split feature dim into (f, d) and concatenate f along sequence
+        if int(self.depth_to_seq) > 1:
+            f = int(self.depth_to_seq)
+            B, S, D = mu.shape
+            if D % f != 0:
+                raise ValueError(f"PatchPCA.encode: token dim {D} not divisible by depth_to_seq {f}")
+            d = D // f
+            mu = mu.view(B, S, f, d).permute(0, 2, 1, 3).contiguous().view(B, f * S, d)
+
         # Fixed diagonal log-variance parameterization
         if self.noise_std > 0.0:
             logvar = torch.full_like(mu, float(2.0 * torch.log(torch.tensor(self.noise_std)).item()))
@@ -169,6 +178,14 @@ class PatchPCA(nn.Module):
         tokens: [B,N,D]
         """
         x_tokens = tokens
+        # Inverse depth_to_seq: regroup sequence into feature depth
+        if int(self.depth_to_seq) > 1:
+            f = int(self.depth_to_seq)
+            B, S, d = x_tokens.shape
+            if S % f != 0:
+                raise ValueError(f"PatchPCA.decode: sequence length {S} not divisible by depth_to_seq {f}")
+            s = S // f
+            x_tokens = x_tokens.view(B, f, s, d).permute(0, 2, 1, 3).contiguous().view(B, s, f * d)
         if (not self.skip_pca) and self.pca_loaded and self.whiten:
             # Invert whitening: x = (z @ inv_proj^T) + mean
             x_tokens = torch.matmul(tokens, self.pca_inv_proj.t()) + self.pca_mean.view(1, 1, -1)

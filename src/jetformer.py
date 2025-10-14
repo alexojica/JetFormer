@@ -59,10 +59,17 @@ class JetFormer(nn.Module):
         boi_id: int = None,
         nolabel_id: int = None,
         scale_tol: float = 1e-6,
+        # Attention logits softcap (Gemma parity)
+        attn_logits_softcap: float | None = None,
+        # Multivariate Gaussian head option
+        multivariate: bool = False,
+        multivariate_out_dim: int | None = None,
         # RoPE positions behavior
         rope_skip_pad: bool = False,
         # Optional: enforce special token IDs (paper/JAX parity)
         strict_special_ids: bool = False,
+        # Input alignment/parity flags
+        right_align_inputs: bool = False,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -72,6 +79,7 @@ class JetFormer(nn.Module):
         self.use_bfloat16_img_head = use_bfloat16_img_head
         self._head_dtype = head_dtype
         self._embed_dtype = embed_dtype
+        self.attn_logits_softcap = (float(attn_logits_softcap) if attn_logits_softcap is not None else None)
         # Checkpointing controls
         self.grad_checkpoint_transformer = bool(grad_checkpoint_transformer)
         self.flow_grad_checkpoint = bool(flow_grad_checkpoint)
@@ -110,8 +118,8 @@ class JetFormer(nn.Module):
         assert head_dim % 2 == 0, "Head dimension must be even for RoPE"
         
         # JAX parity flags
-        # Gate BOI usage strictly by presence of boi_id (parity with JAX)
-        self.use_boi_token = bool(boi_id is not None)
+        # Respect explicit flag and enforce boi_id under strict mode when enabled
+        self.use_boi_token = bool(use_boi_token)
         self.causal_mask_on_prefix = bool(causal_mask_on_prefix)
         self.untie_output_vocab = bool(untie_output_vocab)
         self.per_modality_final_norm = bool(per_modality_final_norm)
@@ -123,7 +131,12 @@ class JetFormer(nn.Module):
         # Position id / alignment controls (default absolute positions; JAX uses absolute in training)
         self.rope_skip_pad = bool(rope_skip_pad)
         self.strict_special_ids = bool(strict_special_ids)
-        self.right_align_inputs = False  # when True, right-align tokens by input mask
+        self.right_align_inputs = bool(right_align_inputs)  # when True, right-align tokens by input mask
+        # Note: rope_skip_pad is a no-op in this implementation because positions
+        # are derived from the input mask (pads are naturally skipped), matching JAX behavior.
+        # Enforce presence of BOI id when BOI token usage is requested in strict mode
+        if self.use_boi_token and self.strict_special_ids and (self.boi_id is None):
+            raise RuntimeError("use_boi_token=True requires integer boi_id when strict_special_ids=True")
         # Fallback learned special embeddings when ids are not provided
         self._use_learned_specials = not (isinstance(self.bos_id, int) and isinstance(self.nolabel_id, int))
         if self.strict_special_ids and self._use_learned_specials:
@@ -163,6 +176,11 @@ class JetFormer(nn.Module):
                 use_grad_checkpoint=self.flow_grad_checkpoint,
             )
         
+        # Multivariate head controls
+        self.multivariate = bool(multivariate)
+        # Default out_dim equals AR image dimension if not provided
+        self.out_dim = int(multivariate_out_dim) if (multivariate_out_dim is not None) else int(image_ar_dim)
+
         # Support num_vocab_repeats in embedding table
         self.text_emb = nn.Embedding(vocab_size * self.num_vocab_repeats, d_model)
         torch.nn.init.normal_(self.text_emb.weight, mean=0.0, std=1)
@@ -207,17 +225,22 @@ class JetFormer(nn.Module):
         self.use_gemma_backbone = True
         if self.use_gemma_backbone:
             self.transformer = nn.ModuleList([
-                GemmaBlock(d_model, n_heads, n_kv_heads, d_ff, dropout, max_seq_len=max_total_len, pe_type="rope", activation="gelu")
+                GemmaBlock(d_model, n_heads, n_kv_heads, d_ff, dropout, max_seq_len=max_total_len, pe_type="rope", activation="gelu", attn_logits_softcap=self.attn_logits_softcap)
                 for _ in range(n_layers)
             ])
-            self.final_norm = nn.RMSNorm(d_model)
+            self.final_norm = nn.RMSNorm(d_model, eps=1e-6)
         else:
             self.transformer = Transformer(d_model, n_heads, n_layers, d_ff, dropout, max_total_len)
             self.final_norm = None
 
         # Text head (untied option); default is tied via embedding weight
         self.text_head = nn.Linear(d_model, vocab_size, bias=False)
-        self.img_head = nn.Linear(d_model, num_mixtures + 2 * num_mixtures * self.image_ar_dim)
+        # Image head output dimension depends on multivariate setting
+        if self.multivariate:
+            img_out = (self.out_dim * self.out_dim) + self.out_dim
+        else:
+            img_out = num_mixtures + 2 * num_mixtures * self.image_ar_dim
+        self.img_head = nn.Linear(d_model, img_out)
         nn.init.zeros_(self.img_head.weight)
         if self.img_head.bias is not None:
             nn.init.zeros_(self.img_head.bias)
@@ -236,8 +259,8 @@ class JetFormer(nn.Module):
         
         # Per-modality final norms (used before heads instead of a shared final_norm)
         if self.per_modality_final_norm:
-            self.text_norm = nn.RMSNorm(d_model)
-            self.img_norm = nn.RMSNorm(d_model)
+            self.text_norm = nn.RMSNorm(d_model, eps=1e-6)
+            self.img_norm = nn.RMSNorm(d_model, eps=1e-6)
             if self._embed_dtype is not None:
                 try:
                     self.text_norm = self.text_norm.to(self._embed_dtype)
@@ -245,13 +268,9 @@ class JetFormer(nn.Module):
                 except Exception:
                     pass
 
-        # Optional class-conditioning tokens
+        # Optional class-conditioning controls (handled via text tokens, no special table)
         self.num_classes = num_classes
         self.class_token_length = class_token_length
-        if num_classes is not None and num_classes > 0:
-            self.class_tokens_table = nn.Parameter(
-                torch.randn(num_classes, class_token_length, d_model) * (1.0 / math.sqrt(d_model))
-            )
 
         # Optional PatchPCA + Adaptor (attached externally by factory)
         self.patch_pca = None
@@ -385,23 +404,17 @@ class JetFormer(nn.Module):
         Returns aligned (x, attn_mask_l_s, input_mask_l).
         """
         B, L, D = x.shape
-        # Compute final positions for each token: tokens with False mask get -1 and will be dropped
-        m_cumsum = torch.cumsum(input_mask_l.to(torch.long), dim=1)
-        seqlen = m_cumsum[:, -1]
-        x_pos = (L - seqlen).unsqueeze(1) + m_cumsum
-        x_pos = x_pos * input_mask_l.to(torch.long) - 1  # [B,L]
+        # Compute right-aligned destination positions per source token
+        m_cumsum = torch.cumsum(input_mask_l.to(torch.long), dim=1)  # [B,L]
+        seqlen = m_cumsum[:, -1]  # [B]
+        x_pos = (L - seqlen).unsqueeze(1) + m_cumsum  # [B,L]
+        x_pos = x_pos * input_mask_l.to(torch.long) - 1  # invalid -> -1
 
-        # Build permutation matrices per batch via one-hot
-        perm = torch.zeros(B, L, L, device=x.device, dtype=torch.bool)
-        rows = torch.arange(L, device=x.device).view(1, L).expand(B, -1)
-        valid = x_pos >= 0
-        # scatter: for valid positions set perm[b, pos, src]=True
-        for b in range(B):
-            pos_b = x_pos[b]
-            mask_b = valid[b]
-            src_idx = rows[b][mask_b]
-            dst_idx = pos_b[mask_b]
-            perm[b, dst_idx, src_idx] = True
+        # Build batched permutation P (B,L,L) without Python loops
+        # One-hot with clamped indices, then zero-out invalid entries
+        x_pos_clamped = torch.clamp(x_pos, min=0)
+        perm = torch.nn.functional.one_hot(x_pos_clamped, num_classes=L).to(torch.bool)  # [B,L,L]
+        perm = perm & input_mask_l.unsqueeze(-1)  # zero rows for invalid tokens
 
         # Apply permutation: x' = P @ x; attn' = P @ attn @ P^T
         x_aligned = torch.einsum('bld,blm->bmd', x, perm)
@@ -451,7 +464,7 @@ class JetFormer(nn.Module):
         nll = -log_prob.view(tilde_z.shape[0], -1).sum(dim=1)
         return nll
 
-    def embed_sequence(self, text_tokens, image_tokens, text_first_mask, input_mask, drop_text_cond_mask=None, class_ids=None):
+    def embed_sequence(self, text_tokens, image_tokens, text_first_mask, input_mask, drop_text_cond_mask=None):
         batch_size = text_tokens.shape[0]
         device = text_tokens.device
         
@@ -460,21 +473,14 @@ class JetFormer(nn.Module):
             offsets = [i * self.vocab_size for i in range(self.num_vocab_repeats)]
         else:
             offsets = [0]
-        if (self.num_classes is not None and self.num_classes > 0) and class_ids is not None and hasattr(self, 'class_tokens_table'):
-            # Use class tokens instead of text tokens
-            ct = self.class_tokens_table[class_ids]  # [B, Tcls, D]
-            text_emb = ct
-            # Build text mask: all ones for class tokens
-            x_txt_m = torch.ones(batch_size, self.class_token_length, dtype=torch.bool, device=device)
+        if self.num_vocab_repeats > 1:
+            reps = [text_tokens + off for off in offsets]
+            text_tokens_rep = torch.cat(reps, dim=1)
+            text_emb = self.text_emb(text_tokens_rep)
+            x_txt_m = input_mask.repeat(1, self.num_vocab_repeats)
         else:
-            if self.num_vocab_repeats > 1:
-                reps = [text_tokens + off for off in offsets]
-                text_tokens_rep = torch.cat(reps, dim=1)
-                text_emb = self.text_emb(text_tokens_rep)
-                x_txt_m = input_mask.repeat(1, self.num_vocab_repeats)
-            else:
-                text_emb = self.text_emb(text_tokens)
-                x_txt_m = input_mask
+            text_emb = self.text_emb(text_tokens)
+            x_txt_m = input_mask
         # Special tokens: prefer embedding lookup like JAX; fallback learned only if ids missing
         if not self._use_learned_specials:
             bos_emb = self.lookup_token(self.bos_id, batch_size)
@@ -496,12 +502,11 @@ class JetFormer(nn.Module):
             nolabel_single = self.nolabel_emb.expand(batch_size, 1, -1)
         # Image embeddings (computed before any optional drop so we can override if needed)
         image_emb = self.image_emb(image_tokens)
-        # CFG drop parity with JAX: drop labels only when text is first; never drop image prefix.
+        # CFG drop parity with JAX: drop labels for the active prefix (text-first or image-first).
         if drop_text_cond_mask is not None:
             drop_b = drop_text_cond_mask.view(-1).bool()  # [B]
-            # Only drop text embeddings when text is first (never drop image prefix)
-            drop_txt = (text_first_mask & drop_b)
             # Drop text embeddings when text-first
+            drop_txt = (text_first_mask & drop_b)
             if drop_txt.any():
                 # For repeated vocab, ensure nolabel covers the repeated text length
                 if (not self._use_learned_specials) and self.num_vocab_repeats > 1 and text_emb.shape[1] == (text_tokens.shape[1] * self.num_vocab_repeats):
@@ -512,8 +517,16 @@ class JetFormer(nn.Module):
                 else:
                     nolabel_txt = nolabel_single.expand(batch_size, text_emb.shape[1], -1)
                 text_emb = torch.where(drop_txt.view(-1, 1, 1).expand_as(text_emb), nolabel_txt, text_emb)
-                # Force text mask to full True when dropped
+                # Force text mask to full True when dropped (parity with JAX)
                 x_txt_m = torch.where(drop_txt.view(-1, 1), torch.ones_like(x_txt_m), x_txt_m)
+
+            # Drop image embeddings when image-first (broadcast nolabel across image tokens)
+            drop_img = ((~text_first_mask) & drop_b)
+            if drop_img.any():
+                nolabel_img = nolabel_single  # [B,1,D]
+                image_emb = torch.where(drop_img.view(-1, 1, 1).expand_as(image_emb),
+                                        nolabel_img.expand(batch_size, 1, image_emb.shape[-1]),
+                                        image_emb)
 
         x_img_m = torch.full(image_tokens.shape[:-1], True, device=device)
         bos_m = torch.full((batch_size, 1), True, device=device)
@@ -572,21 +585,32 @@ class JetFormer(nn.Module):
         position_ids = torch.cumsum(padding_mask.to(torch.long), dim=1) - 1
         position_ids = torch.clamp(position_ids, min=0)
 
+        # When pre-filling the decode KV cache with right-aligned sequences,
+        # pass an explicit attention mask and rely on it during decode rather than
+        # is_causal. This mirrors the JAX behavior which pads attn mask to cache size.
+
         return x, attn_mask, position_ids
     
-    def forward(self, text_tokens, image_tokens, text_first_mask, input_mask, drop_text_cond_mask=None, class_ids=None):
+    def forward(self, text_tokens, image_tokens, text_first_mask, input_mask, drop_text_cond_mask=None):
         """Forward pass"""
         batch_size = text_tokens.shape[0]
         device = text_tokens.device
         
-        x, attn_mask, position_ids = self.embed_sequence(text_tokens, image_tokens, text_first_mask, input_mask, drop_text_cond_mask, class_ids)
+        x, attn_mask, position_ids = self.embed_sequence(text_tokens, image_tokens, text_first_mask, input_mask, drop_text_cond_mask)
         
+        # Cast hidden states to embed dtype for parity with JAX decoder
+        if self._embed_dtype is not None:
+            try:
+                x = x.to(self._embed_dtype)
+            except Exception:
+                pass
+
         if isinstance(self.transformer, nn.ModuleList):
             for layer in self.transformer:
                 if self.grad_checkpoint_transformer and self.training:
-                    x = checkpoint.checkpoint(layer, x, attn_mask, position_ids)
+                    x = checkpoint.checkpoint(layer, x, attn_mask, position_ids, False)
                 else:
-                    x = layer(x, attn_mask, position_ids)
+                    x = layer(x, attn_mask, position_ids, False)
             if not self.per_modality_final_norm:
                 x = self.final_norm(x)
         else:
@@ -639,7 +663,8 @@ class JetFormer(nn.Module):
             x: [B, L, D] embeddings (already combined sequence as in embed_sequence output)
             attn_mask_b_1_l_s: [B,1,L,S] boolean mask
             input_mask_b_l: [B, L] boolean mask
-            cache_size: unused; kept for API parity
+            cache_size: optional total KV cache window. When provided, we track
+                cache_begin/cache_end to emulate a right-aligned window.
         Returns:
             last_prelogits: [B,1,D]
         """
@@ -655,18 +680,50 @@ class JetFormer(nn.Module):
             position_ids = torch.clamp(position_ids, min=0)
         else:
             position_ids = torch.arange(seq_len, device=x_aligned.device).unsqueeze(0).expand(x_aligned.size(0), -1)
+        # Pad attention mask along cache (key) dimension up to cache_size (parity with JAX)
+        if attn_mask is not None and isinstance(cache_size, int) and cache_size > 0:
+            pad_needed = int(cache_size) - int(attn_mask.shape[-1])
+            if pad_needed > 0:
+                attn_mask = F.pad(attn_mask, (0, pad_needed), value=False)
         h = x_aligned
         if isinstance(self.transformer, nn.ModuleList):
+            # Reset KV cache for a fresh prefill and build caches while processing the prompt
             for layer in self.transformer:
-                h = layer(h, attn_mask, position_ids)
+                try:
+                    layer.attention.reset_kv_cache()
+                except Exception:
+                    pass
+            for layer in self.transformer:
+                # use_cache=True so KV caches are populated progressively
+                h = layer(h, attn_mask, position_ids, True)
             if not self.per_modality_final_norm:
                 h = self.final_norm(h)
         else:
             h = self.transformer(h, attn_mask, position_ids)
         # Cache full sequence for naive extend
+        # Track current per-example seq_len for decode positions
+        if input_mask is not None:
+            seq_len_vec = input_mask.sum(dim=1).to(torch.long)
+        else:
+            seq_len_vec = torch.full((h.shape[0],), h.shape[1], device=h.device, dtype=torch.long)
+        # Initialize cache window tracking
+        if isinstance(cache_size, int) and cache_size > 0:
+            win = torch.as_tensor(int(cache_size), device=h.device, dtype=torch.long)
+            # Begin is max(0, S - cache_size); End is S-1
+            cache_begin = torch.clamp(seq_len_vec - win, min=0)
+            cache_end = torch.clamp(seq_len_vec - 1, min=0)
+            cache_size_val = win
+        else:
+            cache_begin = torch.zeros_like(seq_len_vec)
+            cache_end = torch.clamp(seq_len_vec - 1, min=0)
+            cache_size_val = None
         self._decode_cache = {
             'hidden': h.detach(),
-            'input_mask': (input_mask.detach() if input_mask is not None else None)
+            'input_mask': (input_mask.detach() if input_mask is not None else None),
+            'seq_len': seq_len_vec.detach(),
+            'cache_begin': cache_begin.detach(),
+            'cache_end': cache_end.detach(),
+            'cache_size': (int(cache_size_val.item()) if isinstance(cache_size_val, torch.Tensor) else (int(cache_size) if isinstance(cache_size, int) and cache_size > 0 else None)),
         }
         return h[:, -1:, :]
 
@@ -674,65 +731,197 @@ class JetFormer(nn.Module):
     def extend_cache(self, x_next: torch.Tensor) -> torch.Tensor:
         """Extend decode cache with one more embedded token and return last prelogits.
 
-        This recomputes the full sequence for correctness (not optimized KV cache).
+        Uses internal per-layer KV caches. Falls back to full recompute if cache missing.
         Args:
             x_next: [B,1,D] next-step embedding
         Returns:
             last_prelogits: [B,1,D]
         """
-        if not isinstance(self._decode_cache, dict) or 'hidden' not in self._decode_cache:
-            # No cache initialized; just return projection of x_next through one pass
+        if not isinstance(self._decode_cache, dict) or 'seq_len' not in self._decode_cache:
+            # Fallback: no cache -> single-token forward with trivial masks
             h = x_next
             seq_len = x_next.shape[1]
             attn = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=x_next.device)).unsqueeze(0).unsqueeze(1)
             pos = torch.arange(seq_len, device=x_next.device).unsqueeze(0)
             if isinstance(self.transformer, nn.ModuleList):
                 for layer in self.transformer:
-                    h = layer(h, attn, pos)
+                    h = layer(h, attn, pos, True)
                 if not self.per_modality_final_norm:
                     h = self.final_norm(h)
             else:
                 h = self.transformer(h, attn, pos)
             return h[:, -1:, :]
-        prev_h = self._decode_cache['hidden']  # [B,L,D]
-        h_seq = torch.cat([prev_h, x_next], dim=1)
-        B, L, _ = h_seq.shape
-        attn = torch.tril(torch.ones(L, L, dtype=torch.bool, device=h_seq.device)).unsqueeze(0).unsqueeze(1)
-        pos = torch.arange(L, device=h_seq.device).unsqueeze(0).expand(B, -1)
-        h = h_seq
+
+        seq_len_vec = self._decode_cache['seq_len']  # [B]
+        cache_begin = self._decode_cache.get('cache_begin', torch.zeros_like(seq_len_vec))
+        cache_end = self._decode_cache.get('cache_end', torch.clamp(seq_len_vec - 1, min=0))
+        cache_size = self._decode_cache.get('cache_size', None)
+        # Next positions are the current seq_len for each example
+        pos = seq_len_vec.view(-1, 1)
+        # Build explicit attention mask over current cached keys [0..S-1] with an optional sliding window [begin..end]
+        B = x_next.shape[0]
+        S_all = (seq_len_vec + 1).to(torch.long)  # after appending one token
+        # Update window begin/end for this step without mutating cache until after forward
+        new_end = cache_end + 1
+        if isinstance(cache_size, int) and cache_size > 0:
+            win_sz = torch.clamp(new_end - cache_begin + 1, min=1)  # previous window size
+            desired = torch.full_like(win_sz, int(cache_size))
+            new_win = torch.minimum(win_sz + 1, desired)
+            new_begin = torch.clamp(new_end - new_win + 1, min=0)
+        else:
+            new_begin = torch.zeros_like(new_end)
+        # Build [B,1,1,S_all] boolean mask allowing keys in [new_begin_i, S_all_i-1]
+        max_S = int(S_all.max().item())
+        rng = torch.arange(max_S, device=x_next.device).view(1, 1, 1, -1)  # [1,1,1,S*]
+        # For broadcasting, compute per-batch S_all masks then clip
+        allowed = []
+        for i in range(B):
+            s_i = int(S_all[i].item())
+            nb = int(new_begin[i].item())
+            v = (rng[..., :s_i] >= nb)
+            allowed.append(v)
+        attn = torch.zeros(B, 1, 1, max_S, dtype=torch.bool, device=x_next.device)
+        for i, v in enumerate(allowed):
+            attn[i, :, :, : v.shape[-1]] = v
+        h = x_next
         if isinstance(self.transformer, nn.ModuleList):
             for layer in self.transformer:
-                h = layer(h, attn, pos)
+                # Provide explicit mask to avoid relying on implicit causal flag
+                h = layer(h, attn, pos, True)
             if not self.per_modality_final_norm:
                 h = self.final_norm(h)
         else:
             h = self.transformer(h, attn, pos)
-        # Update cache
-        self._decode_cache['hidden'] = h.detach()
+        # Update cache tracking for next step
+        self._decode_cache['seq_len'] = (seq_len_vec + 1).detach()
+        self._decode_cache['cache_end'] = new_end.detach()
+        self._decode_cache['cache_begin'] = new_begin.detach()
         return h[:, -1:, :]
 
-    def compute_image_hidden(self, text_tokens, image_tokens, text_first_mask, input_mask, drop_text_cond_mask=None, class_ids=None):
+    # ==== JAX-parity APIs for sampling distribution ====
+    @torch.no_grad()
+    def get_pmf(self, logits: torch.Tensor) -> torch.distributions.Categorical:
+        """Return categorical over vocabulary for text logits."""
+        return torch.distributions.Categorical(logits=logits)
+
+    @torch.no_grad()
+    def get_pdf(self, image_logits: torch.Tensor, *, temperature_scales: float | None = None, temperature_probs: float | None = None):
+        """Return PDF wrapper over image logits.
+
+        - Multivariate mode: lower-triangular parameterization (Triangular Normal)
+        - Diagonal GMM mode: mixture-of-diagonal Gaussians
+        Applies optional temperatures to mixture logits and scales.
+        """
+        if self.multivariate:
+            # logits: [..., d^2 + d] => lower-triangular scale params + loc
+            *leading, last = image_logits.shape
+            d = int(self.out_dim)
+            assert last == d * d + d, f"Expected {d*d + d} logits for multivariate, got {last}"
+            scales = image_logits[..., : d * d]
+            locs = image_logits[..., d * d :]
+            locs = locs.view(*leading, d)
+            # Square-plus for positive diagonal; clamp with scale_tol
+            scales = (scales + torch.sqrt(scales * scales + torch.tensor(4.0, dtype=scales.dtype, device=scales.device))) / 2.0
+            scales = scales.view(*leading, d, d)
+            eye = torch.eye(d, device=scales.device, dtype=scales.dtype) * float(self.scale_tol)
+            scales = torch.maximum(scales, eye)
+            if temperature_scales is not None:
+                scales = scales * float(temperature_scales)
+
+            class _TriNormal:
+                def __init__(self, mu, tri):
+                    self.mu = mu
+                    self.tri = torch.tril(tri)  # only lower-tri part
+                def sample(self, seed: torch.Tensor | None = None):
+                    eps = torch.randn_like(self.mu)
+                    # y = L * eps + mu
+                    y = torch.einsum('...ij,...j->...i', self.tri, eps) + self.mu
+                    return y.unsqueeze(-2)  # add seq dim = 1 for API parity
+                def log_prob(self, x: torch.Tensor):
+                    # x: [B,L,d]
+                    diff = (x - self.mu.unsqueeze(-2))  # broadcast over L
+                    # solve L * z = diff  -> z = L^{-1} diff
+                    # approximate via triangular solve per element (batch-unsafe fallback)
+                    # flatten batch dims
+                    B = diff.shape[0]
+                    Lseq = diff.shape[1]
+                    d = diff.shape[-1]
+                    tri = self.tri
+                    tri = tri.unsqueeze(-3).expand(B, Lseq, d, d)
+                    z = torch.linalg.solve_triangular(tri, diff.unsqueeze(-1), upper=False).squeeze(-1)
+                    log_det = torch.log(torch.diagonal(self.tri, dim1=-2, dim2=-1).abs() + 1e-12).sum(-1).unsqueeze(-1)
+                    quad = 0.5 * (z * z).sum(-1)
+                    const = 0.5 * d * math.log(2.0 * math.pi)
+                    return -(quad + const) + log_det
+            return _TriNormal(locs, scales)
+        else:
+            mix_logits, means, scales = self.gmm_params(image_logits)
+            if temperature_probs is not None:
+                try:
+                    mix_logits = mix_logits * float(temperature_probs)
+                except Exception:
+                    pass
+            if temperature_scales is not None:
+                try:
+                    scales = scales * float(temperature_scales)
+                except Exception:
+                    pass
+
+            class _DiagMixture:
+                def __init__(self, mix, mu, sigma, scale_tol: float):
+                    self.mix = mix
+                    self.mu = mu
+                    self.sigma = sigma.clamp_min(float(scale_tol))
+                def sample(self, seed: torch.Tensor | None = None):
+                    B, L, K = self.mix.shape
+                    mix = torch.distributions.Categorical(logits=self.mix.view(B * L, K))
+                    comp_idx = mix.sample().view(B, L)
+                    b = torch.arange(B, device=self.mix.device).unsqueeze(1).expand(B, L)
+                    l = torch.arange(L, device=self.mix.device).unsqueeze(0).expand(B, L)
+                    sel_mu = self.mu[b, l, comp_idx, :]
+                    sel_sigma = self.sigma[b, l, comp_idx, :]
+                    normal = torch.distributions.Normal(sel_mu, sel_sigma)
+                    return normal.sample()
+                def log_prob(self, x: torch.Tensor):
+                    B, L, K = self.mix.shape
+                    x_exp = x.unsqueeze(2)
+                    var = (self.sigma * self.sigma).clamp_min(1e-12)
+                    log_two_pi = torch.log(torch.tensor(2.0 * math.pi, device=self.mix.device, dtype=self.mix.dtype))
+                    log_norm_const = -0.5 * (log_two_pi + torch.log(var))
+                    log_exp_term = -0.5 * ((x_exp - self.mu) * (x_exp - self.mu) / var)
+                    log_normal = (log_norm_const + log_exp_term).sum(dim=-1)
+                    logZ = torch.logsumexp(self.mix, dim=-1)
+                    numer = torch.logsumexp(self.mix + log_normal, dim=-1)
+                    return numer - logZ
+            return _DiagMixture(mix_logits, means, scales, scale_tol=self.scale_tol)
+
+    def compute_image_hidden(self, text_tokens, image_tokens, text_first_mask, input_mask, drop_text_cond_mask=None):
         """Return transformer hidden states for image positions. [B, L_img, D]."""
         batch_size = text_tokens.shape[0]
         device = text_tokens.device
-        x, attn_mask, position_ids = self.embed_sequence(text_tokens, image_tokens, text_first_mask, input_mask, drop_text_cond_mask, class_ids)
+        x, attn_mask, position_ids = self.embed_sequence(text_tokens, image_tokens, text_first_mask, input_mask, drop_text_cond_mask)
         if isinstance(self.transformer, nn.ModuleList):
             for layer in self.transformer:
                 if self.grad_checkpoint_transformer and self.training:
-                    x = checkpoint.checkpoint(layer, x, attn_mask, position_ids)
+                    x = checkpoint.checkpoint(layer, x, attn_mask, position_ids, False)
                 else:
-                    x = layer(x, attn_mask, position_ids)
+                    x = layer(x, attn_mask, position_ids, False)
             x = self.final_norm(x)
         else:
             x = self.transformer(x, attn_mask, position_ids)
 
         text_seq_len = text_tokens.shape[1]
         image_seq_len = image_tokens.shape[1]
+        # Match JAX split logic, including support for repeated vocab segments.
+        repeats = int(self.num_vocab_repeats)
         if self.use_boi_token:
-            image_out_when_second = x[:, text_seq_len+1:text_seq_len+1+image_seq_len]
+            # [BOS, text(repeats*L_txt), BOI, image(L_img)] when text-first (image second)
+            # [BOI, image(L_img), BOS, text(repeats*L_txt)] when image-first (image first)
+            image_out_when_second = x[:, repeats * text_seq_len + 1 : repeats * text_seq_len + 1 + image_seq_len]
             image_out_when_first = x[:, :image_seq_len]
         else:
-            image_out_when_second = x[:, :image_seq_len]
+            # [BOS, text(repeats*L_txt), image(L_img)] vs [BOS, image(L_img), text(repeats*L_txt)]
+            image_out_when_second = x[:, repeats * text_seq_len : repeats * text_seq_len + image_seq_len]
             image_out_when_first = x[:, :image_seq_len]
         text_first_expanded = text_first_mask.reshape(batch_size, 1, 1).to(device)
         image_hidden = torch.where(
@@ -744,41 +933,16 @@ class JetFormer(nn.Module):
 
     @torch.no_grad()
     def sample_from_hidden_mixture_first(self, hidden_pos: torch.Tensor) -> torch.Tensor:
-        """Mixture-first sampling for single position. hidden_pos: [B,1,D] -> [B,1,image_ar_dim]."""
-        B = hidden_pos.shape[0]
-        d = self.image_ar_dim
-        k = self.num_mixtures
-        W = self.img_head.weight
-        b = self.img_head.bias if getattr(self.img_head, 'bias', None) is not None else None
-        dtype_w = W.dtype
-        x = hidden_pos.squeeze(1).to(dtype_w)
-        # Mixture logits
-        W_mix = W[:k, :]
-        b_mix = (b[:k] if b is not None else None)
-        mix_logits = F.linear(x, W_mix, b_mix)
-        mix = torch.distributions.Categorical(logits=mix_logits.to(torch.float32))
-        comp_idx = mix.sample()
-        means_out = torch.empty(B, d, device=x.device, dtype=dtype_w)
-        scales_out = torch.empty(B, d, device=x.device, dtype=dtype_w)
-        for i in range(B):
-            ci = int(comp_idx[i].item())
-            rows_means_start = k + ci * d
-            rows_means_end = rows_means_start + d
-            rows_scales_start = k + k * d + ci * d
-            rows_scales_end = rows_scales_start + d
-            W_means_slice = W[rows_means_start:rows_means_end, :]
-            W_scales_slice = W[rows_scales_start:rows_scales_end, :]
-            b_means_slice = (b[rows_means_start:rows_means_end] if b is not None else None)
-            b_scales_slice = (b[rows_scales_start:rows_scales_end] if b is not None else None)
-            means_out[i] = F.linear(x[i:i+1], W_means_slice, b_means_slice).squeeze(0)
-            raw_scales_i = F.linear(x[i:i+1], W_scales_slice, b_scales_slice).squeeze(0)
-            scales_out[i] = raw_scales_i
-        scales = (scales_out + torch.sqrt(scales_out * scales_out + torch.tensor(4.0, dtype=scales_out.dtype, device=scales_out.device))) / 2.0
-        min_eps = torch.tensor(1e-6, dtype=scales.dtype, device=scales.device)
-        scales = torch.maximum(scales, min_eps)
-        normal = torch.distributions.Normal(means_out.to(torch.float32), scales.to(torch.float32))
-        sampled = normal.sample().unsqueeze(1)
-        return sampled
+        """Mixture-first sampling via GMM params. hidden_pos: [B,1,D] -> [B,1,image_ar_dim]."""
+        # Compute logits for this single position
+        logits = self.img_head(hidden_pos)  # [B,1,K + 2*K*d]
+        mix_logits, means, scales = self.gmm_params(logits)  # shapes [B,1,K], [B,1,K,d], [B,1,K,d]
+        # Squeeze sequence dim and sample using utility
+        mix_logits_b = mix_logits.squeeze(1)
+        means_b = means.squeeze(1)
+        scales_b = scales.squeeze(1)
+        samples = self.sample_gmm_fast(mix_logits_b, means_b, scales_b)  # [B,d]
+        return samples.unsqueeze(1)
     
     def gmm(self, image_logits, target_tokens):
         """Compute NLL for image tokens using mixture of Gaussians (delegates to utils)."""
@@ -793,6 +957,25 @@ class JetFormer(nn.Module):
     def sample_gmm_fast(self, mix_logits_pos, means_pos, scales_pos):
         """Sample from GMM at a single position via utility function."""
         return mix_sample_gmm(mix_logits_pos, means_pos, scales_pos)
+
+    @torch.no_grad()
+    def get_drop_labels(self, p: float, batch_size: int, device: torch.device | None = None) -> torch.BoolTensor:
+        """Bernoulli(p) per-example mask for dropping labels (CFG-style).
+
+        Args:
+            p: probability in [0,1] of dropping labels for each example
+            batch_size: number of examples
+            device: optional device for the returned tensor
+        Returns:
+            BoolTensor[batch_size] where True indicates labels should be dropped.
+        """
+        dev = (device if device is not None else self.text_emb.weight.device)
+        if p <= 0.0:
+            return torch.zeros(int(batch_size), dtype=torch.bool, device=dev)
+        if p >= 1.0:
+            return torch.ones(int(batch_size), dtype=torch.bool, device=dev)
+        probs = torch.full((int(batch_size),), float(p), device=dev)
+        return torch.bernoulli(probs).bool()
     
     def flow(self, images):
         # images expected as B,C,H,W in [-1,1]; map to [0,1]

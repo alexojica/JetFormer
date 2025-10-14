@@ -42,3 +42,19 @@ def test_split_indices_boi_and_repeats():
     assert attn.shape == (B, 1, expected_len, expected_len)
 
 
+@torch.no_grad()
+def test_embed_sequence_no_boi_masking_and_positions():
+    # Ensure positions are derived from input mask regardless of rope_skip_pad setting
+    model = JetFormer(use_boi_token=False, bos_id=1, nolabel_id=0)
+    B, T_txt, L_img, D_img = 1, 3, model.image_seq_len, model.image_ar_dim
+    text_tokens = torch.randint(0, model.vocab_size, (B, T_txt))
+    text_mask = torch.ones(B, T_txt, dtype=torch.bool)
+    image_tokens = torch.zeros(B, L_img, D_img)
+    text_first_mask = torch.tensor([True])
+    x, attn_mask, pos = model.embed_sequence(text_tokens, image_tokens, text_first_mask, text_mask)
+    # pos should be non-decreasing and start at 0 for valid tokens
+    assert pos.min().item() >= 0
+    diffs = torch.diff(pos[0])
+    assert (diffs >= 0).all()
+
+

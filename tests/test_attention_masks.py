@@ -1,4 +1,37 @@
 import torch
+
+
+def test_right_align_shapes_and_validity():
+    from src.jetformer import JetFormer
+    model = JetFormer()
+    B, L, D = 2, 8, model.d_model
+    x = torch.randn(B, L, D)
+    attn = torch.tril(torch.ones(L, L, dtype=torch.bool)).unsqueeze(0).expand(B, -1, -1)
+    mask = torch.tensor([[True, True, False, False, True, True, True, False],
+                         [False, True, True, False, True, False, True, True]])
+    xa, attn_a, mask_a = model._right_align(x, attn, mask)
+    assert xa.shape == x.shape
+    assert attn_a.shape == attn.shape
+    assert mask_a.shape == mask.shape
+    # Ensure mask_a is right-aligned per-row
+    for b in range(B):
+        t = mask_a[b].nonzero(as_tuple=False).view(-1)
+        if t.numel() > 0:
+            assert t.min().item() >= 0
+            assert torch.all(t == torch.arange(L - t.numel(), L))
+
+
+def test_gmm_params_square_plus_threshold():
+    from src.utils.losses import gmm_params
+    B, L, K, D = 2, 3, 4, 5
+    logits = torch.randn(B, L, K + 2 * K * D)
+    mix, means, scales = gmm_params(logits, K, D)
+    assert mix.shape == (B, L, K)
+    assert means.shape == (B, L, K, D)
+    assert scales.shape == (B, L, K, D)
+    assert torch.isfinite(scales).all()
+    assert (scales > 0).all()
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 

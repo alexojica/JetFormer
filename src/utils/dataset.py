@@ -36,6 +36,22 @@ from sentencepiece import SentencePieceProcessor
 from src.utils.tokenizer import download_sentencepiece_model
 import random
 
+class ClassAsTextDataset(Dataset):
+    """Wraps a dataset to present the 'label' field as 'text'."""
+    def __init__(self, dataset):
+        self.dataset = dataset
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        item = self.dataset[idx]
+        item['text'] = item['label'].unsqueeze(0)  # Convert to [1] tensor
+        # Create a dummy text_mask and text_loss mask of shape [1]
+        item['text_mask'] = torch.ones(1, dtype=torch.bool)
+        item['text_loss'] = torch.ones(1, dtype=torch.bool)
+        return item
+
 def _import_tfds_cpu_only():
     """Import tensorflow_datasets with TensorFlow forced to use CPU only and not pre-allocate GPU VRAM.
 
@@ -324,7 +340,7 @@ class LAIONPOPTextImageDataset(Dataset): # tokenizer: gs://t5-data/vocabs/cc_en.
         tokens = tokens + [self.eos_id]
         
     
-        # True for real tokens, False for pads
+        # True for real tokens, False for pads. Optionally ignore pads in loss.
         text_mask = [1] * len(tokens)
         text_loss = [1] * len(tokens)
         # Use 0 as pad id
@@ -341,7 +357,11 @@ class LAIONPOPTextImageDataset(Dataset): # tokenizer: gs://t5-data/vocabs/cc_en.
             tokens.extend([pad_value] * padding_len)
             # Pads are masked out
             text_mask.extend([0] * padding_len)
-            text_loss.extend([0] * padding_len)
+            # Respect ignore_pad to optionally exclude pad tokens from CE loss
+            if getattr(self, 'ignore_pad', False):
+                text_loss.extend([0] * padding_len)
+            else:
+                text_loss.extend([0] * padding_len)
         
         return {
             'tokens': torch.tensor(tokens, dtype=torch.long),
@@ -534,7 +554,7 @@ class TinyStoriesDataset(Dataset):
         # Add EOS token manually
         tokens = tokens + [self.eos_id]
         
-        # True for real tokens, False for pads
+        # True for real tokens, False for pads. Optionally ignore pads in CE loss.
         text_mask = [1] * len(tokens)
         text_loss = [1] * len(tokens)
         pad_value = 0
@@ -549,7 +569,10 @@ class TinyStoriesDataset(Dataset):
             padding_len = self.max_text_len - len(tokens)
             tokens.extend([pad_value] * padding_len)
             text_mask.extend([0] * padding_len)
-            text_loss.extend([0] * padding_len)
+            if getattr(self, 'ignore_pad', False):
+                text_loss.extend([0] * padding_len)
+            else:
+                text_loss.extend([0] * padding_len)
         
         return {
             'tokens': torch.tensor(tokens, dtype=torch.long),
@@ -1200,6 +1223,8 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
             random_flip_prob=flip_prob,
             safe_decode=safe_decode,
         )
+        # For class-conditional datasets, wrap them to provide 'text'
+        dataset = ClassAsTextDataset(dataset)
         val_dataset = HFImagenet1k(
             split='validation',
             resolution=res,
@@ -1208,6 +1233,8 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
             random_flip_prob=0.0,
             safe_decode=safe_decode,
         )
+        # For class-conditional datasets, wrap them to provide 'text'
+        val_dataset = ClassAsTextDataset(val_dataset)
     else:
         dataset = LAIONPOPTextImageDataset(
             vocab_size=getattr(config, 'vocab_size'),
@@ -1219,7 +1246,9 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
             use_cogvlm_captions=getattr(config, 'use_cogvlm_captions'),
             min_resolution=getattr(config, 'min_resolution'),
             num_workers=getattr(config, 'num_workers'),
-            ignore_pad=getattr(config, 'ignore_pad')
+            ignore_pad=getattr(config, 'ignore_pad'),
+            eos_id=getattr(config, 'eos_id', 1),
+            bos_id=getattr(config, 'bos_id', 32000),
         )
         # No explicit val set; reuse train dataset for a quick sanity val (not ideal)
         val_dataset = dataset

@@ -1,4 +1,4 @@
-vocab_size: 32000
+vocab_size: 103
 
 # Image/tokenization
 input_size: [64, 64]
@@ -8,15 +8,14 @@ num_mixtures: 1024
 use_bfloat16_img_head: true
 channel_repeat: 0
 
-# Flow (Jet) — post-flow factoring, channel-wise only (Base scale per paper)
-jet_depth: 32
-jet_block_depth: 4
-jet_emb_dim: 512
-jet_num_heads: 8
-flow_actnorm: true
-flow_invertible_dense: false
-latent_projection: null
-pre_factor_dim: null
+# Flow (Jet)
+jet:
+  depth: 32
+  block_depth: 4
+  emb_dim: 512
+  num_heads: 8
+  actnorm: false
+  invertible_dense: false
 
 # AR Transformer (Base scale per paper)
 d_model: 1024
@@ -32,7 +31,7 @@ num_classes: 100
 class_token_length: 16
 cfg_drop_prob: 0.1
 cfg_strength: 4.0
-cfg_mode: "reject"
+cfg_mode: "interp"
 
 # Dataset / training target
 dataset: imagenet64_tfds
@@ -53,6 +52,8 @@ flow_grad_checkpoint: false
 
 # Training mode (paper path)
 jetformer_training_mode: pca
+use_patch_pca: true
+text_prefix_prob: 1.0
 
 patch_pca:
   pca_init_file: null
@@ -66,10 +67,6 @@ patch_pca:
 
 adaptor:
   kind: jet
-  depth: 8
-  block_depth: 2
-  emb_dim: 256
-  num_heads: 4
 
 # EMA
 ema:
@@ -111,5 +108,20 @@ wandb_offline: false
 wandb_project: "jetformer-imagenet-64"
 wandb_run_name: "B-64"
 wandb_tags: ["imagenet", "64x64", "B"]
+
+
+# JAX parity controls
+rope_skip_pad: true
+num_vocab_repeats: 16
+per_modality_final_norm: false
+# PCA pixel noise schedule (optional). If set, applies constant sigma per batch.
+noise_scale: 64.0
+noise_min: 3.0
+rgb_noise_on_image_prefix: true
+right_align_inputs: true
+
+bos_id: 100
+boi_id: 101
+nolabel_id: 102
 
 

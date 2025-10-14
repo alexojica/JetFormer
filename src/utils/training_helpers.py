@@ -441,16 +441,34 @@ def train_step(model: torch.nn.Module,
             text_first_prob = float(getattr(config, 'text_prefix_prob', 0.5))
             input_noise_std = float(getattr(config, 'input_noise_std', 0.0))
             stop_grad_nvp_prefix = bool(getattr(config, 'stop_grad_nvp_prefix', False))
+            # PCA pixel noise schedule parameters (JAX parity)
+            noise_scale = None
+            noise_min = None
+            try:
+                # cosine schedule precomputed above is specific to flow trainer; here we allow constant value
+                noise_scale = float(getattr(config, 'noise_scale')) if hasattr(config, 'noise_scale') else None
+            except Exception:
+                noise_scale = None
+            try:
+                noise_min = float(getattr(config, 'noise_min')) if hasattr(config, 'noise_min') else None
+            except Exception:
+                noise_min = None
+            rgb_noise_on_image_prefix = bool(getattr(config, 'rgb_noise_on_image_prefix', True))
             from src.utils.losses import compute_jetformer_pca_loss
             out = compute_jetformer_pca_loss(
                 model,
                 batch,
+                step,
+                total_steps,
                 text_first_prob=text_first_prob,
                 input_noise_std=input_noise_std,
                 cfg_drop_prob=cfg_drop_prob,
                 loss_on_prefix=bool(getattr(config, 'loss_on_prefix', True)),
                 stop_grad_nvp_prefix=stop_grad_nvp_prefix,
                 advanced_metrics=advanced_metrics,
+                noise_scale=noise_scale,
+                noise_min=noise_min,
+                rgb_noise_on_image_prefix=rgb_noise_on_image_prefix,
             )
         else:
             # Legacy pipeline that uses RGB noise curriculum and flow encode
@@ -465,7 +483,7 @@ def train_step(model: torch.nn.Module,
                 rgb_sigma_final=rgb_sigma_final,
                 latent_noise_std=latent_noise_std,
                 cfg_drop_prob=cfg_drop_prob,
-                loss_on_prefix=bool(getattr(config, 'loss_on_prefix', True)),
+                loss_on_prefix=bool(getattr(config, 'loss_on_prefix', False)),
                 eval_no_rgb_noise=eval_no_rgb_noise,
                 advanced_metrics=advanced_metrics,
                 text_first_prob=float(getattr(config, 'text_prefix_prob', 0.5)),

@@ -10,10 +10,11 @@ dropout: 0.1
 num_mixtures: 1024
 
 # Flow (Jet)
-jet_depth: 32           # coupling blocks
-jet_block_depth: 4
-jet_emb_dim: 512
-jet_num_heads: 8
+jet:
+  depth: 32
+  block_depth: 4
+  emb_dim: 512
+  num_heads: 8
 
 # Image tokenization
 patch_size: 16
@@ -37,4 +38,21 @@ image_loss_weight: 1.0
 # CFG
 cfg_strength: 4.0
 cfg_drop_prob: 0.1
+
+# Parity toggles
+right_align_inputs: true
+use_boi_token: true
+untie_output_vocab: false
+strict_special_ids: true
+bos_id: 1
+nolabel_id: 0
+# Optional boi_id when BOI used; set appropriately for tokenizer
+boi_id: 2
+
+# PCA path knobs (used when training_mode == 'pca')
+noise_scale: 1.0
+noise_min: 0.0
+rgb_noise_on_image_prefix: true
+text_prefix_prob: 0.5
+input_noise_std: 0.0
 

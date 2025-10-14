@@ -11,15 +11,14 @@ num_mixtures: 512
 use_bfloat16_img_head: true
 channel_repeat: 0
 
-# Flow (Jet) — post-flow factoring
-jet_depth: 24
-jet_block_depth: 4
-jet_emb_dim: 384
-jet_num_heads: 6
-flow_actnorm: true
-flow_invertible_dense: false
-latent_projection: null
-pre_factor_dim: null  # keep POST-flow factoring
+# Flow (Jet)
+jet:
+  depth: 24
+  block_depth: 4
+  emb_dim: 384
+  num_heads: 6
+  actnorm: true
+  invertible_dense: false
 
 # AR Transformer (will be frozen for flow-only)
 d_model: 512
