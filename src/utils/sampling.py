@@ -67,64 +67,6 @@ def generate_text_to_image_samples(model, dataset, device, num_samples: int = 3,
     return samples
 
 
-class CFGDensityDiagGMM:
-    """CFG density for diagonal GMMs: log p_cfg(x) = (1+w) log p_c(x) - w log p_u(x).
-
-    Provides sample() via a pragmatic accept-reject using a data-adaptive envelope
-    centered at conditional mode, falling back to conditional sample if needed.
-    """
-
-    def __init__(self, mix_c, means_c, scales_c, mix_u, means_u, scales_u, w: float):
-        self.w = float(w)
-        self.mix_c = mix_c
-        self.means_c = means_c
-        self.scales_c = scales_c
-        self.mix_u = mix_u
-        self.means_u = means_u
-        self.scales_u = scales_u
-
-        # Select per-batch dominant component under conditional as a center
-        idx = torch.argmax(mix_c, dim=-1)  # [B]
-        b = torch.arange(idx.shape[0], device=idx.device)
-        self.loc = means_c[b, idx, :]
-        # Envelope scale: max of cond/uncond at picked component, padded
-        base_scale = torch.maximum(scales_c[b, idx, :], scales_u[b, idx, :])
-        self.proposal = torch.distributions.Normal(self.loc, (2.0 * base_scale).clamp_min(1e-6))
-
-    def _logp_mixture(self, mix_logits, means, scales, x):
-        B, k = mix_logits.shape
-        logZ = torch.logsumexp(mix_logits, dim=-1)
-        x_exp = x.unsqueeze(1).expand(-1, k, -1)
-        var = (scales * scales).clamp_min(1e-12)
-        log_two_pi = torch.log(torch.tensor(2.0 * math.pi, device=x.device, dtype=x.dtype))
-        log_norm_const = -0.5 * (log_two_pi + torch.log(var))
-        log_exp_term = -0.5 * ((x_exp - means) * (x_exp - means) / var)
-        log_normal = (log_norm_const + log_exp_term).sum(dim=-1)
-        numer = torch.logsumexp(mix_logits + log_normal, dim=-1)
-        return numer - logZ
-
-    def _logp_cfg(self, x):
-        log_pc = self._logp_mixture(self.mix_c, self.means_c, self.scales_c, x)
-        log_pu = self._logp_mixture(self.mix_u, self.means_u, self.scales_u, x)
-        return (1.0 + self.w) * log_pc - self.w * log_pu
-
-    @torch.no_grad()
-    def sample(self, max_samples: int = 256):
-        B, D = self.loc.shape
-        # Precompute envelope factor at center
-        log_p_center = self._logp_cfg(self.loc)
-        log_q_center = self.proposal.log_prob(self.loc).sum(dim=-1)
-        fac = torch.exp((log_p_center - log_q_center)).clamp_min(1.0) * 2.0
-        for _ in range(max(1, min(max_samples, 1024))):
-            x = self.proposal.sample()
-            log_p = self._logp_cfg(x)
-            log_q = self.proposal.log_prob(x).sum(-1) + torch.log(fac)
-            accept = torch.rand(B, device=x.device) < torch.exp((log_p - log_q).clamp(max=0.0))
-            if bool(accept.any()):
-                return torch.where(accept.view(B, 1), x, self.loc)
-        return self.loc
-
-
 @torch.no_grad()
 def generate_text_to_image_samples_cfg(
     model,
@@ -173,15 +115,12 @@ def generate_text_to_image_samples_cfg(
                 prompt_value = prompt_text
 
             # --- 2. Prefill KV cache for conditional and unconditional passes ---
-            
-            # This logic is a simplified version of embed_sequence for prefix only
             def get_prefix(is_unconditional):
                 drop_mask = torch.tensor([is_unconditional], device=device, dtype=torch.bool)
                 # We are always text-first for sampling
                 text_first_mask = torch.tensor([True], device=device, dtype=torch.bool)
                 
-                # Re-implementing the prefix part of embed_sequence here
-                x, attn_mask, position_ids, padding_mask = model.embed_sequence(
+                x, attn_mask, _, padding_mask = model.embed_sequence(
                     text_tokens, 
                     torch.empty(1, 0, model.image_ar_dim, device=device), # No image tokens in prefix
                     text_first_mask, 
@@ -189,16 +128,11 @@ def generate_text_to_image_samples_cfg(
                     drop_text_cond_mask=drop_mask
                 )
                 
-                # The returned sequence from embed_sequence is shifted left (missing last token).
-                # For prefill, we want the full prefix.
-                # The sequence is [BOS, text, BOI] (if use_boi). `embed_sequence` with empty image_tokens will produce [BOS, text]
-                # We need to manually add BOI if used.
+                # The returned sequence from embed_sequence is shifted left. For prefill, we need the full prefix.
                 if model.use_boi_token:
                     boi_emb = model.lookup_token(model.boi_id, 1)
                     x = torch.cat([x, boi_emb], dim=1)
                     padding_mask = torch.cat([padding_mask, torch.ones(1, 1, dtype=torch.bool, device=device)], dim=1)
-                    new_pos = position_ids[:, -1:] + 1
-                    position_ids = torch.cat([position_ids, new_pos], dim=1)
 
                 seq_len = x.shape[1]
                 causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=device, dtype=torch.bool))
@@ -211,8 +145,8 @@ def generate_text_to_image_samples_cfg(
             prefix_c, attn_mask_c, input_mask_c = get_prefix(is_unconditional=False)
             prefix_u, attn_mask_u, input_mask_u = get_prefix(is_unconditional=True)
 
-            last_logits_c, cache_c = model.prefill_cache(prefix_c, attn_mask_c, input_mask_c, cache_size=model.max_seq_len)
-            last_logits_u, cache_u = model.prefill_cache(prefix_u, attn_mask_u, input_mask_u, cache_size=model.max_seq_len)
+            last_prelogits_c, cache_c = model.prefill_cache(prefix_c, attn_mask_c, input_mask_c, cache_size=model.max_seq_len)
+            last_prelogits_u, cache_u = model.prefill_cache(prefix_u, attn_mask_u, input_mask_u, cache_size=model.max_seq_len)
 
             # --- 3. Autoregressive decoding loop ---
             ar_dim = getattr(model, 'image_ar_dim', model.image_token_dim)
@@ -221,12 +155,12 @@ def generate_text_to_image_samples_cfg(
             current_pos = prefix_c.shape[1]
 
             for pos in range(model.image_seq_len):
-                # Apply CFG on logits
-                guided_logits = last_logits_u + cfg_strength * (last_logits_c - last_logits_u)
+                # Apply CFG on pre-logits before the head
+                guided_prelogits = last_prelogits_u + cfg_strength * (last_prelogits_c - last_prelogits_u)
                 
-                # Sample next token
-                pdf = model.get_pdf(guided_logits, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
-                sampled_token = pdf.sample() # Shape: [1, 1, D_ar]
+                # Get PDF from guided pre-logits and sample
+                pdf = model.get_pdf(guided_prelogits, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
+                sampled_token = pdf.sample() # Shape: [B, 1, D_ar]
                 image_tokens[:, pos, :] = sampled_token.squeeze(1)
 
                 if pos == model.image_seq_len - 1:
@@ -236,8 +170,8 @@ def generate_text_to_image_samples_cfg(
                 new_token_emb = model.image_emb(sampled_token)
                 position_ids = torch.tensor([[current_pos + pos + 1]], device=device, dtype=torch.long)
                 
-                last_logits_c, cache_c = model.extend_cache(new_token_emb, cache_c, position_ids)
-                last_logits_u, cache_u = model.extend_cache(new_token_emb, cache_u, position_ids)
+                last_prelogits_c, cache_c = model.extend_cache(new_token_emb, cache_c, position_ids)
+                last_prelogits_u, cache_u = model.extend_cache(new_token_emb, cache_u, position_ids)
 
             # --- 4. Decode final image ---
             full_dim = model.image_token_dim
@@ -330,40 +264,19 @@ def generate_class_conditional_samples(base,
                 text_logits_u, image_logits_u = base(text_tokens, img_tokens, text_first_mask, text_mask, drop_text_cond_mask=base.get_drop_labels(1.0, 1, device=device))
 
                 if pos < image_logits_c.shape[1]:
-                    if cfg_mode == "interp":
-                        mix_c, means_c, scales_c = base.gmm_params(image_logits_c[:, pos:pos+1])
-                        mix_u, means_u, scales_u = base.gmm_params(image_logits_u[:, pos:pos+1])
-                        density = CFGDensityDiagGMM(
-                            mix_c.squeeze(1), means_c.squeeze(1), scales_c.squeeze(1),
-                            mix_u.squeeze(1), means_u.squeeze(1), scales_u.squeeze(1),
-                            w=cfg_strength
-                        )
-                        sampled = density.sample()
-                        img_tokens[0, pos] = sampled[0]
-                    elif cfg_mode == "interp_fast" and fast_mixture_first:
+                    if cfg_mode == "interp_fast" and fast_mixture_first:
+                        # Interpolate in the hidden space before the final projection
                         hid_c = base.compute_image_hidden(text_tokens, img_tokens, text_first_mask, text_mask, drop_text_cond_mask=None)
                         hid_u = base.compute_image_hidden(text_tokens, img_tokens, text_first_mask, text_mask, drop_text_cond_mask=base.get_drop_labels(1.0, 1, device=device))
                         guided_hid = hid_u + cfg_strength * (hid_c - hid_u)
                         pos_hidden = guided_hid[:, pos:pos+1]
                         sampled = base.sample_from_hidden_mixture_first(pos_hidden)
                         img_tokens[0, pos] = sampled[0, 0]
-                    else: # Default to interp mode
+                    else:  # Default to "interp" mode (logit interpolation)
                         guided_logits = image_logits_u + cfg_strength * (image_logits_c - image_logits_u)
-                        if hasattr(base, 'gmm_params'):
-                            mix_logits, means, scales = base.gmm_params(guided_logits[:, pos:pos+1])
-                        else:
-                            mix_logits, means, scales = gmm_params(
-                                guided_logits[:, pos:pos+1], int(getattr(base, 'num_mixtures', 1024)), int(getattr(base, 'image_ar_dim', base.image_token_dim)),
-                                scale_tol=float(getattr(base, 'scale_tol', 1e-6)),
-                            )
-                        mix = torch.distributions.Categorical(logits=mix_logits.squeeze(1))
-                        comp_idx = mix.sample()
-                        bidx = torch.arange(comp_idx.shape[0], device=device)
-                        sel_means = means[:, 0, comp_idx, :]
-                        sel_scales = scales[:, 0, comp_idx, :]
-                        normal = torch.distributions.Normal(sel_means, sel_scales)
-                        sampled = normal.sample()
-                        img_tokens[0, pos] = sampled[0]
+                        pdf = base.get_pdf(guided_logits[:, pos:pos+1])
+                        sampled = pdf.sample()  # [B, 1, D_ar]
+                        img_tokens[0, pos] = sampled.squeeze(0).squeeze(0)
 
             res_dim = max(0, base.image_token_dim - base.image_ar_dim)
             tokens_full = torch.cat([img_tokens, torch.randn(1, base.image_seq_len, res_dim, device=device)], dim=-1) if res_dim > 0 else img_tokens

@@ -7,6 +7,7 @@ import math
 from typing import Sequence, Tuple, Optional, Callable
 import torch.utils.checkpoint as checkpoint
 from src.utils.losses import bits_per_dim_flow
+from src.transformer import GatedMLP
 
 
 def xavier_uniform_init(tensor):
@@ -129,29 +130,23 @@ class Invertible1x1Conv(nn.Module):
         inv_logdet = -Hs * Ws * logdet_W
         return x, inv_logdet.expand(B).clone()
 
+
 class MlpBlock(nn.Module):
-    """A standard Transformer MLP block with two linear layers, GELU activation, and dropout."""
-    def __init__(self, in_dim, mlp_dim=None, dropout=0.0):
+    """A Gemma-style MLP block using GatedMLP."""
+    def __init__(self, in_dim, mlp_dim=None, dropout=0.0, activation="silu"):
         super().__init__()
         self.mlp_dim = mlp_dim or 4 * in_dim
-        self.fc1 = nn.Linear(in_dim, self.mlp_dim)
-        self.gelu = nn.GELU()
-        self.dropout1 = nn.Dropout(dropout)
-        self.fc2 = nn.Linear(self.mlp_dim, in_dim)
-        self.dropout2 = nn.Dropout(dropout)
-
-        xavier_uniform_init(self.fc1.weight)
-        normal_init(1e-6)(self.fc1.bias)
-        xavier_uniform_init(self.fc2.weight)
-        normal_init(1e-6)(self.fc2.bias)
+        self.gated_mlp = GatedMLP(
+            in_features=in_dim,
+            hidden_features=self.mlp_dim,
+            out_features=in_dim,
+            activation=activation
+        )
+        self.dropout = nn.Dropout(dropout)
         
     def forward(self, x):
-        x = self.fc1(x)
-        x = self.gelu(x)
-        x = self.dropout1(x)
-        x = self.fc2(x)
-        x = self.dropout2(x)
-        return x
+        return self.dropout(self.gated_mlp(x))
+
 
 class ViTEncoderBlock(nn.Module):
     """A single Transformer encoder block with Multi-Head Self-Attention and an MLP block."""
@@ -162,7 +157,7 @@ class ViTEncoderBlock(nn.Module):
         self.dropout_attn = nn.Dropout(dropout)
 
         self.norm2 = nn.LayerNorm(emb_dim)
-        self.mlp = MlpBlock(in_dim=emb_dim, mlp_dim=mlp_dim, dropout=dropout)
+        self.mlp = MlpBlock(in_dim=emb_dim, mlp_dim=mlp_dim, dropout=dropout, activation="silu")
 
     def forward(self, x, src_key_padding_mask=None):
         residual = x
@@ -489,45 +484,37 @@ class Coupling(nn.Module):
                 x2_prime = (x2 + bias) * scale
                 x_unproj = torch.cat([x1, x2_prime], dim=-1) # Re-merge channels
 
-            else: # Spatial masking
+            else: # Spatial masking with einops-style rearrange to match JAX
                 # This mode is only supported for ViT, checked in __init__
-                N = x_patched.shape[1]
-                N_half = N // 2
                 
-                # Get indices for the two halves from the permutation matrix
-                perm_indices = self.P_spatial.t().argmax(dim=1)
-                x1_indices = perm_indices[:N_half]
-                x2_indices = perm_indices[N_half:]
+                # Project, then split tokens into two halves for processing
+                with _NoAmpAutocast():
+                    P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
+                    x_proj = torch.einsum("b n c, n m -> b m c", x_patched, P_spatial)
+                
+                # Depth-to-space: reshape to introduce a new sequence dimension for spatial ops
+                # The goal is to match JAX's `einops.rearrange(a, "... n (s c) -> ... (n s) c", s=2)`
+                # which effectively halves the channel dim and doubles the sequence length.
+                B, N, C_patched = x_proj.shape
+                x_rearranged = x_proj.view(B, N, 2, C_patched // 2).transpose(1, 2).reshape(B, N * 2, C_patched // 2)
 
-                # Create a mask to zero-out the features of the second half (x2)
-                # The mask has shape (1, N, 1) to allow broadcasting over batch and channels
-                mask = torch.ones_like(x_patched)
-                mask[:, x2_indices, :] = 0.0
-                
-                # Apply mask and feed to DNN
-                # The DNN sees the full sequence length N, but x2 features are zero.
-                # Positional embeddings are applied to all tokens inside the DNN.
-                x_masked_input = x_patched * mask
-                bias, scale, _ = self.dnn(x_masked_input, context=context)
-                
-                # We only need the bias/scale predictions for the x2 tokens
-                bias_x2 = bias.index_select(1, x2_indices)
-                scale_x2 = scale.index_select(1, x2_indices)
-                # Log-determinant contribution only from transformed (x2) tokens
-                logdet_local = torch.log(scale_x2).view(B, -1).sum(dim=1)
-                logdet = logdet + logdet_local
-                
-                # Select the original x1 and x2 tokens
-                x1_tokens = x_patched.index_select(1, x1_indices)
-                x2_tokens = x_patched.index_select(1, x2_indices)
+                x1_re, x2_re = torch.chunk(x_rearranged, 2, dim=1)
 
-                # Apply affine transform to x2 tokens
-                x2_prime_tokens = (x2_tokens + bias_x2) * scale_x2
+                # DNN operates on the first half of the rearranged sequence
+                bias, scale, logdet_dnn = self.dnn(x1_re, context=context)
+                logdet += logdet_dnn
                 
-                # Scatter the transformed tokens back into a full tensor
-                x_unproj = torch.zeros_like(x_patched)
-                x_unproj.scatter_(1, x1_indices.view(1, -1, 1).expand_as(x1_tokens), x1_tokens)
-                x_unproj.scatter_(1, x2_indices.view(1, -1, 1).expand_as(x2_prime_tokens), x2_prime_tokens)
+                # Transform the second half
+                x2_prime_re = (x2_re + bias) * scale
+                
+                # Merge and undo the rearrange
+                x_merged_re = torch.cat([x1_re, x2_prime_re], dim=1)
+                x_unrearranged = x_merged_re.view(B, 2, N, C_patched // 2).transpose(1, 2).reshape(B, N, C_patched)
+                
+                # Unproject to get original token order
+                with _NoAmpAutocast():
+                    P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
+                    x_unproj = torch.einsum("b m c, m n -> b n c", x_unrearranged, P_spatial.t())
 
         else:
             raise ValueError(f"Unknown masking_mode: {self.masking_mode}")
@@ -615,39 +602,27 @@ class Coupling(nn.Module):
                 x2 = (y2 / scale) - bias
                 x_unproj = torch.cat([y1, x2], dim=-1)
 
-            else: # Spatial masking
-                N = x_patched.shape[1]
-                N_half = N // 2
-                perm_indices = self.P_spatial.t().argmax(dim=1)
-                y1_indices = perm_indices[:N_half]
-                y2_indices = perm_indices[N_half:]
+            else: # Spatial masking with einops-style rearrange to match JAX
+                with _NoAmpAutocast():
+                    P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
+                    y_proj = torch.einsum("b n c, n m -> b m c", x_patched, P_spatial)
+
+                B, N, C_patched = y_proj.shape
+                y_rearranged = y_proj.view(B, N, 2, C_patched // 2).transpose(1, 2).reshape(B, N * 2, C_patched // 2)
+
+                y1_re, y2_re = torch.chunk(y_rearranged, 2, dim=1)
                 
-                # y1_tokens are the same as x1_tokens
-                y1_tokens = x_patched.index_select(1, y1_indices)
-
-                # To get the correct bias/scale, we must reconstruct the *input* to the DNN
-                # from the forward pass: x_patched with x2 features zeroed out.
-                # Since y1_tokens == x1_tokens, we can build this.
-                x_masked_input = torch.zeros_like(x_patched)
-                x_masked_input.scatter_(1, y1_indices.view(1, -1, 1).expand_as(y1_tokens), y1_tokens)
+                bias, scale, logdet_dnn = self.dnn(y1_re, context=context)
+                fwd_logdet += logdet_dnn
                 
-                bias, scale, _ = self.dnn(x_masked_input, context=context)
+                x2_re = (y2_re / scale) - bias
+                
+                x_merged_re = torch.cat([y1_re, x2_re], dim=1)
+                x_unrearranged = x_merged_re.view(B, 2, N, C_patched // 2).transpose(1, 2).reshape(B, N, C_patched)
 
-                # Select the bias and scale for the y2 tokens
-                bias_y2 = bias.index_select(1, y2_indices)
-                scale_y2 = scale.index_select(1, y2_indices)
-                # Forward log-det only from transformed (y2) tokens
-                logdet_local = torch.log(scale_y2).view(B, -1).sum(dim=1)
-                fwd_logdet = fwd_logdet + logdet_local
-
-                # Select the y2 tokens and invert their transformation to get x2_tokens
-                y2_tokens = x_patched.index_select(1, y2_indices)
-                x2_tokens = (y2_tokens / scale_y2) - bias_y2
-
-                # Scatter x1 and x2 tokens back to their original positions
-                x_unproj = torch.zeros_like(x_patched)
-                x_unproj.scatter_(1, y1_indices.view(1, -1, 1).expand_as(y1_tokens), y1_tokens)
-                x_unproj.scatter_(1, y2_indices.view(1, -1, 1).expand_as(x2_tokens), x2_tokens)
+                with _NoAmpAutocast():
+                    P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
+                    x_unproj = torch.einsum("b m c, m n -> b n c", x_unrearranged, P_spatial.t())
         else:
             raise ValueError(f"Unknown masking_mode: {self.masking_mode}")
 

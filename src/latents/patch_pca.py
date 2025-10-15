@@ -137,7 +137,7 @@ class PatchPCA(nn.Module):
         tokens = self._images_to_tokens(images_bchw)  # [B,N,D]
         if self.add_dequant_noise:
             # Small uniform noise in token space (approximate); scaled for [-1,1]
-            tokens = tokens + (torch.rand_like(tokens) - 0.5) / 127.5
+            tokens = tokens + torch.rand_like(tokens) / 127.5
 
         # Apply PCA whitening if enabled and available
         if (not self.skip_pca) and self.pca_loaded and self.whiten:

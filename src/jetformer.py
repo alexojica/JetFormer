@@ -374,24 +374,25 @@ class JetFormer(nn.Module):
         """
         B, L, D = x.shape
         repeats = int(self.num_vocab_repeats)
+        text_len_rep = text_seq_len * repeats
 
         if self.use_boi_token:
             # Sequence layout before shift:
-            #  - Text-first:  [BOS, text(T), BOI, image(I)]
-            #  - Image-first: [BOI, image(I), BOS, text(T)]
+            #  - Text-first:  [BOS, text(T*rep), BOI, image(I)]
+            #  - Image-first: [BOI, image(I), BOS, text(T*rep)]
             # After shift we removed the last token; indexing below follows prior implementation.
-            a_txt = x[:, :text_seq_len]
-            a_img = x[:, repeats * text_seq_len + 1:]
+            a_txt = x[:, :text_len_rep]
+            a_img = x[:, text_len_rep + 1:]
             b_img = x[:, :image_seq_len]
-            b_txt = x[:, image_seq_len + 1:image_seq_len + 1 + text_seq_len]
+            b_txt = x[:, image_seq_len + 1:image_seq_len + 1 + text_len_rep]
         else:
             # Sequence layout before shift:
-            #  - Text-first:  [BOS, text(T), image(I)]
-            #  - Image-first: [BOS, image(I), text(T)]
-            a_txt = x[:, :text_seq_len]
-            a_img = x[:, repeats * text_seq_len:]
+            #  - Text-first:  [BOS, text(T*rep), image(I)]
+            #  - Image-first: [BOS, image(I), text(T*rep)]
+            a_txt = x[:, :text_len_rep]
+            a_img = x[:, text_len_rep:]
             b_img = x[:, :image_seq_len]
-            b_txt = x[:, image_seq_len:image_seq_len + text_seq_len]
+            b_txt = x[:, image_seq_len:image_seq_len + text_len_rep]
 
         return a_txt, b_txt, a_img, b_img
 
@@ -523,7 +524,7 @@ class JetFormer(nn.Module):
             if drop_img.any():
                 nolabel_img = nolabel_single  # [B,1,D]
                 image_emb = torch.where(drop_img.view(-1, 1, 1).expand_as(image_emb),
-                                        nolabel_img.expand(batch_size, 1, image_emb.shape[-1]),
+                                        nolabel_img.expand_as(image_emb),
                                         image_emb)
 
         x_img_m = torch.full(image_tokens.shape[:-1], True, device=device)
@@ -608,6 +609,7 @@ class JetFormer(nn.Module):
             x = self.transformer(x, attn_mask, position_ids)
         
         text_seq_len = text_tokens.shape[1] 
+        text_seq_len_rep = text_seq_len * self.num_vocab_repeats
         image_seq_len = image_tokens.shape[1]
         
         a_txt, b_txt, a_img, b_img = self._split_image_and_text_prelogits(x, text_seq_len, image_seq_len)
@@ -618,7 +620,7 @@ class JetFormer(nn.Module):
         
         text_first_expanded = text_first_mask.reshape(batch_size, 1, 1).to(device)
         text_feats = torch.where(
-            text_first_expanded.expand(-1, text_seq_len, x.shape[-1]),
+            text_first_expanded.expand(-1, text_seq_len_rep, x.shape[-1]),
             text_out_when_first, 
             text_out_when_second
         )
@@ -752,32 +754,23 @@ class JetFormer(nn.Module):
             if temperature_scales is not None:
                 scales = scales * float(temperature_scales)
 
-            class _TriNormal:
-                def __init__(self, mu, tri):
-                    self.mu = mu
-                    self.tri = torch.tril(tri)  # only lower-tri part
-                def sample(self, seed: torch.Tensor | None = None):
-                    eps = torch.randn_like(self.mu)
-                    # y = L * eps + mu
-                    y = torch.einsum('...ij,...j->...i', self.tri, eps) + self.mu
-                    return y.unsqueeze(-2)  # add seq dim = 1 for API parity
+            # Build a proper MultivariateNormal distribution with a lower-triangular scale matrix
+            dist = torch.distributions.MultivariateNormal(loc=locs, scale_tril=torch.tril(scales))
+
+            # distrax API parity: sample() returns [..., out_dim], log_prob(x) takes [..., out_dim]
+            # PyTorch's MultivariateNormal matches this. We just need to wrap sample() to match the expected extra seq dim.
+            class _WrappedMVN:
+                def __init__(self, mvn_dist):
+                    self.dist = mvn_dist
+                def sample(self, sample_shape=torch.Size()):
+                    # Add a sequence dimension of 1 for API parity with GMM path
+                    return self.dist.sample(sample_shape).unsqueeze(-2)
                 def log_prob(self, x: torch.Tensor):
-                    # x: [B,L,d]
-                    diff = (x - self.mu.unsqueeze(-2))  # broadcast over L
-                    # solve L * z = diff  -> z = L^{-1} diff
-                    # approximate via triangular solve per element (batch-unsafe fallback)
-                    # flatten batch dims
-                    B = diff.shape[0]
-                    Lseq = diff.shape[1]
-                    d = diff.shape[-1]
-                    tri = self.tri
-                    tri = tri.unsqueeze(-3).expand(B, Lseq, d, d)
-                    z = torch.linalg.solve_triangular(tri, diff.unsqueeze(-1), upper=False).squeeze(-1)
-                    log_det = torch.log(torch.diagonal(self.tri, dim1=-2, dim2=-1).abs() + 1e-12).sum(-1).unsqueeze(-1)
-                    quad = 0.5 * (z * z).sum(-1)
-                    const = 0.5 * d * math.log(2.0 * math.pi)
-                    return -(quad + const) + log_det
-            return _TriNormal(locs, scales)
+                    # Remove sequence dim of 1 if present before calling log_prob
+                    if x.ndim == self.dist.loc.ndim + 1 and x.shape[-2] == 1:
+                        x = x.squeeze(-2)
+                    return self.dist.log_prob(x)
+            return _WrappedMVN(dist)
         else:
             mix_logits, means, scales = self.gmm_params(image_logits)
             if temperature_probs is not None:

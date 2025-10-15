@@ -1,5 +1,5 @@
-vocab_size: 32000
-max_seq_len: 64
+vocab_size: 1003
+max_seq_len: 257  # 256 image tokens + 1 BOS/BOI
 
 # Autoregressive transformer (B)
 d_model: 1024
@@ -8,8 +8,9 @@ n_layers: 24
 d_ff: 4096
 dropout: 0.1
 num_mixtures: 1024
+n_kv_heads: 1
 
-# Flow (Jet)
+# Flow (Jet) -> Adaptor
 jet:
   depth: 32
   block_depth: 4
@@ -19,24 +20,32 @@ jet:
 # Image tokenization
 patch_size: 16
 image_ar_dim: 128
+input_size: [256, 256]
 
 # Optimization
 learning_rate: 0.001
-batch_size: 32
-num_epochs: 1
+batch_size: 2048
+num_epochs: 100
 torch_compile: false
+weight_decay: 0.0001
+opt_b1: 0.9
+opt_b2: 0.95
+warmup_percent: 0.1
+use_cosine: true
+grad_clip_norm: 1.0
 
-# Curriculum & latent noise
-rgb_sigma0: 64.0
-rgb_sigma_final: 3.0
-latent_noise_std: 0.3
+# Curriculum & latent noise (for PCA path)
+input_noise_std: 0.3
+noise_scale: 64.0
+noise_min: 0.0
+latent_noise_dim: 640 # (16*16*3) - 128 = 640
 
 # Loss balancing
-text_loss_weight: 0.0025
+text_loss_weight: 0.0
 image_loss_weight: 1.0
 
 # CFG
-cfg_strength: 4.0
+cfg_strength: 3.0 # sampling param, but good to document
 cfg_drop_prob: 0.1
 
 # Parity toggles
@@ -44,15 +53,34 @@ right_align_inputs: true
 use_boi_token: true
 untie_output_vocab: false
 strict_special_ids: true
-bos_id: 1
-nolabel_id: 0
-# Optional boi_id when BOI used; set appropriately for tokenizer
-boi_id: 2
+num_vocab_repeats: 16
+per_modality_final_norm: false
+causal_mask_on_prefix: true
+scale_tol: 1e-6
 
-# PCA path knobs (used when training_mode == 'pca')
-noise_scale: 1.0
-noise_min: 0.0
+# Special tokens for ImageNet class-conditional
+bos_id: 1000
+boi_id: 1001
+nolabel_id: 1002
+
+# Training mode controls
+jetformer_training_mode: pca
+text_prefix_prob: 1.0
+loss_on_prefix: false
+stop_grad_nvp_prefix: true
 rgb_noise_on_image_prefix: true
-text_prefix_prob: 0.5
-input_noise_std: 0.0
+
+# PatchPCA config
+patch_pca:
+  depth_to_seq: 1
+  input_size: [256, 256]
+  patch_size: 16
+  codeword_dim: 128
+  add_dequant_noise: true
+  skip_pca: true
+
+# Adaptor config
+use_adaptor: true
+adaptor:
+  kind: jet
 

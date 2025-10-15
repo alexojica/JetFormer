@@ -182,7 +182,7 @@ class MultiQueryAttention(nn.Module):
         if self.query_pre_attn_norm == "rsqrt_head_dim":
             scale = 1.0 / math.sqrt(self.d_k)
             Q = Q * scale
-
+        
         # Decode-mode KV cache
         if kv_cache is not None:
             # When a mask is provided during prefill, zero-out K/V for disallowed key positions
@@ -205,7 +205,7 @@ class MultiQueryAttention(nn.Module):
             K_use, V_use = K, V
             new_kv_cache = None
 
-        scores = torch.matmul(Q, K_use.transpose(-2, -1))
+        scores = torch.matmul(Q, K_use.transpose(-2, -1)) / math.sqrt(self.d_k)
 
         if self.attn_logits_softcap is not None:
             cap = float(self.attn_logits_softcap)
