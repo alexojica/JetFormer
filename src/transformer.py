@@ -180,17 +180,15 @@ class MultiQueryAttention(nn.Module):
         
         # Optional pre-attn normalization on queries (Gemma: rsqrt_head_dim)
         if self.query_pre_attn_norm == "rsqrt_head_dim":
-            # Multiply queries by 1/sqrt(d_k) before dot-products instead of after
-            # Apply scaling directly to Q before reshaping to per-head tensors.
             scale = 1.0 / math.sqrt(self.d_k)
             Q = Q * scale
+
         # Decode-mode KV cache
         if kv_cache is not None:
             # When a mask is provided during prefill, zero-out K/V for disallowed key positions
             # so that cached keys correspond only to valid tokens after right-alignment.
             if mask is not None and K.shape[2] > 1:
                 # mask is [B,1,L,S], allowed=True means attend allowed; derive per-key validity
-                Bm = mask.shape[0]
                 S = K.shape[2]
                 # Expand to [B,H,L,S] then reduce over query length L to get [B,H,S]
                 allowed = mask.expand(B, self.n_heads, L, S)
@@ -207,27 +205,6 @@ class MultiQueryAttention(nn.Module):
             K_use, V_use = K, V
             new_kv_cache = None
 
-        S_all = K_use.shape[2]
-        # Use PyTorch SDPA for fast fused attention
-        q = Q.transpose(1, 2)  # [B, L, H, Dk]
-        k = K_use.transpose(1, 2)  # [B, S_all, H, Dk]
-        v = V_use.transpose(1, 2)  # [B, S_all, H, Dk]
-        q = q.reshape(B, L, self.n_heads, self.d_k).permute(0, 2, 1, 3).reshape(B * self.n_heads, L, self.d_k)
-        k = k.reshape(B, S_all, self.n_heads, self.d_k).permute(0, 2, 1, 3).reshape(B * self.n_heads, S_all, self.d_k)
-        v = v.reshape(B, S_all, self.n_heads, self.d_k).permute(0, 2, 1, 3).reshape(B * self.n_heads, S_all, self.d_k)
-
-        attn_mask = None
-        if mask is not None:
-            # mask is [B, 1, L, S] boolean; expand to [B*H, L, S]
-            allowed = mask.expand(B, self.n_heads, L, S_all).reshape(B * self.n_heads, L, S_all)
-            # SDPA boolean semantics are True=disallow. Build additive mask for robustness across backends.
-            disallowed = ~allowed
-            attn_mask = disallowed.to(q.dtype) * torch.finfo(q.dtype).min
-
-        # SDPA call. If a softcap on attention logits is requested, emulate via
-        # a pre-softmax clamp by using the built-in scaling=1 and an additive mask.
-        # PyTorch SDPA does not expose raw logits; mimic by limiting q,k magnitudes.
-
         scores = torch.matmul(Q, K_use.transpose(-2, -1))
 
         if self.attn_logits_softcap is not None:
@@ -242,6 +219,7 @@ class MultiQueryAttention(nn.Module):
         
         # When an explicit mask is supplied (prefill or masked decode), prefer it over causal flag.
         is_causal = kv_cache is not None and (mask is None)
+        S_all = K_use.shape[2]
         if is_causal and L > 1:
             causal_mask = torch.triu(torch.ones(L, S_all, dtype=torch.bool, device=Q.device), diagonal=1)
             scores.masked_fill_(causal_mask, float('-inf'))
@@ -277,10 +255,10 @@ class GemmaBlock(nn.Module):
         self.norm2 = nn.RMSNorm(d_model, eps=1e-6)
         self.dropout = nn.Dropout(dropout)
         
-    def forward(self, x, mask=None, position_ids=None, use_cache: bool = False):
+    def forward(self, x, mask=None, position_ids=None, cache=None):
         # Pre-norm attention
         h = self.norm1(x)
-        attn_out = self.attention(h, h, h, mask, position_ids, use_cache=use_cache)
+        attn_out, new_cache = self.attention(h, h, h, mask, position_ids, kv_cache=cache)
         x = x + self.dropout(attn_out)
 
         # Pre-norm feed-forward
@@ -288,7 +266,7 @@ class GemmaBlock(nn.Module):
         ff_out = self.feed_forward(h2)
         x = x + self.dropout(ff_out)
 
-        return x
+        return x, new_cache
 
 class GemmaTransformer(nn.Module):
     def __init__(self, d_model, n_heads, n_kv_heads, n_layers, d_ff, dropout=0.1, max_seq_len=2048, pe_type="rope", activation="gelu", vocab_size=32000, attn_logits_softcap: float | None = None):

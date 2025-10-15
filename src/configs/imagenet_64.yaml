@@ -63,7 +63,7 @@ patch_pca:
   input_size: [64, 64]
   patch_size: 4
   depth_to_seq: 1
-  skip_pca: false
+  skip_pca: true
 
 adaptor:
   kind: jet
