@@ -130,6 +130,8 @@ class GPUAccelerator:
                 'sample_from_hidden_mixture_first',
                 'training_step',
                 'configure_noise_schedule',
+                'prefill_cache',
+                'extend_cache',
             ]
             passthrough_attrs = [
                 'image_ar_dim', 'image_token_dim', 'image_seq_len', 'num_mixtures', 'class_token_length'

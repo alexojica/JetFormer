@@ -44,7 +44,8 @@ weight_decay: 0.0001
 opt_b1: 0.9
 opt_b2: 0.95
 grad_clip_norm: 1.0
-num_epochs: 500
+num_epochs: 100
+warmup_percent: 0.1
 precision: bf16
 torch_compile: false
 grad_checkpoint_transformer: false
@@ -54,11 +55,14 @@ flow_grad_checkpoint: false
 jetformer_training_mode: pca
 use_patch_pca: true
 text_prefix_prob: 1.0
+loss_on_prefix: false
+stop_grad_nvp_prefix: true
+input_noise_std: 0.3
 
 patch_pca:
   pca_init_file: null
   whiten: true
-  noise_std: 0.0
+  noise_std: 0.01
   add_dequant_noise: false
   input_size: [256, 256]
   patch_size: 16
@@ -67,6 +71,7 @@ patch_pca:
 
 adaptor:
   kind: jet
+  latent_noise_dim: 640
 
 # EMA
 ema:
@@ -77,7 +82,7 @@ rgb_sigma0: 64.0
 rgb_sigma_final: 0.0
 noise_curriculum_epochs: 500
 latent_noise_std: 0.3
-text_loss_weight: 0.0
+text_loss_weight: 0.0025
 image_loss_weight: 1.0
 grad_accum_steps: 1
 

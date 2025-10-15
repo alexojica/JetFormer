@@ -536,16 +536,16 @@ def compute_jetformer_pca_loss(model,
             # Skip noise on image prefix (i.e., only apply when text-first)
             sigma = torch.where(text_first_mask, sigma, torch.zeros_like(sigma))
         sigma = sigma.view(Bsz, 1, 1, 1)  # [B,1,1,1]
-        # Convert to [-1,1] via rounding through 8-bit domain with Gaussian noise
-        # images are uint8 CHW; map to [0,255], add noise, round, then back to [-1,1]
-        r = torch.round((images_f + 1.0) * 127.5)  # [B,C,H,W]
+        # images are uint8 CHW; images_f is float [0,255]
+        # JAX path: image [-1,1] -> r [0,255] -> noisy [0,255] -> x11 [-1,1] -> patch_pca.encode.
+        # PyTorch images are uint8 [0,255], so images_f is float [0,255].
+        r = images_f
         noisy = r + sigma * torch.randn_like(r)
         noisy = torch.round(noisy)
         x11 = (noisy / 127.5) - 1.0
     else:
-        # No pixel noise; simple rounding path
-        r = torch.round((images_f + 1.0) * 127.5)
-        x11 = (r / 127.5) - 1.0
+        # No pixel noise; simple quantization to [-1, 1]
+        x11 = (images_f / 127.5) - 1.0
 
     # Encode via PatchPCA
     if not hasattr(model, 'patch_pca') or model.patch_pca is None:

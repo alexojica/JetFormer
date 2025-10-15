@@ -275,9 +275,7 @@ class JetFormer(nn.Module):
         # Optional PatchPCA + Adaptor (attached externally by factory)
         self.patch_pca = None
         self.adaptor = None
-        # Lightweight decoder cache (semantic parity; not a KV cache)
-        self._decode_cache = None
-
+        
     def freeze_for_flow_only(self) -> int:
         """Freeze autoregressive (non-flow) parameters for flow-only training.
 
@@ -574,13 +572,6 @@ class JetFormer(nn.Module):
         attn_mask = torch.logical_and(attn_mask, padding_mask.unsqueeze(1))  # [B,L,S]
         attn_mask = attn_mask.unsqueeze(1)  # [B,1,L,S]
 
-        # Optional right-align (parity with JAX helper)
-        if self.right_align_inputs:
-            # Convert attn mask to [B,L,S] for permutation, then restore shape
-            _attn = attn_mask.squeeze(1)
-            x, _attn, padding_mask = self._right_align(x, _attn, padding_mask)
-            attn_mask = _attn.unsqueeze(1)
-
         # Positions derived from input mask (JAX parity): always cumsum
         position_ids = torch.cumsum(padding_mask.to(torch.long), dim=1) - 1
         position_ids = torch.clamp(position_ids, min=0)
@@ -589,14 +580,14 @@ class JetFormer(nn.Module):
         # pass an explicit attention mask and rely on it during decode rather than
         # is_causal. This mirrors the JAX behavior which pads attn mask to cache size.
 
-        return x, attn_mask, position_ids
+        return x, attn_mask, position_ids, padding_mask
     
     def forward(self, text_tokens, image_tokens, text_first_mask, input_mask, drop_text_cond_mask=None):
         """Forward pass"""
         batch_size = text_tokens.shape[0]
         device = text_tokens.device
         
-        x, attn_mask, position_ids = self.embed_sequence(text_tokens, image_tokens, text_first_mask, input_mask, drop_text_cond_mask)
+        x, attn_mask, position_ids, padding_mask = self.embed_sequence(text_tokens, image_tokens, text_first_mask, input_mask, drop_text_cond_mask)
         
         # Cast hidden states to embed dtype for parity with JAX decoder
         if self._embed_dtype is not None:
@@ -608,9 +599,9 @@ class JetFormer(nn.Module):
         if isinstance(self.transformer, nn.ModuleList):
             for layer in self.transformer:
                 if self.grad_checkpoint_transformer and self.training:
-                    x = checkpoint.checkpoint(layer, x, attn_mask, position_ids, False)
+                    x = checkpoint.checkpoint(layer, x, attn_mask, position_ids, None)[0]
                 else:
-                    x = layer(x, attn_mask, position_ids, False)
+                    x, _ = layer(x, attn_mask, position_ids)
             if not self.per_modality_final_norm:
                 x = self.final_norm(x)
         else:
@@ -656,8 +647,8 @@ class JetFormer(nn.Module):
         return text_logits, image_logits
 
     @torch.no_grad()
-    def prefill_cache(self, x: torch.Tensor, attn_mask_b_1_l_s: torch.Tensor, input_mask_b_l: torch.Tensor, cache_size: int | None = None) -> torch.Tensor:
-        """Initialize a simple decode cache using right-align semantics.
+    def prefill_cache(self, x: torch.Tensor, attn_mask_b_1_l_s: torch.Tensor, input_mask_b_l: torch.Tensor, cache_size: int | None = None) -> Tuple[torch.Tensor, list]:
+        """Initialize a decode cache using right-align semantics.
 
         Args:
             x: [B, L, D] embeddings (already combined sequence as in embed_sequence output)
@@ -667,6 +658,7 @@ class JetFormer(nn.Module):
                 cache_begin/cache_end to emulate a right-aligned window.
         Returns:
             last_prelogits: [B,1,D]
+            cache: list of KV caches for each layer
         """
         try:
             x_aligned, attn_mask, input_mask = self.right_align_prefill(x, attn_mask_b_1_l_s, input_mask_b_l)
@@ -686,118 +678,50 @@ class JetFormer(nn.Module):
             if pad_needed > 0:
                 attn_mask = F.pad(attn_mask, (0, pad_needed), value=False)
         h = x_aligned
+        
+        new_caches = []
         if isinstance(self.transformer, nn.ModuleList):
-            # Reset KV cache for a fresh prefill and build caches while processing the prompt
-            for layer in self.transformer:
-                try:
-                    layer.attention.reset_kv_cache()
-                except Exception:
-                    pass
             for layer in self.transformer:
                 # use_cache=True so KV caches are populated progressively
-                h = layer(h, attn_mask, position_ids, True)
+                h, new_cache = layer(h, attn_mask, position_ids, cache=None)
+                new_caches.append(new_cache)
             if not self.per_modality_final_norm:
                 h = self.final_norm(h)
         else:
-            h = self.transformer(h, attn_mask, position_ids)
-        # Cache full sequence for naive extend
-        # Track current per-example seq_len for decode positions
-        if input_mask is not None:
-            seq_len_vec = input_mask.sum(dim=1).to(torch.long)
-        else:
-            seq_len_vec = torch.full((h.shape[0],), h.shape[1], device=h.device, dtype=torch.long)
-        # Initialize cache window tracking
-        if isinstance(cache_size, int) and cache_size > 0:
-            win = torch.as_tensor(int(cache_size), device=h.device, dtype=torch.long)
-            # Begin is max(0, S - cache_size); End is S-1
-            cache_begin = torch.clamp(seq_len_vec - win, min=0)
-            cache_end = torch.clamp(seq_len_vec - 1, min=0)
-            cache_size_val = win
-        else:
-            cache_begin = torch.zeros_like(seq_len_vec)
-            cache_end = torch.clamp(seq_len_vec - 1, min=0)
-            cache_size_val = None
-        self._decode_cache = {
-            'hidden': h.detach(),
-            'input_mask': (input_mask.detach() if input_mask is not None else None),
-            'seq_len': seq_len_vec.detach(),
-            'cache_begin': cache_begin.detach(),
-            'cache_end': cache_end.detach(),
-            'cache_size': (int(cache_size_val.item()) if isinstance(cache_size_val, torch.Tensor) else (int(cache_size) if isinstance(cache_size, int) and cache_size > 0 else None)),
-        }
-        return h[:, -1:, :]
+            # This path is for non-Gemma transformer, which doesn't have caching implemented
+            h, _ = self.transformer(h, attn_mask, position_ids)
+
+        return h[:, -1:, :], new_caches
 
     @torch.no_grad()
-    def extend_cache(self, x_next: torch.Tensor) -> torch.Tensor:
+    def extend_cache(self, x_next: torch.Tensor, cache: list, position_ids: torch.Tensor) -> Tuple[torch.Tensor, list]:
         """Extend decode cache with one more embedded token and return last prelogits.
 
-        Uses internal per-layer KV caches. Falls back to full recompute if cache missing.
+        Uses per-layer KV caches.
         Args:
             x_next: [B,1,D] next-step embedding
+            cache: list of KV caches from previous step
+            position_ids: [B,1] tensor of current positions
         Returns:
             last_prelogits: [B,1,D]
+            new_cache: updated list of KV caches
         """
-        if not isinstance(self._decode_cache, dict) or 'seq_len' not in self._decode_cache:
-            # Fallback: no cache -> single-token forward with trivial masks
-            h = x_next
-            seq_len = x_next.shape[1]
-            attn = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=x_next.device)).unsqueeze(0).unsqueeze(1)
-            pos = torch.arange(seq_len, device=x_next.device).unsqueeze(0)
-            if isinstance(self.transformer, nn.ModuleList):
-                for layer in self.transformer:
-                    h = layer(h, attn, pos, True)
-                if not self.per_modality_final_norm:
-                    h = self.final_norm(h)
-            else:
-                h = self.transformer(h, attn, pos)
-            return h[:, -1:, :]
-
-        seq_len_vec = self._decode_cache['seq_len']  # [B]
-        cache_begin = self._decode_cache.get('cache_begin', torch.zeros_like(seq_len_vec))
-        cache_end = self._decode_cache.get('cache_end', torch.clamp(seq_len_vec - 1, min=0))
-        cache_size = self._decode_cache.get('cache_size', None)
-        # Next positions are the current seq_len for each example
-        pos = seq_len_vec.view(-1, 1)
-        # Build explicit attention mask over current cached keys [0..S-1] with an optional sliding window [begin..end]
-        B = x_next.shape[0]
-        S_all = (seq_len_vec + 1).to(torch.long)  # after appending one token
-        # Update window begin/end for this step without mutating cache until after forward
-        new_end = cache_end + 1
-        if isinstance(cache_size, int) and cache_size > 0:
-            win_sz = torch.clamp(new_end - cache_begin + 1, min=1)  # previous window size
-            desired = torch.full_like(win_sz, int(cache_size))
-            new_win = torch.minimum(win_sz + 1, desired)
-            new_begin = torch.clamp(new_end - new_win + 1, min=0)
-        else:
-            new_begin = torch.zeros_like(new_end)
-        # Build [B,1,1,S_all] boolean mask allowing keys in [new_begin_i, S_all_i-1]
-        max_S = int(S_all.max().item())
-        rng = torch.arange(max_S, device=x_next.device).view(1, 1, 1, -1)  # [1,1,1,S*]
-        # For broadcasting, compute per-batch S_all masks then clip
-        allowed = []
-        for i in range(B):
-            s_i = int(S_all[i].item())
-            nb = int(new_begin[i].item())
-            v = (rng[..., :s_i] >= nb)
-            allowed.append(v)
-        attn = torch.zeros(B, 1, 1, max_S, dtype=torch.bool, device=x_next.device)
-        for i, v in enumerate(allowed):
-            attn[i, :, :, : v.shape[-1]] = v
         h = x_next
+        new_caches = []
         if isinstance(self.transformer, nn.ModuleList):
-            for layer in self.transformer:
+            for i, layer in enumerate(self.transformer):
+                layer_cache = cache[i] if cache and i < len(cache) else None
                 # Provide explicit mask to avoid relying on implicit causal flag
-                h = layer(h, attn, pos, True)
+                # For single-token decoding, mask can be None
+                h, new_cache = layer(h, mask=None, position_ids=position_ids, cache=layer_cache)
+                new_caches.append(new_cache)
             if not self.per_modality_final_norm:
                 h = self.final_norm(h)
         else:
-            h = self.transformer(h, attn, pos)
-        # Update cache tracking for next step
-        self._decode_cache['seq_len'] = (seq_len_vec + 1).detach()
-        self._decode_cache['cache_end'] = new_end.detach()
-        self._decode_cache['cache_begin'] = new_begin.detach()
-        return h[:, -1:, :]
+            h, _ = self.transformer(h, attn_mask=None, position_ids=position_ids)
 
+        return h[:, -1:, :], new_caches
+        
     # ==== JAX-parity APIs for sampling distribution ====
     @torch.no_grad()
     def get_pmf(self, logits: torch.Tensor) -> torch.distributions.Categorical:
@@ -899,13 +823,13 @@ class JetFormer(nn.Module):
         """Return transformer hidden states for image positions. [B, L_img, D]."""
         batch_size = text_tokens.shape[0]
         device = text_tokens.device
-        x, attn_mask, position_ids = self.embed_sequence(text_tokens, image_tokens, text_first_mask, input_mask, drop_text_cond_mask)
+        x, attn_mask, position_ids, padding_mask = self.embed_sequence(text_tokens, image_tokens, text_first_mask, input_mask, drop_text_cond_mask)
         if isinstance(self.transformer, nn.ModuleList):
             for layer in self.transformer:
                 if self.grad_checkpoint_transformer and self.training:
-                    x = checkpoint.checkpoint(layer, x, attn_mask, position_ids, False)
+                    x = checkpoint.checkpoint(layer, x, attn_mask, position_ids, None)[0]
                 else:
-                    x = layer(x, attn_mask, position_ids, False)
+                    x, _ = layer(x, attn_mask, position_ids)
             x = self.final_norm(x)
         else:
             x = self.transformer(x, attn_mask, position_ids)

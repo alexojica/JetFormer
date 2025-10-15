@@ -3,6 +3,27 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
+class GatedMLP(nn.Module):
+    def __init__(self, in_features, hidden_features, out_features, activation="gelu"):
+        super().__init__()
+        self.w_gate = nn.Linear(in_features, hidden_features, bias=False)
+        self.w_up = nn.Linear(in_features, hidden_features, bias=False)
+        self.w_linear = nn.Linear(hidden_features, out_features, bias=False)
+        
+        if activation == "gelu":
+            self.activation_fn = nn.GELU()
+        elif activation == "silu":
+            self.activation_fn = nn.SiLU()
+        else:
+            raise ValueError(f"Unsupported activation: {activation}")
+
+    def forward(self, x):
+        gate_proj = self.w_gate(x)
+        up_proj = self.w_up(x)
+        activations = self.activation_fn(up_proj) * gate_proj
+        outputs = self.w_linear(activations)
+        return outputs
+
 class RoPE(nn.Module):
     def __init__(self, d_model, max_seq_len=2048):
         super().__init__()
@@ -125,13 +146,8 @@ class MultiQueryAttention(nn.Module):
             self.pos_encoding = None
         else:
             raise ValueError(f"Unsupported positional encoding type: {pe_type}")
-        # Simple KV cache for decode mode per layer
-        self._kv_cache = None  # tuple(K, V) with shapes [B,H,S,Dk]
-
-    def reset_kv_cache(self):
-        self._kv_cache = None
         
-    def forward(self, query, key, value, mask=None, position_ids=None, use_cache: bool = False):
+    def forward(self, query, key, value, mask=None, position_ids=None, kv_cache=None):
         B, L, D = query.shape
         key_len = key.shape[1]
 
@@ -169,7 +185,7 @@ class MultiQueryAttention(nn.Module):
             scale = 1.0 / math.sqrt(self.d_k)
             Q = Q * scale
         # Decode-mode KV cache
-        if use_cache:
+        if kv_cache is not None:
             # When a mask is provided during prefill, zero-out K/V for disallowed key positions
             # so that cached keys correspond only to valid tokens after right-alignment.
             if mask is not None and K.shape[2] > 1:
@@ -181,17 +197,15 @@ class MultiQueryAttention(nn.Module):
                 key_allowed = allowed.any(dim=2).to(K.dtype)  # [B,H,S]
                 K = K * key_allowed.unsqueeze(-1)
                 V = V * key_allowed.unsqueeze(-1)
-            if self._kv_cache is None:
-                k_cat = K
-                v_cat = V
-            else:
-                k_cat = torch.cat([self._kv_cache[0], K], dim=2)
-                v_cat = torch.cat([self._kv_cache[1], V], dim=2)
+            
+            k_cat = torch.cat([kv_cache[0], K], dim=2)
+            v_cat = torch.cat([kv_cache[1], V], dim=2)
             # Store detatched to avoid backprop through history
-            self._kv_cache = (k_cat.detach(), v_cat.detach())
+            new_kv_cache = (k_cat.detach(), v_cat.detach())
             K_use, V_use = k_cat, v_cat
         else:
             K_use, V_use = K, V
+            new_kv_cache = None
 
         S_all = K_use.shape[2]
         # Use PyTorch SDPA for fast fused attention
@@ -227,7 +241,7 @@ class MultiQueryAttention(nn.Module):
             scores = scores.masked_fill(~mask, mask_value)
         
         # When an explicit mask is supplied (prefill or masked decode), prefer it over causal flag.
-        is_causal = bool(use_cache) and (mask is None)
+        is_causal = kv_cache is not None and (mask is None)
         if is_causal and L > 1:
             causal_mask = torch.triu(torch.ones(L, S_all, dtype=torch.bool, device=Q.device), diagonal=1)
             scores.masked_fill_(causal_mask, float('-inf'))
@@ -239,7 +253,7 @@ class MultiQueryAttention(nn.Module):
 
         out = out.transpose(1, 2).contiguous().reshape(B, L, D)
 
-        return self.w_o(out)
+        return self.w_o(out), new_kv_cache
     
 class GemmaBlock(nn.Module):
     def __init__(self, d_model, n_heads, n_kv_heads, d_ff, dropout=0.1, max_seq_len=2048, pe_type="rope", activation="gelu", attn_logits_softcap: float | None = None):
@@ -252,21 +266,11 @@ class GemmaBlock(nn.Module):
         )
 
         # Feed-forward network with configurable activation
-        act_fn = None
-        if activation == "gelu":
-            act_fn = nn.GELU()
-        elif activation == "relu":
-            act_fn = nn.ReLU()
-        elif activation =="silu":
-            act_fn = nn.SiLU()
-        else:
-            raise ValueError(f"Unsupported activation function: {activation}")
-
-        self.feed_forward = nn.Sequential(
-            nn.Linear(d_model, d_ff),
-            act_fn,
-            nn.Dropout(dropout),
-            nn.Linear(d_ff, d_model)
+        self.feed_forward = GatedMLP(
+            in_features=d_model,
+            hidden_features=d_ff,
+            out_features=d_model,
+            activation=activation
         )
             
         self.norm1 = nn.RMSNorm(d_model, eps=1e-6)
