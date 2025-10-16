@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import math
 from typing import Tuple
 from src.utils.image import patchify as tk_patchify, unpatchify as tk_unpatchify
-from src.utils.losses import gmm_params as mix_gmm_params, gmm_distribution as mix_gmm_distribution, sample_gmm as mix_sample_gmm, cross_entropy_second_only
+from src.utils.losses import gmm_params as mix_gmm_params, gmm_distribution as mix_gmm_distribution, sample_gmm as mix_sample_gmm
 from src.flow.jet_flow import JetModel
 from src.transformer import GemmaBlock
 from src.flow.projections import InvertibleLinear

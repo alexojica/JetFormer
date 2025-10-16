@@ -40,7 +40,7 @@ from src.utils.dataset import create_datasets_and_loaders
 from src.utils.eval import evaluate_one_epoch, compute_and_log_fid_is
 import src.utils.training_helpers as training_helpers
 from src.utils.schedules import rgb_cosine_sigma
-from src.utils.losses import compute_jetformer_loss, compute_jetformer_pca_loss, compute_flow_only_loss
+from src.utils.losses import compute_jetformer_pca_loss, compute_flow_only_loss
 
 # Prefer CUDA graphs when using torch.compile reduce-overhead
 try:
