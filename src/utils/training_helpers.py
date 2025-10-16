@@ -66,32 +66,6 @@ def init_wandb(cfg: Dict[str, Any], is_main_process: bool = True):
             return None
 
 
-def build_model_from_config(config: SimpleNamespace, device: torch.device) -> JetFormer:
-    cfg_get = getattr(config, 'get', None)
-    def _get(key: str):
-        try:
-            return cfg_get(key) if cfg_get is not None else getattr(config, key)
-        except Exception:
-            return None
-    param_names = [
-        'vocab_size','d_model','n_heads','n_kv_heads','n_layers','d_ff','max_seq_len','num_mixtures','dropout',
-        'jet_depth','jet_block_depth','jet_emb_dim','jet_num_heads','patch_size','image_ar_dim','use_bfloat16_img_head',
-        'num_classes','class_token_length','latent_projection','latent_proj_matrix_path','pre_latent_projection',
-        'pre_latent_proj_matrix_path','pre_factor_dim','flow_actnorm','flow_invertible_dense',
-        'grad_checkpoint_transformer','flow_grad_checkpoint'
-    ]
-    kwargs: Dict[str, Any] = {}
-    for name in param_names:
-        val = _get(name)
-        if val is not None:
-            kwargs[name] = val
-    inp = _get('input_size')
-    if inp is not None:
-        kwargs['input_size'] = tuple(inp)
-    model = JetFormer(**kwargs).to(device)
-    return model
-
-
 def count_model_parameters(model: torch.nn.Module) -> Tuple[int, int, int]:
     total_params = sum(p.numel() for p in model.parameters())
     jet_params = sum(p.numel() for p in model.jet.parameters()) if hasattr(model, 'jet') else 0
@@ -143,9 +117,8 @@ def initialize_actnorm_if_needed(model: torch.nn.Module,
                 base.jet.initialize_with_batch(tokens_hat_grid)
             else:
                 base.jet.initialize_with_batch(x_nhwc)
-        except Exception:
-            # Non-fatal; model will attempt implicit init on first forward
-            pass
+        except Exception as e:
+            logger.debug("ActNorm init skipped due to exception: %r", e, exc_info=True)
 
 
 def broadcast_flow_params_if_ddp(model: torch.nn.Module) -> None:
@@ -285,10 +258,21 @@ def generate_and_log_samples(base_model,
                     class_ids = list(range(min(4, max_cls)))
                 else:
                     class_ids = [0, 1, 2, 3]
+            # Try to forward temperature controls when present in config
+            t_scales = None
+            t_probs = None
+            try:
+                t_scales = float(getattr(dataset, 'temperature_scales'))  # unlikely
+            except Exception:
+                t_scales = None
+            try:
+                t_probs = float(getattr(dataset, 'temperature_probs'))
+            except Exception:
+                t_probs = None
             samples = generate_class_conditional_samples(
                 base_model, device, class_ids,
                 cfg_strength=float(cfg_strength), cfg_mode=str(cfg_mode),
-                dataset=dataset
+                dataset=dataset, temperature_scales=t_scales, temperature_probs=t_probs
             )
         else:
             samples = generate_text_to_image_samples_cfg(
@@ -428,7 +412,7 @@ def train_step(model: torch.nn.Module,
             advanced_metrics=advanced_metrics,
         )
         # For flow-only, image_loss_weight should be 1.0 and text_loss_weight should be 0.0
-        out["loss"] = out["image_loss"]
+        out["loss"] = out["image_bpd_total"]
     else:
         # Determine JetFormer mode: legacy flow+AR (RGB noise curriculum) or PCA+Adaptor
         # Training-mode gate (default 'pca') can force PCA path independent of attachment failures

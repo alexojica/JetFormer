@@ -54,12 +54,12 @@ def bits_per_dim_flow(z: torch.Tensor, logdet: torch.Tensor, image_shape_hwc: tu
     """Flow-only bits-per-dimension consistent with JetFormer/Jet paper.
 
     Returns either per-sample or mean tuple:
-      (total_bpd, nll_bpd, flow_bpd, logdet_bpd)
+      (total_bpd, nll_bpd, flow_bpd)
 
     Where:
       total_bpd = (NLL(z) + ln256*D - logdet) / (ln2*D)
-      flow_bpd  = (-logdet) / (ln2*D)   # paper's convention
-      logdet_bpd = -flow_bpd            # kept for backward-compatibility
+      nll_bpd   = (NLL(z) + ln256*D) / (ln2*D)
+      flow_bpd  = (-logdet) / (ln2*D)
     """
     normal_dist = torch.distributions.Normal(0.0, 1.0)
     nll = -normal_dist.log_prob(z)
@@ -69,14 +69,15 @@ def bits_per_dim_flow(z: torch.Tensor, logdet: torch.Tensor, image_shape_hwc: tu
     total_nats = nll_summed - logdet
     dim_count = np.prod(image_shape_hwc)
     normalizer = math.log(2.0) * dim_count
-    loss_bpd = total_nats / normalizer
-    nll_bpd = nll_summed / normalizer
-    flow_bpd = (-logdet) / normalizer
-    logdet_bpd = -flow_bpd
+    
+    image_bpd_total = total_nats / normalizer
+    ar_bpd_component = nll_summed / normalizer
+    flow_bpd_component = (-logdet) / normalizer
+
     if reduce:
-        return torch.mean(loss_bpd), torch.mean(nll_bpd), torch.mean(flow_bpd), torch.mean(logdet_bpd)
+        return torch.mean(image_bpd_total), torch.mean(ar_bpd_component), torch.mean(flow_bpd_component)
     else:
-        return loss_bpd, nll_bpd, flow_bpd, logdet_bpd
+        return image_bpd_total, ar_bpd_component, flow_bpd_component
 
 
 def bits_per_dim(z: torch.Tensor, logdet: torch.Tensor, image_shape_hwc: tuple, reduce: bool = True):
@@ -216,6 +217,8 @@ def compute_flow_only_loss(model,
     B = images.shape[0]
     # Continuous RGB noise in [0,1] space for parity with FlowCore training_step
     images_float = images.float()
+    # Default sigma_t when RGB noise is disabled
+    sigma_t = torch.tensor(0.0, device=device, dtype=images_float.dtype)
     no_rgb_noise = bool(batch.get('no_rgb_noise', False) or eval_no_rgb_noise)
     if no_rgb_noise:
         images01_noisy = (images_float + torch.rand_like(images_float)) / 256.0
@@ -315,6 +318,8 @@ def compute_jetformer_loss(model,
 
     # Continuous RGB noise in [0,1] (align with FlowCore)
     images_float = images.float()
+    # Default sigma when RGB noise is disabled
+    sigma_t = torch.tensor(0.0, device=device, dtype=images_float.dtype)
     no_rgb_noise = bool(batch.get('no_rgb_noise', False) or eval_no_rgb_noise)
     if no_rgb_noise:
         images01_noisy = (images_float + torch.rand_like(images_float)) / 256.0

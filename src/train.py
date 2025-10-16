@@ -24,7 +24,6 @@ from types import SimpleNamespace
 from tqdm import tqdm
 from src.utils.training_helpers import (
     init_wandb as helpers_init_wandb,
-    build_model_from_config,
     count_model_parameters,
     load_checkpoint_if_exists,
     initialize_actnorm_if_needed,

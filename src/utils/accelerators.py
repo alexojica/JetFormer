@@ -121,7 +121,6 @@ class GPUAccelerator:
         def _attach_passthroughs(wrapper: nn.Module, inner: nn.Module) -> nn.Module:
             # Expose selected custom APIs on the wrapper to avoid attribute errors under DDP/DP.
             passthrough_methods = [
-                'flow_from_x01',
                 'factor_tokens',
                 'gaussian_residual_nll',
                 'gmm',

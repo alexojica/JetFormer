@@ -5,7 +5,6 @@ import math
 from typing import Tuple
 from src.utils.image import patchify as tk_patchify, unpatchify as tk_unpatchify
 from src.utils.losses import gmm_params as mix_gmm_params, gmm_distribution as mix_gmm_distribution, sample_gmm as mix_sample_gmm, cross_entropy_second_only
-from src.transformer import Transformer
 from src.flow.jet_flow import JetModel
 from src.transformer import GemmaBlock
 from src.flow.projections import InvertibleLinear
@@ -230,7 +229,7 @@ class JetFormer(nn.Module):
             ])
             self.final_norm = nn.RMSNorm(d_model, eps=1e-6)
         else:
-            self.transformer = Transformer(d_model, n_heads, n_layers, d_ff, dropout, max_total_len)
+            self.transformer = None # This case should ideally not be reached with GemmaBlock
             self.final_norm = None
 
         # Text head (untied option); default is tied via embedding weight
@@ -319,7 +318,7 @@ class JetFormer(nn.Module):
             frozen_params += _freeze_module(self.final_norm)
 
         # Embeddings and AR heads
-        for attr in ['text_emb', 'image_emb', 'text_head', 'img_head']:
+        for attr in ['text_emb', 'image_emb', 'text_head', 'img_head', 'text_norm', 'img_norm']:
             try:
                 mod = getattr(self, attr, None)
                 if isinstance(mod, nn.Module):
@@ -453,15 +452,7 @@ class JetFormer(nn.Module):
         tilde_z = full_tokens[..., self.image_ar_dim :]
         return hat_z, tilde_z
 
-    def gaussian_residual_nll(self, tilde_z: torch.Tensor) -> torch.Tensor:
-        """Compute per-sample NLL for Gaussian residual dims (sum over tokens and dims)."""
-        if tilde_z is None or tilde_z.numel() == 0:
-            # No residual dims
-            return torch.zeros(tilde_z.shape[0] if tilde_z is not None else 1, device=(tilde_z.device if tilde_z is not None else self.text_emb.weight.device))
-        normal = torch.distributions.Normal(0.0, 1.0)
-        log_prob = normal.log_prob(tilde_z)
-        nll = -log_prob.view(tilde_z.shape[0], -1).sum(dim=1)
-        return nll
+    # Removed duplicate gaussian_residual_nll; use utils.losses.gaussian_residual_nll
 
     def embed_sequence(self, text_tokens, image_tokens, text_first_mask, input_mask, drop_text_cond_mask=None):
         batch_size = text_tokens.shape[0]
@@ -835,7 +826,8 @@ class JetFormer(nn.Module):
                     x = checkpoint.checkpoint(layer, x, attn_mask, position_ids, None)[0]
                 else:
                     x, _ = layer(x, attn_mask, position_ids)
-            x = self.final_norm(x)
+            if not self.per_modality_final_norm:
+                x = self.final_norm(x)
         else:
             x = self.transformer(x, attn_mask, position_ids)
 
@@ -905,19 +897,6 @@ class JetFormer(nn.Module):
             return torch.ones(int(batch_size), dtype=torch.bool, device=dev)
         probs = torch.full((int(batch_size),), float(p), device=dev)
         return torch.bernoulli(probs).bool()
-    
-    def flow(self, images):
-        # images expected as B,C,H,W in [-1,1]; map to [0,1]
-        if images.dim() != 4 or images.size(1) != 3:
-            raise ValueError("images must be [B,3,H,W]")
-        x01 = (images + 1.0) * 0.5
-        # JetModel expects NHWC
-        x_nhwc = x01.permute(0, 2, 3, 1).contiguous()
-        z_nhwc, log_det = self.jet(x_nhwc)
-        tokens = self._patchify(z_nhwc)
-        return log_det, tokens
-
-    # flow_from_x01 removed: moved to src/training_helpers.flow_encode_images01_to_tokens
 
     @torch.no_grad()
     def decode_tokens_to_image01(self, tokens_full: torch.Tensor) -> torch.Tensor:

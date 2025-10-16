@@ -6,65 +6,7 @@ from PIL import Image
 from src.utils.losses import gmm_params
 
 
-@torch.no_grad()
-def generate_text_to_image_samples(model, dataset, device, num_samples: int = 3, temperature_scales: float | None = None, temperature_probs: float | None = None):
-    model.eval()
-    samples = []
-    prompt_texts = ["a car", "a cat", "a dog"]
-    is_class_conditional = bool(getattr(model, 'num_classes', None)) and getattr(model, 'num_classes') > 0
-    for i, prompt_text in enumerate(prompt_texts[:num_samples]):
-        try:
-            class_id = None
-            if is_class_conditional and not hasattr(dataset, 'tokenize_text'):
-                # Clamp class id to valid range
-                try:
-                    max_cls = int(getattr(model, 'num_classes', 0))
-                except Exception:
-                    max_cls = 0
-                class_id = int(i % max(1, max_cls)) if max_cls else 0
-                text_tokens = torch.zeros(1, getattr(model, 'class_token_length', 16), dtype=torch.long, device=device)
-                text_mask = torch.ones(1, getattr(model, 'class_token_length', 16), dtype=torch.bool, device=device)
-                prompt_label = None
-                if hasattr(dataset, 'classes') and class_id < len(getattr(dataset, 'classes', [])):
-                    prompt_label = dataset.classes[class_id]
-                prompt_value = prompt_label if prompt_label is not None else f'class_{class_id}'
-            else:
-                tokenized = dataset.tokenize_text(prompt_text)
-                text_tokens = tokenized['tokens'].unsqueeze(0).to(device)
-                text_mask = tokenized['text_mask'].unsqueeze(0).to(device)
-                prompt_value = prompt_text
-
-            ar_dim = getattr(model, 'image_ar_dim', model.image_token_dim)
-            full_dim = model.image_token_dim
-            res_dim = max(0, full_dim - ar_dim)
-            image_tokens = torch.zeros(1, model.image_seq_len, ar_dim, device=device)
-
-            text_first_mask = torch.tensor([True], device=device)
-            full_mask = torch.ones(1, text_tokens.shape[1], device=device, dtype=torch.bool)
-
-            for pos in range(model.image_seq_len):
-                _, image_logits = model(text_tokens, image_tokens, text_first_mask, full_mask)
-
-                if pos < image_logits.shape[1]:
-                    pdf = model.get_pdf(image_logits[:, pos:pos+1], temperature_scales=temperature_scales, temperature_probs=temperature_probs)
-                    sampled = pdf.sample()
-                    image_tokens[0, pos] = sampled[0, 0]
-
-            if res_dim > 0:
-                residual = torch.randn(1, model.image_seq_len, res_dim, device=device)
-                tokens_full = torch.cat([image_tokens, residual], dim=-1)
-            else:
-                tokens_full = image_tokens
-            image01_bchw = model.decode_tokens_to_image01(tokens_full)
-            image01 = image01_bchw[0]
-            image_np = image01.permute(1, 2, 0).cpu().numpy()
-            image_pil = Image.fromarray((image_np * 255).astype('uint8'))
-            samples.append({'prompt': prompt_value, 'image': image_pil})
-        except Exception as e:
-            placeholder = Image.new('RGB', (256, 256), color='red')
-            samples.append({'prompt': prompt_text, 'image': placeholder})
-    model.train()
-    return samples
+# Legacy direct sampler removed in favor of CFG sampler; use generate_text_to_image_samples_cfg
 
 
 class CFGDensity:
@@ -97,7 +39,7 @@ def generate_text_to_image_samples_cfg(
     device,
     num_samples: int = 3,
     cfg_strength: float = 4.0,
-    cfg_mode: str = "density",
+    cfg_mode: str = "interp",
     prompts: list | None = None,
     fast_mixture_first: bool = False,
     temperature_scales: float | None = None,
@@ -234,7 +176,9 @@ def generate_class_conditional_samples(base,
                                        cfg_strength: float = 4.0,
                                        cfg_mode: str = "interp",
                                        fast_mixture_first: bool = False,
-                                       dataset: Any | None = None) -> List[Dict[str, Any]]:
+                                       dataset: Any | None = None,
+                                       temperature_scales: float | None = None,
+                                       temperature_probs: float | None = None) -> List[Dict[str, Any]]:
     samples: List[Dict[str, Any]] = []
     # Ensure deterministic sampling (disable dropout, etc.)
     was_training = base.training
@@ -302,7 +246,7 @@ def generate_class_conditional_samples(base,
                         img_tokens[0, pos] = sampled[0, 0]
                     else:  # Default to "interp" mode (logit interpolation)
                         guided_logits = image_logits_u + cfg_strength * (image_logits_c - image_logits_u)
-                        pdf = base.get_pdf(guided_logits[:, pos:pos+1])
+                        pdf = base.get_pdf(guided_logits[:, pos:pos+1], temperature_scales=temperature_scales, temperature_probs=temperature_probs)
                         sampled = pdf.sample()  # [B, 1, D_ar]
                         img_tokens[0, pos] = sampled.squeeze(0).squeeze(0)
 

@@ -14,20 +14,19 @@ from tqdm import tqdm
 def evaluate_one_epoch(model_obj: torch.nn.Module,
                        loader: DataLoader,
                        accelerator,
-                       mode: str = "ar_flow",
                        eval_no_rgb_noise: bool = True,
                        config: Optional[Any] = None) -> Tuple[float, float, float, float]:
-    """Unified evaluation loop.
+    """Unified evaluation loop for JetFormer.
 
     Args:
-        model_obj: JetFormerTrain (ar_flow) or FlowTrain/FlowCore (flow)
-        loader: dataloader
-        accelerator: accelerator helper with wrap_dataloader/autocast if available
-        mode: "ar_flow" for JetFormer pipeline; "flow" for flow-only models
+        model_obj: The JetFormer model instance.
+        loader: The validation dataloader.
+        accelerator: An accelerator helper with wrap_dataloader/autocast if available.
+        eval_no_rgb_noise: If True, disables RGB noise during evaluation.
+        config: The run configuration.
     Returns:
-        (total, text_ce_or_0, image_bpd_total_or_flow_bpd, flow_bpd_or_0)
+        A tuple containing (total_loss, text_ce, image_bpd, flow_bpd).
     """
-    kind = str(mode).lower()
     model_obj.eval()
     sum_total = 0.0
     sum_text = 0.0
@@ -42,50 +41,24 @@ def evaluate_one_epoch(model_obj: torch.nn.Module,
             torch.compiler.cudagraph_mark_step_begin()
         except Exception:
             pass
-        bsz = None
-        if kind == "ar_flow":
-            # Use training_helpers.train_step to compute losses from batch+config
-            # Signal to disable RGB noise during eval for reproducibility
-            try:
-                batch = dict(batch)
-                batch['no_rgb_noise'] = bool(eval_no_rgb_noise)
-            except Exception:
-                pass
-            base = model_obj.module if hasattr(model_obj, 'module') else model_obj
-            # Defer import to avoid circulars
-            from src.utils.training_helpers import train_step as _train_step
-            # step/total_steps unused when eval_no_rgb_noise=True; pass minimal values
-            out = _train_step(base, batch, step=0, total_steps=1, config=config)
-            bsz = batch['image'].size(0)
-            sum_total += float(out.get('loss', 0.0)) * bsz
-            sum_text += float(out.get('text_loss', 0.0)) * bsz
-            sum_img += float(out.get('image_bpd_total', out.get('bpd', 0.0))) * bsz
-            sum_flow += float(out.get('flow_bpd_component', out.get('logdet_bpd', 0.0))) * bsz
-        else:  # flow-only
-            images_uint8 = batch["image"]
-            bsz = images_uint8.size(0)
-            device = getattr(accelerator, 'device', None)
-            try:
-                dev_type = getattr(device, 'type', getattr(device, 'device_type', 'cpu')) if device is not None else 'cpu'
-            except Exception:
-                dev_type = 'cpu'
-            if device is not None and dev_type != 'xla':
-                images_uint8 = images_uint8.to(device, non_blocking=True)
-            if hasattr(model_obj, 'training_step'):
-                out = model_obj.training_step(images_uint8)
-            else:
-                # Fallback: treat model as FlowCore forward (expects NHWC float in [0,1])
-                images_float = images_uint8.float()
-                noise = torch.rand_like(images_float)
-                images01 = (images_float + noise) / 256.0
-                z, logdet = model_obj(images01.permute(0, 2, 3, 1))
-                from src.utils.losses import bits_per_dim_flow
-                loss_bpd, nll_bpd, flow_bpd, logdet_bpd = bits_per_dim_flow(z.float(), logdet.float(), (images_uint8.shape[2], images_uint8.shape[3], images_uint8.shape[1]), reduce=True)
-                out = {"loss": loss_bpd, "bpd": loss_bpd, "nll_bpd": nll_bpd, "flow_bpd": flow_bpd, "logdet_bpd": logdet_bpd}
-            sum_total += float(out.get('bpd', out.get('loss', 0.0))) * bsz
-            sum_img += float(out.get('bpd', 0.0)) * bsz
-            sum_flow += float(out.get('flow_bpd', out.get('logdet_bpd', 0.0))) * bsz
+
+        try:
+            batch = dict(batch)
+            batch['no_rgb_noise'] = bool(eval_no_rgb_noise)
+        except Exception:
+            pass
+        
+        base = model_obj.module if hasattr(model_obj, 'module') else model_obj
+        from src.utils.training_helpers import train_step as _train_step
+        out = _train_step(base, batch, step=0, total_steps=1, config=config)
+        
+        bsz = batch['image'].size(0)
+        sum_total += float(out.get('loss', 0.0)) * bsz
+        sum_text += float(out.get('text_loss', 0.0)) * bsz
+        sum_img += float(out.get('image_bpd_total', out.get('bpd', 0.0))) * bsz
+        sum_flow += float(out.get('flow_bpd_component', out.get('logdet_bpd', 0.0))) * bsz
         count += int(bsz or 0)
+        
     model_obj.train()
     denom = max(1, count)
     return (sum_total/denom, sum_text/denom, sum_img/denom, sum_flow/denom)

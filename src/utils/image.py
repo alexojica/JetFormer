@@ -45,20 +45,6 @@ def aspect_preserving_resize_and_center_crop(img: Image.Image, resolution: int) 
     return img
 
 
-def compute_image_bpd(gmm_nll_nats: torch.Tensor,
-                      residual_nll_nats: torch.Tensor,
-                      flow_logdet: torch.Tensor,
-                      image_shape_chw: Tuple[int, int, int]) -> torch.Tensor:
-    """Deprecated: use src.losses.bits_per_dim_ar for a centralized implementation.
-
-    This function forwards to losses.bits_per_dim_ar and returns the total_bpd.
-    """
-    from src.utils.losses import bits_per_dim_ar
-    total_bpd, _, _ = bits_per_dim_ar(gmm_nll_nats, residual_nll_nats, flow_logdet, image_shape_chw, reduce=False)
-    return total_bpd
-
-
-
 def patchify(x_nhwc: torch.Tensor, patch_size: int) -> torch.Tensor:
     """Convert NHWC images to [B, N_patches, 3*ps*ps] tokens.
 

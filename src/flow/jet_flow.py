@@ -8,6 +8,9 @@ from typing import Sequence, Tuple, Optional, Callable
 import torch.utils.checkpoint as checkpoint
 from src.utils.losses import bits_per_dim_flow
 from src.transformer import GatedMLP
+from src.utils.logging import get_logger
+
+_logger = get_logger(__name__)
 
 
 def xavier_uniform_init(tensor):
@@ -40,7 +43,7 @@ class ActNorm(nn.Module):
         Note: Must be called during training via `initialize_with_batch` before
         evaluation, otherwise running eval() first will skip initialization.
         """
-        if not self.training:
+        if self.initialized:
             return
         
         with torch.no_grad():
@@ -51,7 +54,7 @@ class ActNorm(nn.Module):
             self.log_scale.data.copy_(-torch.log(std + self.eps))
             self.bias.data.copy_(-mean)
             self.initialized = True
-            print(f"ActNorm initialized for {self.num_features} features.")
+            _logger.info(f"ActNorm initialized for {self.num_features} features.")
 
     def forward(self, x: torch.Tensor):
         """Applies activation normalization and returns the transformed output and log-determinant."""
@@ -833,50 +836,6 @@ class FlowCore(nn.Module):
         """
         _ = self.forward(x_nhwc, context=context)
         return None
-
-    def configure_noise_schedule(self, total_steps: int, sigma0: float = 64.0, sigma_final: float = 0.0) -> None:
-        """Configure cosine RGB noise schedule used during training_step.
-
-        Args:
-            total_steps: Total number of optimizer steps for full curriculum.
-            sigma0: Initial RGB noise std in 8-bit space.
-            sigma_final: Final minimum RGB noise std in 8-bit space.
-        """
-        self.noise_total_steps = int(max(1, total_steps))
-        self.rgb_sigma0 = float(sigma0)
-        self.rgb_sigma_final = float(sigma_final)
-
-    def training_step(self, images_uint8_chw: torch.Tensor):
-        """Performs the flow-only training step on uint8 CHW images.
-
-        Returns a dict with keys: loss, bpd, nll_bpd, flow_bpd, logdet_bpd.
-        """
-        # 8-bit rounding noise curriculum (paper/JAX parity):
-        # r = round((I/127.5 - 1 + 1) * 127.5) == I (uint8); apply sigma*N, round, back to [-1,1]
-        images_f = images_uint8_chw.float()  # [0,255]
-        step_val = self._train_step.to(dtype=torch.float32)
-        t_prog = torch.clamp(step_val / max(1, self.noise_total_steps), min=0.0, max=1.0)
-        sigma_t = torch.tensor(self.rgb_sigma0, device=images_f.device) * (1.0 + math.cos(math.pi * t_prog)) * 0.5
-        sigma_t = torch.clamp_min(sigma_t, float(self.rgb_sigma_final))
-        noisy = images_f + sigma_t * torch.randn_like(images_f)
-        noisy = torch.round(noisy)
-        x11 = (noisy / 127.5) - 1.0
-        # Clamp to valid range [0,1] when converting to NHWC
-        images01 = ((x11 + 1.0) * 0.5).clamp(0.0, 1.0)
-
-        # NHWC for flow core
-        x_nhwc = images01.permute(0, 2, 3, 1).contiguous()
-        z, logdet = self.forward(x_nhwc)
-
-        loss_bpd, nll_bpd, flow_bpd, logdet_bpd = bits_per_dim_flow(z.float(), logdet.float(), self.input_img_shape_hwc, reduce=True)
-        self._train_step = self._train_step + 1
-        return {
-            "loss": loss_bpd,
-            "bpd": loss_bpd,
-            "nll_bpd": nll_bpd,
-            "flow_bpd": flow_bpd,
-            "logdet_bpd": logdet_bpd,
-        }
 
 
 def load_params_from_flax_checkpoint(pytorch_model, flax_params_dict):
