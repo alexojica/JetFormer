@@ -331,10 +331,10 @@ def generate_and_log_samples(base_model,
 
     wandb_images = [wandb.Image(s['image'], caption=s['prompt']) for s in samples]
     try:
-        wandb.log({"generation/samples_table": table, "generation/samples": wandb_images, "generation/step": step}, step=int(step))
+        wandb.log({"generation/samples": wandb_images, "generation/step": step}, step=int(step))
     except Exception:
         try:
-            wandb.log({"generation/samples_table": table, "generation/samples": wandb_images, "generation/step": step})
+            wandb.log({"generation/samples": wandb_images, "generation/step": step})
         except Exception:
             pass
 
