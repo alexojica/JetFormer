@@ -54,11 +54,22 @@ flow_grad_checkpoint: false
 ema:
   enabled: false
 
-# Noise curriculum
-rgb_sigma0: 32.0
-rgb_sigma_final: 0.0
-noise_curriculum_epochs: 30
-latent_noise_std: 0.3
+# Training mode (paper path on CIFAR-10): PCA + adaptor
+jetformer_training_mode: pca
+
+patch_pca:
+  pca_init_file: null
+  whiten: true
+  noise_std: 0.01
+  add_dequant_noise: false
+  input_size: [32, 32]
+  patch_size: 4
+  depth_to_seq: 1
+  skip_pca: false
+
+adaptor:
+  kind: jet
+
 text_loss_weight: 0.0
 image_loss_weight: 1.0
 grad_accum_steps: 1

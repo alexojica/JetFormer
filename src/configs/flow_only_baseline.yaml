@@ -67,10 +67,24 @@ text_loss_weight: 0.0
 image_loss_weight: 1.0
 grad_accum_steps: 1
 
-# Flow-only specific settings
-flow_only_mode: true  # New flag to enable flow-only training
-freeze_transformer: true  # Freeze AR transformer params
-gaussian_prior_for_ar: true  # Use Gaussian prior instead of AR predictions
+# Flow-only specific settings (PCA latent space)
+flow_only_mode: true
+freeze_transformer: true
+gaussian_prior_for_ar: true
+jetformer_training_mode: pca
+
+patch_pca:
+  pca_init_file: null
+  whiten: true
+  noise_std: 0.01
+  add_dequant_noise: false
+  input_size: [32, 32]
+  patch_size: 4
+  depth_to_seq: 1
+  skip_pca: false
+
+adaptor:
+  kind: jet
 
 # Epoch-level schedules
 sample_every_epochs: 5

@@ -61,6 +61,10 @@ def build_jetformer_from_config(config: SimpleNamespace | Dict[str, Any], device
         elif val is not None:
             kwargs[name] = val
 
+    # Determine training mode early so we can coordinate Jet construction
+    # Default to 'pca' (paper path); unify on adaptor Jet over PatchPCA latents
+    training_mode = str(_get_from_ns_or_dict(config, 'jetformer_training_mode', 'pca') or 'pca').lower()
+
     # Handle jet config from a nested block
     jet_cfg = _get_from_ns_or_dict(config, 'jet', {})
     jet_params_for_constructor = {
@@ -72,6 +76,12 @@ def build_jetformer_from_config(config: SimpleNamespace | Dict[str, Any], device
         'flow_invertible_dense': _get_from_ns_or_dict(jet_cfg, 'invertible_dense'),
     }
     kwargs.update({k: v for k, v in jet_params_for_constructor.items() if v is not None})
+
+    # Disable pixel/patch Jet in PCA mode to avoid constructing two flows
+    if training_mode == 'pca':
+        # Force-disable pixel-space Jet construction; adaptor flow will be used instead.
+        kwargs['jet_depth'] = 0
+    # Expose the intended training mode on the model later
 
     # Enforce strict special tokens: require ids when flag true; else warn
     bos_id = _get_from_ns_or_dict(config, 'bos_id', None)
@@ -150,9 +160,13 @@ def build_jetformer_from_config(config: SimpleNamespace | Dict[str, Any], device
     if inp is not None:
         kwargs['input_size'] = tuple(inp)
     model = JetFormer(**kwargs).to(device)
+    # Record selected training mode on the model for downstream helpers
+    try:
+        model.training_mode = training_mode
+    except Exception:
+        pass
 
     # Training-mode gate: default to PCA+Adaptor (paper path) unless explicitly set to 'legacy'
-    training_mode = str(_get_from_ns_or_dict(config, 'jetformer_training_mode', 'pca') or 'pca').lower()
 
     # Attach PatchPCA and Adaptor either from nested blocks or sensible defaults when training_mode=='pca'
     try:
@@ -214,6 +228,19 @@ def build_jetformer_from_config(config: SimpleNamespace | Dict[str, Any], device
         # If explicitly legacy, ensure no adaptor by default
         if training_mode != 'pca' and not isinstance(adaptor_cfg, (dict, SimpleNamespace)):
             model.adaptor = None
+    except Exception:
+        pass
+
+    # Unify the active Jet component: always reference the active flow as model.jet
+    # - In PCA mode, point model.jet to the adaptor's FlowCore (latent grid)
+    # - In legacy mode, keep model.jet as the pixel/patch-grid FlowCore constructed inside JetFormer
+    try:
+        if training_mode == 'pca' and getattr(model, 'adaptor', None) is not None:
+            # Alias to latent flow for a single source of truth
+            model.jet = getattr(model.adaptor, 'flow', model.adaptor)
+            model.jet_is_latent = True
+        else:
+            model.jet_is_latent = bool(getattr(model, 'pre_factor_dim', None) is not None)
     except Exception:
         pass
     return model

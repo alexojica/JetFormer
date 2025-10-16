@@ -284,6 +284,64 @@ def compute_flow_only_loss(model,
     }
 
 
+def compute_flow_only_pca_loss(model,
+                               batch,
+                               step: int,
+                               total_steps: int,
+                               *,
+                               eval_no_rgb_noise: bool = False,
+                               advanced_metrics: bool = False):
+    """Flow-only training variant in PCA latent space with Gaussian prior.
+
+    Encodes images with PatchPCA (and optional adaptor), then treats all latent
+    tokens as standard normal.
+    """
+    device = next(model.parameters()).device
+    images = batch['image'].to(device, non_blocking=True)
+    B = images.shape[0]
+
+    # Convert to [-1,1] and encode via PatchPCA
+    x11 = (images.float() / 127.5) - 1.0
+    if not hasattr(model, 'patch_pca') or model.patch_pca is None:
+        raise RuntimeError("Flow-only PCA loss requires model.patch_pca")
+    mu, logvar = model.patch_pca.encode(x11, train=model.training)
+    z = model.patch_pca.reparametrize(mu, logvar, train=model.training)
+
+    # Optional adaptor flow
+    H, W = model.input_size
+    ps = model.patch_size
+    H_patch, W_patch = (H // ps), (W // ps)
+    D_full = z.shape[-1]
+    z_grid = z.transpose(1, 2).contiguous().view(B, D_full, H_patch, W_patch).permute(0, 2, 3, 1).contiguous()
+    if hasattr(model, 'adaptor') and model.adaptor is not None:
+        y_grid, logdet = model.adaptor(z_grid)
+        sum_log_det = logdet
+        y = y_grid.permute(0, 3, 1, 2).contiguous().view(B, D_full, -1).transpose(1, 2).contiguous()
+    else:
+        sum_log_det = torch.zeros(B, device=device, dtype=z.dtype)
+        y = z
+
+    # Gaussian prior on all latent dims
+    gaussian_nll = gaussian_residual_nll(y)
+
+    # Bits/dim per paper constants
+    num_subpix = H * W * 3
+    ln2 = math.log(2.0)
+    ln1275 = math.log(127.5)
+    total_nll = gaussian_nll
+    image_bpd_per_sample = ((total_nll / num_subpix) - (sum_log_det / num_subpix - ln1275)) / ln2
+    image_loss = image_bpd_per_sample.mean()
+
+    return {
+        "loss": image_loss,
+        "text_loss": torch.tensor(0.0, device=device),
+        "image_loss": image_loss,
+        "image_bpd_total": image_bpd_per_sample.mean().detach(),
+        "image_bpd_total_raw": image_bpd_per_sample,
+        "total_nll_nats": total_nll.mean().detach(),
+    }
+
+
 def compute_jetformer_loss(model,
                            batch,
                            step: int,

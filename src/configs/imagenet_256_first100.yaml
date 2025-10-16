@@ -51,9 +51,8 @@ torch_compile: false
 grad_checkpoint_transformer: false
 flow_grad_checkpoint: false
 
-# Training mode (paper path): use PCA+Adaptor latent training
+# Training mode (paper path): PCA+Adaptor latent training
 jetformer_training_mode: pca
-use_patch_pca: true
 text_prefix_prob: 1.0
 loss_on_prefix: false
 stop_grad_nvp_prefix: true
@@ -68,7 +67,7 @@ patch_pca:
   input_size: [256, 256]
   patch_size: 16
   depth_to_seq: 1
-  skip_pca: true
+  skip_pca: false
 
 # Latent Jet adaptor configuration
 adaptor:

@@ -68,7 +68,29 @@ def init_wandb(cfg: Dict[str, Any], is_main_process: bool = True):
 
 def count_model_parameters(model: torch.nn.Module) -> Tuple[int, int, int]:
     total_params = sum(p.numel() for p in model.parameters())
-    jet_params = sum(p.numel() for p in model.jet.parameters()) if hasattr(model, 'jet') else 0
+    flow_params = 0
+    # Count Jet once: if adaptor exists and model.jet aliases adaptor.flow, count adaptor only
+    try:
+        adaptor = getattr(model, 'adaptor', None)
+        jet = getattr(model, 'jet', None)
+        if adaptor is not None and hasattr(adaptor, 'flow') and (jet is getattr(adaptor, 'flow')):
+            flow_params += sum(p.numel() for p in adaptor.parameters())
+        else:
+            if isinstance(jet, torch.nn.Module):
+                flow_params += sum(p.numel() for p in jet.parameters())
+            if adaptor is not None and isinstance(adaptor, torch.nn.Module):
+                flow_params += sum(p.numel() for p in adaptor.parameters())
+    except Exception:
+        # Fallback: count whatever is present
+        if hasattr(model, 'jet') and isinstance(model.jet, torch.nn.Module):
+            flow_params += sum(p.numel() for p in model.jet.parameters())
+        try:
+            adaptor = getattr(model, 'adaptor', None)
+            if adaptor is not None and isinstance(adaptor, torch.nn.Module):
+                flow_params += sum(p.numel() for p in adaptor.parameters())
+        except Exception:
+            pass
+    jet_params = flow_params
     transformer_params = total_params - jet_params
     return total_params, jet_params, transformer_params
 
@@ -103,20 +125,36 @@ def initialize_actnorm_if_needed(model: torch.nn.Module,
             x01 = torch.clamp(dequantize01(images01), 0.0, 1.0)
             x_nhwc = x01.permute(0, 2, 3, 1).contiguous()
             base = model.module if hasattr(model, 'module') else model
-            if getattr(base, 'pre_factor_dim', None) is not None:
+            # Prefer explicit training_mode if present
+            training_mode = str(getattr(base, 'training_mode', 'legacy')).lower()
+            if training_mode == 'pca' and hasattr(base, 'patch_pca') and base.patch_pca is not None and hasattr(base, 'adaptor') and base.adaptor is not None:
+                # Initialize latent Jet flow using PatchPCA latents
                 H, W = base.input_size
                 ps = base.patch_size
-                d = int(base.pre_factor_dim)
-                tokens_px = base._patchify(x_nhwc)
-                if base.pre_latent_projection is not None and base.pre_proj is not None:
-                    tokens_px, _ = base.pre_proj(tokens_px)
-                tokens_hat_in = tokens_px[..., :d]
-                H_patch = H // ps
-                W_patch = W // ps
-                tokens_hat_grid = tokens_hat_in.transpose(1, 2).contiguous().view(x_nhwc.shape[0], d, H_patch, W_patch).permute(0, 2, 3, 1).contiguous()
-                base.jet.initialize_with_batch(tokens_hat_grid)
+                H_patch, W_patch = (H // ps), (W // ps)
+                # Convert to [-1,1] and encode
+                x11 = (images.float() / 127.5) - 1.0
+                mu, logvar = base.patch_pca.encode(x11, train=False)
+                z = base.patch_pca.reparametrize(mu, logvar, train=False)
+                D_full = z.shape[-1]
+                z_grid = z.transpose(1, 2).contiguous().view(x_nhwc.shape[0], D_full, H_patch, W_patch).permute(0, 2, 3, 1).contiguous()
+                base.jet.initialize_with_batch(z_grid)
             else:
-                base.jet.initialize_with_batch(x_nhwc)
+                # Legacy/pixel (or pre_factor) path
+                if getattr(base, 'pre_factor_dim', None) is not None:
+                    H, W = base.input_size
+                    ps = base.patch_size
+                    d = int(base.pre_factor_dim)
+                    tokens_px = base._patchify(x_nhwc)
+                    if base.pre_latent_projection is not None and base.pre_proj is not None:
+                        tokens_px, _ = base.pre_proj(tokens_px)
+                    tokens_hat_in = tokens_px[..., :d]
+                    H_patch = H // ps
+                    W_patch = W // ps
+                    tokens_hat_grid = tokens_hat_in.transpose(1, 2).contiguous().view(x_nhwc.shape[0], d, H_patch, W_patch).permute(0, 2, 3, 1).contiguous()
+                    base.jet.initialize_with_batch(tokens_hat_grid)
+                else:
+                    base.jet.initialize_with_batch(x_nhwc)
         except Exception as e:
             logger.debug("ActNorm init skipped due to exception: %r", e, exc_info=True)
 
@@ -395,89 +433,59 @@ def train_step(model: torch.nn.Module,
     eval_no_rgb_noise = bool(batch.get('no_rgb_noise'))
     advanced_metrics = bool(getattr(config, 'advanced_metrics', False))
     
-    # Check if we're in flow-only mode
+    # Single path: PCA + adaptor Jet (paper path). Optional flow-only remains as PCA-variant below.
     flow_only_mode = bool(getattr(config, 'flow_only_mode', False))
-    
+    text_loss_weight = float(getattr(config, 'text_loss_weight', 0.0))
+    image_loss_weight = float(getattr(config, 'image_loss_weight', 1.0))
+    cfg_drop_prob = float(getattr(config, 'cfg_drop_prob', 0.0))
+
     if flow_only_mode:
-        # Flow-only training with Gaussian prior
-        from src.utils.losses import compute_flow_only_loss
-        out = compute_flow_only_loss(
+        # Flow-only in PCA space: Gaussian prior over PatchPCA (and adaptor) latents
+        from src.utils.losses import compute_flow_only_pca_loss
+        out = compute_flow_only_pca_loss(
             model,
             batch,
             step,
             total_steps,
-            rgb_sigma0=rgb_sigma0,
-            rgb_sigma_final=rgb_sigma_final,
             eval_no_rgb_noise=eval_no_rgb_noise,
             advanced_metrics=advanced_metrics,
         )
-        # For flow-only, image_loss_weight should be 1.0 and text_loss_weight should be 0.0
         out["loss"] = out["image_bpd_total"]
-    else:
-        # Determine JetFormer mode: legacy flow+AR (RGB noise curriculum) or PCA+Adaptor
-        # Training-mode gate (default 'pca') can force PCA path independent of attachment failures
-        training_mode = str(getattr(config, 'jetformer_training_mode', 'pca') or 'pca').lower()
-        use_patch_pca = (training_mode == 'pca') and bool(getattr(model, 'patch_pca', None) is not None)
-        text_loss_weight = float(getattr(config, 'text_loss_weight'))
-        image_loss_weight = float(getattr(config, 'image_loss_weight'))
-        cfg_drop_prob = float(getattr(config, 'cfg_drop_prob'))
+        return out
 
-        if use_patch_pca:
-            # Paper-aligned PCA latent path
-            text_first_prob = float(getattr(config, 'text_prefix_prob', 0.5))
-            input_noise_std = float(getattr(config, 'input_noise_std', 0.0))
-            stop_grad_nvp_prefix = bool(getattr(config, 'stop_grad_nvp_prefix', False))
-            # PCA pixel noise schedule parameters (JAX parity)
-            noise_scale = None
-            noise_min = None
-            try:
-                # cosine schedule precomputed above is specific to flow trainer; here we allow constant value
-                noise_scale = float(getattr(config, 'noise_scale')) if hasattr(config, 'noise_scale') else None
-            except Exception:
-                noise_scale = None
-            try:
-                noise_min = float(getattr(config, 'noise_min')) if hasattr(config, 'noise_min') else None
-            except Exception:
-                noise_min = None
-            rgb_noise_on_image_prefix = bool(getattr(config, 'rgb_noise_on_image_prefix', True))
-            from src.utils.losses import compute_jetformer_pca_loss
-            out = compute_jetformer_pca_loss(
-                model,
-                batch,
-                step,
-                total_steps,
-                text_first_prob=text_first_prob,
-                input_noise_std=input_noise_std,
-                cfg_drop_prob=cfg_drop_prob,
-                loss_on_prefix=bool(getattr(config, 'loss_on_prefix', True)),
-                stop_grad_nvp_prefix=stop_grad_nvp_prefix,
-                advanced_metrics=advanced_metrics,
-                noise_scale=noise_scale,
-                noise_min=noise_min,
-                rgb_noise_on_image_prefix=rgb_noise_on_image_prefix,
-            )
-        else:
-            # Legacy pipeline that uses RGB noise curriculum and flow encode
-            latent_noise_std = float(getattr(config, 'latent_noise_std'))
-            from src.utils.losses import compute_jetformer_loss
-            out = compute_jetformer_loss(
-                model,
-                batch,
-                step,
-                total_steps,
-                rgb_sigma0=rgb_sigma0,
-                rgb_sigma_final=rgb_sigma_final,
-                latent_noise_std=latent_noise_std,
-                cfg_drop_prob=cfg_drop_prob,
-                loss_on_prefix=bool(getattr(config, 'loss_on_prefix', False)),
-                eval_no_rgb_noise=eval_no_rgb_noise,
-                advanced_metrics=advanced_metrics,
-                text_first_prob=float(getattr(config, 'text_prefix_prob', 0.5)),
-                stop_grad_nvp_prefix=bool(getattr(config, 'stop_grad_nvp_prefix', False)),
-            )
-        # Build weighted total from differentiable components
-        total = (text_loss_weight * out["text_loss"]) + (image_loss_weight * out["image_loss"])
-        out["loss"] = total
+    # PCA image latent training (paper path)
+    text_first_prob = float(getattr(config, 'text_prefix_prob', 0.5))
+    input_noise_std = float(getattr(config, 'input_noise_std', 0.0))
+    stop_grad_nvp_prefix = bool(getattr(config, 'stop_grad_nvp_prefix', False))
+    noise_scale = None
+    noise_min = None
+    try:
+        noise_scale = float(getattr(config, 'noise_scale')) if hasattr(config, 'noise_scale') else None
+    except Exception:
+        noise_scale = None
+    try:
+        noise_min = float(getattr(config, 'noise_min')) if hasattr(config, 'noise_min') else None
+    except Exception:
+        noise_min = None
+    rgb_noise_on_image_prefix = bool(getattr(config, 'rgb_noise_on_image_prefix', True))
+    from src.utils.losses import compute_jetformer_pca_loss
+    out = compute_jetformer_pca_loss(
+        model,
+        batch,
+        step,
+        total_steps,
+        text_first_prob=text_first_prob,
+        input_noise_std=input_noise_std,
+        cfg_drop_prob=cfg_drop_prob,
+        loss_on_prefix=bool(getattr(config, 'loss_on_prefix', True)),
+        stop_grad_nvp_prefix=stop_grad_nvp_prefix,
+        advanced_metrics=advanced_metrics,
+        noise_scale=noise_scale,
+        noise_min=noise_min,
+        rgb_noise_on_image_prefix=rgb_noise_on_image_prefix,
+    )
+    total = (text_loss_weight * out["text_loss"]) + (image_loss_weight * out["image_loss"])
+    out["loss"] = total
     
     return out
 

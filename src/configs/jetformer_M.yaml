@@ -26,10 +26,21 @@ batch_size: 24
 num_epochs: 1
 torch_compile: false
 
-# Curriculum & latent noise
-rgb_sigma0: 64.0
-rgb_sigma_final: 3.0
-latent_noise_std: 0.3
+# Training mode (paper path)
+jetformer_training_mode: pca
+
+patch_pca:
+  pca_init_file: null
+  whiten: true
+  noise_std: 0.0
+  add_dequant_noise: false
+  input_size: [256, 256]
+  patch_size: 16
+  depth_to_seq: 1
+  skip_pca: false
+
+adaptor:
+  kind: jet
 
 # Loss balancing
 text_loss_weight: 0.0025

@@ -77,7 +77,7 @@ patch_pca:
   patch_size: 16
   codeword_dim: 128
   add_dequant_noise: true
-  skip_pca: true
+  skip_pca: false
 
 # Adaptor config
 use_adaptor: true

@@ -55,7 +55,6 @@ flow_grad_checkpoint: false
 
 # Training mode (paper path)
 jetformer_training_mode: pca
-use_patch_pca: true
 text_prefix_prob: 1.0
 loss_on_prefix: false
 stop_grad_nvp_prefix: true
@@ -69,7 +68,7 @@ patch_pca:
   input_size: [256, 256]
   patch_size: 16
   depth_to_seq: 1
-  skip_pca: true
+  skip_pca: false
 
 adaptor:
   kind: jet
