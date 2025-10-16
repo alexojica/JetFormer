@@ -1,12 +1,17 @@
 import os
+import time
+import math
+from typing import Dict, Any, Optional, Tuple
 from types import SimpleNamespace
-from typing import Any, Dict, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 
 import wandb
+from PIL import Image as PILImage
+from wandb.sdk.data_types.image import Image as WandbImage
 from src.utils.logging import get_logger
 logger = get_logger(__name__)
 from src.jetformer import JetFormer
@@ -238,7 +243,7 @@ def generate_flow_only_samples(base_model, device: torch.device, num_samples: in
         print(f"Error generating flow-only samples: {e}")
         # Return placeholder images on error
         from PIL import Image
-        placeholder = Image.new('RGB', (32, 32), color='red')
+        placeholder = PILImage.new('RGB', (32, 32), color='red')
         return [{'prompt': f'Error {i+1}', 'image': placeholder} for i in range(num_samples)]
 
 
@@ -253,6 +258,11 @@ def generate_and_log_samples(base_model,
                              num_samples: int,
                              batch_idx: Optional[int] = None,
                              flow_only_mode: bool = False) -> None:
+    # Check if wandb is available and initialized
+    if wandb.run is None:
+        logger.warning("W&B run not initialized, skipping sample logging")
+        return
+        
     # Handle flow-only mode
     if flow_only_mode:
         samples = generate_flow_only_samples(base_model, device, num_samples)
@@ -320,23 +330,45 @@ def generate_and_log_samples(base_model,
                 cfg_mode=str(cfg_mode)
             )
 
-    if batch_idx is not None:
-        table = wandb.Table(columns=["Batch", "Sample ID", "Text Prompt", "Image"])
-        for i, sample in enumerate(samples):
-            table.add_data(batch_idx, i+1, sample['prompt'], wandb.Image(sample['image']))
-    else:
-        table = wandb.Table(columns=["Stage", "Sample ID", "Prompt/Class", "Image"])
-        for i, sample in enumerate(samples):
-            table.add_data(stage_label, i+1, sample['prompt'], wandb.Image(sample['image']))
+    # Assert that upstream samplers produced concrete image payloads
+    for idx, sample in enumerate(samples):
+        img_obj = sample.get('image', None)
+        assert isinstance(img_obj, PILImage), f"Sample {idx} has non-image payload of type {type(img_obj)!r}"
 
-    wandb_images = [wandb.Image(s['image'], caption=s['prompt']) for s in samples]
-    try:
-        wandb.log({"generation/samples": wandb_images, "generation/step": step}, step=int(step))
-    except Exception:
+    # Create wandb images for grid display
+    wandb_images = []
+    for s in samples:
         try:
-            wandb.log({"generation/samples": wandb_images, "generation/step": step})
-        except Exception:
-            pass
+            np_img = np.array(s['image']) if not isinstance(s['image'], np.ndarray) else s['image']
+            np_img = np.clip(np_img, 0, 255).astype(np.uint8)
+            wandb_images.append(wandb.Image(np_img, caption=s['prompt']))
+        except Exception as e:
+            logger.warning(f"Failed to process sample image: {e}")
+            continue
+
+    for idx, wb_image in enumerate(wandb_images):
+        assert isinstance(wb_image, WandbImage), f"Logged sample {idx} is not a WandB Image (type={type(wb_image)!r})"
+
+    # Prepare log payload
+    log_payload = {"generation/step": step}
+    if wandb_images:
+        log_payload["generation/samples"] = wandb_images
+
+    if len(log_payload) == 1:  # only step present
+        logger.warning("No samples generated to log")
+        return
+
+    try:
+        wandb.log(log_payload, step=int(step))
+        logger.info(f"Successfully logged {len(wandb_images)} samples at step {step}")
+    except Exception as e:
+        logger.error(f"Failed to log samples to W&B: {e}")
+        # Try without step parameter as fallback
+        try:
+            wandb.log(log_payload)
+            logger.info(f"Logged samples without step parameter")
+        except Exception as e2:
+            logger.error(f"Failed to log samples to W&B (fallback): {e2}")
 
 
 def save_checkpoint(model: torch.nn.Module,

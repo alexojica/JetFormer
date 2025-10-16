@@ -39,13 +39,13 @@ hf_safe_image_decode: true
 class_subset: "50:100"
 
 # Optimization / curriculum
-batch_size: 64
-learning_rate: 0.0003
+batch_size: 56
+learning_rate: 0.0001
 weight_decay: 0.0001
 opt_b1: 0.9
 opt_b2: 0.95
 grad_clip_norm: 1.0
-num_epochs: 200
+num_epochs: 50
 precision: bf16
 torch_compile: false
 grad_checkpoint_transformer: false
