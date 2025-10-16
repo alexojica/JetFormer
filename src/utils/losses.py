@@ -567,5 +567,6 @@ def compute_jetformer_pca_loss(model,
         "flow_bpd_component": ((-sum_log_det / num_subpix + ln1275) / ln2).mean().detach(),
         # Sanity check metrics
         "gmm_small_scales_rate": small_scales_rate.detach(),
+        "sigma_rgb": torch.as_tensor(base_sigma).detach(),
         **diagnostics,
     }
