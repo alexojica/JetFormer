@@ -55,21 +55,25 @@ flow_grad_checkpoint: false
 jetformer_training_mode: pca
 use_patch_pca: true
 text_prefix_prob: 1.0
+loss_on_prefix: false
+stop_grad_nvp_prefix: true
+input_noise_std: 0.3
 
 # PatchPCA configuration (defaults are sensible; keep explicit for clarity)
 patch_pca:
   pca_init_file: null
   whiten: true
-  noise_std: 0.0
+  noise_std: 0.01
   add_dequant_noise: false
   input_size: [256, 256]
   patch_size: 16
   depth_to_seq: 1
-  skip_pca: false
+  skip_pca: true
 
 # Latent Jet adaptor configuration
 adaptor:
   kind: jet
+  latent_noise_dim: 640
 
 # EMA
 ema:
@@ -116,6 +120,8 @@ wandb_tags: ["imagenet", "256x256", "B", "first100"]
 rope_skip_pad: true
 num_vocab_repeats: 16
 per_modality_final_norm: false
+strict_special_ids: true
+use_boi_token: true
 # PCA pixel noise schedule (optional). If set, applies constant sigma per batch.
 noise_scale: 64.0
 noise_min: 3.0
