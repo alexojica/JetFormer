@@ -700,13 +700,26 @@ def compute_jetformer_pca_loss(model,
     text_logits, image_logits = model.forward(text_tokens, img_in, text_first_mask, text_mask, drop_text_cond_mask=drop_mask)
 
     # Text loss (JAX parity: always compute CE over masked tokens; no gating by modality order)
+    repeats = int(getattr(model, 'num_vocab_repeats', 1))
+    if repeats > 1:
+        vocab_size = int(getattr(model, 'vocab_size', 0))
+        if bool(getattr(model, 'untie_output_vocab', False)):
+            tokens_for_loss = text_tokens.repeat(1, repeats)
+        else:
+            offsets = [i * vocab_size for i in range(repeats)]
+            tokens_for_loss = torch.cat([text_tokens + off for off in offsets], dim=1)
+        mask_for_loss = text_loss_mask.repeat(1, repeats)
+    else:
+        tokens_for_loss = text_tokens
+        mask_for_loss = text_loss_mask
+
     if loss_on_prefix:
         drop_prefix = (text_first_mask & drop_mask)
         valid_txt = (text_first_mask & (~drop_prefix)) | (~text_first_mask)
-        text_loss = cross_entropy_masked(text_logits, text_tokens, text_loss_mask, valid_txt)
+        text_loss = cross_entropy_masked(text_logits, tokens_for_loss, mask_for_loss, valid_txt)
     else:
         all_examples = torch.ones(B, dtype=torch.bool, device=device)
-        text_loss = cross_entropy_masked(text_logits, text_tokens, text_loss_mask, all_examples)
+        text_loss = cross_entropy_masked(text_logits, tokens_for_loss, mask_for_loss, all_examples)
 
     # Image NLL via GMM on hat_tokens
     # Use model.scale_tol in gmm parameterization
