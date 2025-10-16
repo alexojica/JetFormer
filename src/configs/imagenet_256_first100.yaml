@@ -83,7 +83,7 @@ rgb_sigma0: 64.0
 rgb_sigma_final: 0.0
 noise_curriculum_epochs: 200
 latent_noise_std: 0.3
-text_loss_weight: 0.0
+text_loss_weight: 1.0
 image_loss_weight: 1.0
 grad_accum_steps: 1
 

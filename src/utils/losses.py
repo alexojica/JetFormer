@@ -414,14 +414,28 @@ def compute_jetformer_loss(model,
     text_logits, image_logits = model.forward(text_tokens, hat_tokens_in, text_first_mask, text_mask, drop_text_cond_mask=drop_mask)
 
     # Text loss (JAX parity: always compute CE over masked tokens; no gating by modality order)
+    # Handle repeated vocabulary/sequence: expand tokens/masks to match logits sequence length and vocab layout.
+    repeats = int(getattr(model, 'num_vocab_repeats', 1))
+    if repeats > 1:
+        vocab_size = int(getattr(model, 'vocab_size', 0))
+        if bool(getattr(model, 'untie_output_vocab', False)):
+            tokens_for_loss = text_tokens.repeat(1, repeats)
+        else:
+            offsets = [i * vocab_size for i in range(repeats)]
+            tokens_for_loss = torch.cat([text_tokens + off for off in offsets], dim=1)
+        mask_for_loss = text_loss_mask.repeat(1, repeats)
+    else:
+        tokens_for_loss = text_tokens
+        mask_for_loss = text_loss_mask
+
     if loss_on_prefix:
         # Optional ablation: exclude dropped text-prefix tokens when text-first
         drop_prefix = (text_first_mask & drop_mask)
         valid_txt = (text_first_mask & (~drop_prefix)) | (~text_first_mask)
-        text_loss = cross_entropy_masked(text_logits, text_tokens, text_loss_mask, valid_txt)
+        text_loss = cross_entropy_masked(text_logits, tokens_for_loss, mask_for_loss, valid_txt)
     else:
         all_examples = torch.ones(B, dtype=torch.bool, device=device)
-        text_loss = cross_entropy_masked(text_logits, text_tokens, text_loss_mask, all_examples)
+        text_loss = cross_entropy_masked(text_logits, tokens_for_loss, mask_for_loss, all_examples)
 
     # Image loss components
     # Prefer model's gmm_params so scale_tol is applied consistently
@@ -489,17 +503,27 @@ def compute_jetformer_loss(model,
             except Exception:
                 image_logits_rms = torch.tensor(float('nan'), device=device)
         Bsz, T, V = text_logits.shape
+        # Repeat/offset tokens and masks for metric computation to match logits
+        if repeats > 1:
+            if bool(getattr(model, 'untie_output_vocab', False)):
+                tokens_dbg = text_tokens.repeat(1, repeats)
+            else:
+                tokens_dbg = torch.cat([text_tokens + (i * int(getattr(model, 'vocab_size', V // max(1, repeats)))) for i in range(repeats)], dim=1)
+            mask_dbg = text_loss_mask.repeat(1, repeats)
+        else:
+            tokens_dbg = text_tokens
+            mask_dbg = text_loss_mask
         logits_flat = text_logits.reshape(Bsz * T, V)
-        tokens_flat = text_tokens.reshape(Bsz * T)
+        tokens_flat = tokens_dbg.reshape(Bsz * T)
         ce_all = F.cross_entropy(logits_flat, tokens_flat, reduction='none').view(Bsz, T)
         if loss_on_prefix:
             drop_prefix = (text_first_mask & drop_mask)
             valid_txt = (text_first_mask & (~drop_prefix)) | (~text_first_mask)
-            mask_used = text_loss_mask.float() * valid_txt.float().unsqueeze(1)
+            mask_used = mask_dbg.float() * valid_txt.float().unsqueeze(1)
         else:
-            mask_used = text_loss_mask.float() * text_second_mask.float().unsqueeze(1)
+            mask_used = mask_dbg.float() * text_second_mask.float().unsqueeze(1)
         text_ce_denom = mask_used.sum().clamp_min(1.0)
-        text_loss_unmasked = (ce_all * text_loss_mask.float()).sum() / text_loss_mask.float().sum().clamp_min(1.0)
+        text_loss_unmasked = (ce_all * mask_dbg.float()).sum() / mask_dbg.float().sum().clamp_min(1.0)
 
     return {
         # Differentiable components for training
@@ -698,7 +722,10 @@ def compute_jetformer_pca_loss(model,
     gmm_nll = gmm_nll_flat.view(B, N).sum(dim=1)
 
     # Residual dims (whitened) contribute Gaussian NLL if present
-    residual_nll = gaussian_residual_nll(residual_latent)
+    if residual_latent is not None:
+        residual_nll = gaussian_residual_nll(residual_latent)
+    else:
+        residual_nll = torch.zeros(B, device=device, dtype=y.dtype)
 
     # BPD composition per paper constants
     H, W = model.input_size
@@ -721,12 +748,80 @@ def compute_jetformer_pca_loss(model,
         tol = float(getattr(model, 'scale_tol', 1e-6))
         small_scales_rate = (scales < tol).float().mean()
 
+    # Detached metrics for logging
+    diagnostics = {}
+    if advanced_metrics:
+        with torch.no_grad():
+            # Re-implement text loss logic to get per-sample nll for prefix/suffix breakdown
+            repeats = int(getattr(model, 'num_vocab_repeats', 1))
+            if repeats > 1:
+                vocab_size = int(getattr(model, 'vocab_size', 0))
+                if bool(getattr(model, 'untie_output_vocab', False)):
+                    tokens_for_loss = text_tokens.repeat(1, repeats)
+                else:
+                    offsets = [i * vocab_size for i in range(repeats)]
+                    tokens_for_loss = torch.cat([text_tokens + off for off in offsets], dim=1)
+                mask_for_loss = text_loss_mask.repeat(1, repeats)
+            else:
+                tokens_for_loss = text_tokens
+                mask_for_loss = text_loss_mask
+
+            B_txt, T_txt, V_txt = text_logits.shape
+            ce_all = F.cross_entropy(text_logits.reshape(B_txt * T_txt, V_txt), tokens_for_loss.reshape(B_txt * T_txt), reduction='none').view(B_txt, T_txt)
+            masked_sum_per_sample = (ce_all * mask_for_loss.float()).sum(dim=1)
+            denom_per_sample = mask_for_loss.float().sum(dim=1).clamp_min(1.0)
+            nll_txt_per_sample = masked_sum_per_sample / denom_per_sample
+
+            drop_prefix = (text_first_mask & drop_mask)
+            where_text_prefix = text_first_mask & ~drop_prefix
+            nll_text_prefix = nll_txt_per_sample[where_text_prefix].mean() if where_text_prefix.any() else torch.tensor(0.0, device=device)
+            where_text_suffix = ~text_first_mask
+            nll_text_suffix = nll_txt_per_sample[where_text_suffix].mean() if where_text_suffix.any() else torch.tensor(0.0, device=device)
+            where_image_prefix = ~text_first_mask & ~drop_prefix
+            nll_image_prefix = image_bpd_per_sample[where_image_prefix].mean() if where_image_prefix.any() else torch.tensor(0.0, device=device)
+            where_image_suffix = text_first_mask
+            nll_image_suffix = image_bpd_per_sample[where_image_suffix].mean() if where_image_suffix.any() else torch.tensor(0.0, device=device)
+
+            try:
+                k = mix_logits.shape[-1]
+                mix_entropy = torch.distributions.Categorical(logits=mix_logits.reshape(B * N, k)).entropy().mean()
+                log_scales = torch.log(scales.clamp_min(1e-12))
+                hat_rms = torch.sqrt(torch.mean(hat_tokens.float() * hat_tokens.float()))
+                res_rms = torch.sqrt(torch.mean(residual_latent.float() * residual_latent.float())) if residual_latent is not None and residual_latent.numel() > 0 else torch.tensor(0.0, device=device)
+                text_first_rate = text_first_mask.float().mean()
+                flow_logdet_per_patch = (sum_log_det.mean() / float(N)) if N > 0 else torch.tensor(float('nan'), device=device)
+                image_logits_rms = torch.sqrt(torch.mean(image_logits.float() * image_logits.float()))
+                diagnostics = {
+                    "nll_text_prefix": nll_text_prefix.detach(),
+                    "nll_text_suffix": nll_text_suffix.detach(),
+                    "nll_image_prefix": nll_image_prefix.detach(),
+                    "nll_image_suffix": nll_image_suffix.detach(),
+                    "gmm_entropy_nats": mix_entropy.detach(),
+                    "gmm_log_scales_mean": log_scales.mean().detach(),
+                    "gmm_log_scales_std": log_scales.std(unbiased=False).detach(),
+                    "ar_hat_tokens_rms": hat_rms.detach(),
+                    "residual_tokens_rms": res_rms.detach(),
+                    "text_first_rate": text_first_rate.detach(),
+                    "flow_logdet_per_patch": flow_logdet_per_patch.detach(),
+                    "image_logits_rms": image_logits_rms.detach(),
+                }
+            except Exception:
+                diagnostics = {
+                    "nll_text_prefix": nll_text_prefix.detach(),
+                    "nll_text_suffix": nll_text_suffix.detach(),
+                    "nll_image_prefix": nll_image_prefix.detach(),
+                    "nll_image_suffix": nll_image_suffix.detach(),
+                }
+
     return {
         "loss": image_loss + 0.0 * text_loss,
         "text_loss": text_loss,
         "image_loss": image_loss,
+        # BPD components
         "image_bpd_total": image_bpd_per_sample.mean().detach(),
-        "image_bpd_total_raw": image_bpd_per_sample,
-        "total_nll_nats": total_nll.mean().detach(),
+        "ar_bpd_component": ((gmm_nll + residual_nll) / num_subpix / ln2).mean().detach(),
+        "flow_bpd_component": ((-sum_log_det / num_subpix + ln1275) / ln2).mean().detach(),
+        # Sanity check metrics
         "gmm_small_scales_rate": small_scales_rate.detach(),
+        **diagnostics,
     }

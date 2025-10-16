@@ -46,6 +46,16 @@ class WBLogger:
         except Exception:
             pass
 
+    def _param_norm(self, model_or_module) -> float:
+        try:
+            total = 0.0
+            for p in model_or_module.parameters():
+                if p.requires_grad:
+                    total += float(torch.sum(p.data.float() * p.data.float()))
+            return float(total) ** 0.5
+        except Exception:
+            return float('nan')
+
     def _grad_norm(self, model) -> float:
         try:
             total = 0.0
@@ -78,11 +88,15 @@ class WBLogger:
             except Exception:
                 grad_norm_jet = float('nan')
             grad_metrics = {
-                "train/grad_norm": self._grad_norm(model),
-                "train/grad_norm_transformer": grad_norm_transformer,
-                "train/grad_norm_jet": grad_norm_jet,
+                "diag/optim/grad_norm": self._grad_norm(model),
+                "diag/optim/grad_norm_transformer": grad_norm_transformer,
+                "diag/optim/grad_norm_jet": grad_norm_jet,
+                # L2 norm of parameters
+                "diag/optim/l2_params": self._param_norm(model),
+                "diag/optim/l2_params_transformer": self._param_norm(base.transformer) if hasattr(base, 'transformer') else 0.0,
+                "diag/optim/l2_params_flow": self._param_norm(base.jet) if hasattr(base, 'jet') else 0.0,
             }
-            # Gradient histograms and summary stats
+            # Grad histograms
             def _concat_grads(module):
                 try:
                     grads = []
@@ -122,52 +136,55 @@ class WBLogger:
                 _add_hist("jet", base.jet)
         # Prefer explicit NLL (nats) if provided; otherwise derive from BPD if possible
         payload = {
-            # Bits/dim first (paper-consistent): total, ar, flow
-            "train/total_bpd": float(out.get('image_bpd_total', out.get('bpd', 0.0))),
-            "train/ar_bpd": float(out.get('ar_bpd_component', 0.0)),
-            "train/flow_bpd": float(out.get('flow_bpd_component', 0.0)),
-            # NLL (nats) next: total, ar, flow(-logdet)
-            "train/nll_nats": float(out.get('total_nll_nats', float('nan'))),
-            "train/ar_nll_nats": float(out.get('ar_nll_nats', float('nan'))),
-            "train/flow_neg_logdet_nats": float(out.get('flow_neg_logdet_nats', float('nan'))),
-            # Other log-likelihoods (nats)
-            "train/ar_log_pz_nats": float(out.get('ar_log_pz_nats', float('nan'))),
-            "train/log_px_nats": float(out.get('total_log_px_nats', float('nan'))),
-            # Text
-            "train/text_ce": text_ce,
-            "train/text_ppl": text_ppl,
-            "train/text_loss_masked": float(out.get('text_loss_masked', text_ce)),
-            "train/image_loss_masked": float(out.get('image_loss_masked', out.get('image_bpd_total', 0.0))),
-            "train/text_loss_unmasked": float(out.get('text_loss_unmasked', float('nan'))),
-            "train/text_ce_denom": float(out.get('text_ce_denom', float('nan'))),
+            # Loss components
+            "loss/total": float(out.get('loss', 0.0)),
+            "loss/image": float(out.get('image_loss', 0.0)),
+            "loss/text": float(out.get('text_loss', 0.0)),
+            # Bits/dim (paper-consistent): total, ar, flow
+            "bpd/total": float(out.get('image_bpd_total', out.get('bpd', 0.0))),
+            "bpd/ar": float(out.get('ar_bpd_component', 0.0)),
+            "bpd/flow": float(out.get('flow_bpd_component', 0.0)),
+            # Text metrics (CE)
+            "text/ce": text_ce,
+            "text/ppl": text_ppl,
+            "text/ce_denom": float(out.get('text_ce_denom', float('nan'))),
+            "text/ce_prefix": float(out.get('nll_text_prefix', float('nan'))),
+            "text/ce_suffix": float(out.get('nll_text_suffix', float('nan'))),
+            # Image metrics (BPD)
+            "bpd/image_prefix": float(out.get('nll_image_prefix', float('nan'))),
+            "bpd/image_suffix": float(out.get('nll_image_suffix', float('nan'))),
             # Curriculum & noise
-            "train/sigma_rgb": float(out.get('sigma_rgb', 0.0)),
-            "train/sigma_rgb_final": float(getattr(self.cfg, 'rgb_sigma_final', 3.0)),
-            "train/latent_noise_std": float(getattr(self.cfg, 'latent_noise_std', 0.3)),
-            "train/cfg_drop_prob": float(getattr(self.cfg, 'cfg_drop_prob', 0.1)),
+            "diag/sigma_rgb": float(out.get('sigma_rgb', 0.0)),
+            "diag/latent_noise_std": float(getattr(self.cfg, 'latent_noise_std', 0.3)),
             # AR/flow diagnostics
-            "train/gmm_entropy_nats": float(out.get('gmm_entropy_nats', float('nan'))),
-            "train/gmm_log_scales_mean": float(out.get('gmm_log_scales_mean', float('nan'))),
-            "train/gmm_log_scales_std": float(out.get('gmm_log_scales_std', float('nan'))),
-            "train/ar_hat_tokens_rms": float(out.get('ar_hat_tokens_rms', float('nan'))),
-            "train/residual_tokens_rms": float(out.get('residual_tokens_rms', float('nan'))),
-            "train/text_first_rate": float(out.get('text_first_rate', float('nan'))),
-            "train/flow_logdet_per_patch": float(out.get('flow_logdet_per_patch', float('nan'))),
-            "train/image_logits_rms": float(out.get('image_logits_rms', float('nan'))),
+            "diag/ar/gmm_entropy_nats": float(out.get('gmm_entropy_nats', float('nan'))),
+            "diag/ar/gmm_log_scales_mean": float(out.get('gmm_log_scales_mean', float('nan'))),
+            "diag/ar/gmm_log_scales_std": float(out.get('gmm_log_scales_std', float('nan'))),
+            "diag/ar/image_logits_rms": float(out.get('image_logits_rms', float('nan'))),
+            "diag/flow/logdet_per_patch": float(out.get('flow_logdet_per_patch', float('nan'))),
+            "diag/latent/ar_hat_tokens_rms": float(out.get('ar_hat_tokens_rms', float('nan'))),
+            "diag/latent/residual_tokens_rms": float(out.get('residual_tokens_rms', float('nan'))),
+            "diag/sanity/gmm_small_scales_rate": float(out.get('gmm_small_scales_rate', 0.0)),
+            "diag/text_first_rate": float(out.get('text_first_rate', float('nan'))),
             # Optimization / dynamics
-            "train/lr": optimizer.param_groups[0]['lr'] if hasattr(optimizer, 'param_groups') else 0.0,
-            "train/optimizer_beta2": optimizer.param_groups[0].get('betas', (None, 0.95))[1] if hasattr(optimizer, 'param_groups') else 0.95,
-            "train/weight_decay": optimizer.param_groups[0].get('weight_decay', 1e-4) if hasattr(optimizer, 'param_groups') else 1e-4,
-            "train/dropout": float(getattr(self.cfg, 'dropout', 0.1)),
-            # Timing
-            "train/batch_time": batch_time,
-            # Housekeeping
-            "train/step": step,
-            "train/epoch": epoch,
-            # Sanity
-            "sanity/gmm_small_scales_rate": float(out.get('gmm_small_scales_rate', 0.0)),
+            "diag/optim/lr": optimizer.param_groups[0]['lr'] if hasattr(optimizer, 'param_groups') else 0.0,
+            "diag/optim/beta2": optimizer.param_groups[0].get('betas', (None, 0.95))[1] if hasattr(optimizer, 'param_groups') else 0.95,
+            "diag/optim/wd": optimizer.param_groups[0].get('weight_decay', 1e-4) if hasattr(optimizer, 'param_groups') else 1e-4,
+            # Timing & housekeeping
+            "perf/batch_time": batch_time,
+            "step": step,
+            "epoch": epoch,
         }
         if log_grads and (grad_metrics or grad_hists):
+            # Add parameter norms for other components
+            try:
+                p_other = grad_metrics.get("diag/optim/l2_params", 0.0)**2
+                p_transformer = grad_metrics.get("diag/optim/l2_params_transformer", 0.0)**2
+                p_flow = grad_metrics.get("diag/optim/l2_params_flow", 0.0)**2
+                p_other = max(0.0, p_other - p_transformer - p_flow) ** 0.5
+                grad_metrics["diag/optim/l2_params_other"] = p_other
+            except Exception:
+                grad_metrics["diag/optim/l2_params_other"] = 0.0
             payload.update(grad_metrics)
             payload.update(grad_hists)
         try:
@@ -180,32 +197,16 @@ class WBLogger:
         if not self.enabled:
             return
         text_ppl = float(math.exp(min(30.0, v_text))) if v_text > 0 else 0.0
-        # Recover NLL in nats from BPD using actual model input size
-        base = model
-        if hasattr(base, 'module'):
-            base = base.module
-        C = 3
-        try:
-            H, W = int(base.input_size[0]), int(base.input_size[1])
-        except Exception:
-            H = int(getattr(self.cfg, 'input_size', (256,256))[0])
-            W = int(getattr(self.cfg, 'input_size', (256,256))[1])
-        dim_x = float(C * H * W)
-        val_total_nll = float(v_img_bpd) * math.log(2.0) * dim_x
-        val_flow_neg_logdet = float(v_flow_bpd) * math.log(2.0) * dim_x
-        val_ar_nll = val_total_nll - val_flow_neg_logdet
         payload = {
-            # Bits/dim first
-            'val/total_bpd': v_img_bpd,
-            'val/ar_bpd': (v_img_bpd - v_flow_bpd),
-            'val/flow_bpd': v_flow_bpd,
-            # NLL (nats) next
-            'val/nll_nats': val_total_nll,
-            'val/ar_nll_nats': val_ar_nll,
-            'val/flow_neg_logdet_nats': val_flow_neg_logdet,
-            # Text
-            'val/text_ce': v_text,
-            'val/text_ppl': text_ppl,
+            # Main validation loss
+            "val/loss": v_total,
+            # BPD components
+            "val/bpd/total": v_img_bpd,
+            "val/bpd/ar": (v_img_bpd - v_flow_bpd),
+            "val/bpd/flow": v_flow_bpd,
+            # Text metrics
+            "val/text/ce": v_text,
+            "val/text/ppl": text_ppl,
             # Housekeeping
             'epoch': epoch,
             'global_step': step,

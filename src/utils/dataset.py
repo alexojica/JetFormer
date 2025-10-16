@@ -858,6 +858,9 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
         flip_prob = float(getattr(config, 'random_flip_prob', 0.0))
         dataset = TorchvisionCIFAR10(split='train', download=True, random_flip_prob=flip_prob)
         val_dataset = TorchvisionCIFAR10(split='test', download=True, random_flip_prob=0.0)
+        # Provide class label as text tokens for AR conditioning
+        dataset = ClassAsTextDataset(dataset)
+        val_dataset = ClassAsTextDataset(val_dataset)
     elif str(dataset_choice).lower() == 'imagenet1k_hf':
         # Use HF ILSVRC/imagenet-1k with user-specified resolution
         H, W = tuple(getattr(config, 'input_size'))

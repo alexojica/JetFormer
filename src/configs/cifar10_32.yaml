@@ -35,8 +35,15 @@ cfg_mode: "reject"
 # Dataset / training target
 dataset: cifar10
 
+# Special tokens and parity toggles (required when strict_special_ids=True)
+strict_special_ids: true
+use_boi_token: true
+bos_id: 10
+boi_id: 11
+nolabel_id: 12
+
 # Optimization / curriculum
-batch_size: 2048
+batch_size: 32
 learning_rate: 0.001
 warmup_percent: 0.1
 use_cosine: true
@@ -44,7 +51,7 @@ weight_decay: 0.0001
 opt_b1: 0.9
 opt_b2: 0.95
 grad_clip_norm: 1.0
-num_epochs: 400
+num_epochs: 100
 precision: fp32
 torch_compile: false
 grad_checkpoint_transformer: false
@@ -70,7 +77,7 @@ patch_pca:
 adaptor:
   kind: jet
 
-text_loss_weight: 0.0
+text_loss_weight: 1.0
 image_loss_weight: 1.0
 grad_accum_steps: 1
 
