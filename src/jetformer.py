@@ -665,11 +665,9 @@ class JetFormer(nn.Module):
             position_ids = torch.clamp(position_ids, min=0)
         else:
             position_ids = torch.arange(seq_len, device=x_aligned.device).unsqueeze(0).expand(x_aligned.size(0), -1)
-        # Pad attention mask along cache (key) dimension up to cache_size (parity with JAX)
-        if attn_mask is not None and isinstance(cache_size, int) and cache_size > 0:
-            pad_needed = int(cache_size) - int(attn_mask.shape[-1])
-            if pad_needed > 0:
-                attn_mask = F.pad(attn_mask, (0, pad_needed), value=False)
+        # During prefill, don't pad the mask - it should match the actual sequence length
+        # The KV cache will grow dynamically as tokens are generated
+        # Padding the mask here causes shape mismatches in attention computation
         h = x_aligned
         
         new_caches = []
@@ -683,6 +681,12 @@ class JetFormer(nn.Module):
         else:
             # This path is for non-Gemma transformer, which doesn't have caching implemented
             h, _ = self.transformer(h, attn_mask, position_ids)
+
+        # Pad attention mask along cache (key) dimension up to cache_size (parity with JAX)
+        if attn_mask is not None and isinstance(cache_size, int) and cache_size > 0:
+            pad_needed = int(cache_size) - int(attn_mask.shape[-1])
+            if pad_needed > 0:
+                attn_mask = F.pad(attn_mask, (0, pad_needed), value=False)
 
         return h[:, -1:, :], new_caches
 

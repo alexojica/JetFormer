@@ -120,16 +120,25 @@ def generate_text_to_image_samples_cfg(
             current_pos = prefix_c.shape[1]
 
             for pos in range(model.image_seq_len):
+                # Convert hidden prelogits to image head logits before building PDFs
+                def get_img_logits(prelogits):
+                    if getattr(model, 'use_bfloat16_img_head', False):
+                        return model.img_head(prelogits.to(torch.bfloat16)).float()
+                    return model.img_head(prelogits)
+
+                image_logits_c = get_img_logits(last_prelogits_c)
+                image_logits_u = get_img_logits(last_prelogits_u)
+
                 if cfg_mode == "density":
                     # Build distribution-level CFG from conditional and unconditional densities
-                    pdf_c = model.get_pdf(last_prelogits_c, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
-                    pdf_u = model.get_pdf(last_prelogits_u, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
+                    pdf_c = model.get_pdf(image_logits_c, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
+                    pdf_u = model.get_pdf(image_logits_u, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
                     pdf = CFGDensity(pdf_c, pdf_u, w=cfg_strength)
                     sampled_token = pdf.sample()
                 else:
                     # Pre-logit interpolation (legacy)
-                    guided_prelogits = last_prelogits_u + cfg_strength * (last_prelogits_c - last_prelogits_u)
-                    pdf = model.get_pdf(guided_prelogits, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
+                    guided_logits = image_logits_u + cfg_strength * (image_logits_c - image_logits_u)
+                    pdf = model.get_pdf(guided_logits, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
                     sampled_token = pdf.sample() # Shape: [B, 1, D_ar]
                 image_tokens[:, pos, :] = sampled_token.squeeze(1)
 
@@ -138,7 +147,7 @@ def generate_text_to_image_samples_cfg(
 
                 # Embed the new token and extend cache for next step
                 new_token_emb = model.image_emb(sampled_token)
-                position_ids = torch.tensor([[current_pos + pos + 1]], device=device, dtype=torch.long)
+                position_ids = torch.tensor([[current_pos + pos]], device=device, dtype=torch.long)
                 
                 last_prelogits_c, cache_c = model.extend_cache(new_token_emb, cache_c, position_ids)
                 last_prelogits_u, cache_u = model.extend_cache(new_token_emb, cache_u, position_ids)
@@ -159,9 +168,9 @@ def generate_text_to_image_samples_cfg(
             samples.append({'prompt': prompt_value, 'image': image_pil})
 
         except Exception as e:
-            print(f"Error during sampling for prompt '{prompt_text}': {e}")
-            import traceback
-            traceback.print_exc()
+            from src.utils.logging import get_logger
+            logger = get_logger(__name__)
+            logger.error(f"Error during sampling for prompt '{prompt_text}': {e}", exc_info=True)
             placeholder = Image.new('RGB', (256, 256), color='red')
             samples.append({'prompt': (prompt_value if 'prompt_value' in locals() else prompt_text), 'image': placeholder})
             
@@ -265,13 +274,22 @@ def generate_class_conditional_samples(base,
             current_pos = prefix_c.shape[1]
 
             for pos in range(base.image_seq_len):
+                # Convert hidden prelogits to image head logits before building PDFs
+                def get_img_logits(prelogits):
+                    if getattr(base, 'use_bfloat16_img_head', False):
+                        return base.img_head(prelogits.to(torch.bfloat16)).float()
+                    return base.img_head(prelogits)
+
+                image_logits_c = get_img_logits(last_prelogits_c)
+                image_logits_u = get_img_logits(last_prelogits_u)
+
                 if cfg_mode == "density":
-                    pdf_c = base.get_pdf(last_prelogits_c, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
-                    pdf_u = base.get_pdf(last_prelogits_u, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
+                    pdf_c = base.get_pdf(image_logits_c, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
+                    pdf_u = base.get_pdf(image_logits_u, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
                     pdf = CFGDensity(pdf_c, pdf_u, w=cfg_strength)
                     sampled = pdf.sample()
                 else:  # Default to "interp" mode (logit interpolation)
-                    guided_logits = last_prelogits_u + cfg_strength * (last_prelogits_c - last_prelogits_u)
+                    guided_logits = image_logits_u + cfg_strength * (image_logits_c - image_logits_u)
                     pdf = base.get_pdf(guided_logits, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
                     sampled = pdf.sample()  # [B, 1, D_ar]
                 
@@ -281,7 +299,7 @@ def generate_class_conditional_samples(base,
                     break
                 
                 new_token_emb = base.image_emb(sampled)
-                position_ids = torch.tensor([[current_pos + pos + 1]], device=device, dtype=torch.long)
+                position_ids = torch.tensor([[current_pos + pos]], device=device, dtype=torch.long)
                 
                 last_prelogits_c, cache_c = base.extend_cache(new_token_emb, cache_c, position_ids)
                 last_prelogits_u, cache_u = base.extend_cache(new_token_emb, cache_u, position_ids)
@@ -301,7 +319,10 @@ def generate_class_conditional_samples(base,
                 prompt_name = None
             prompt_str = str(prompt_name) if (prompt_name is not None) else f'class_{int(cls)}'
             samples.append({'prompt': prompt_str, 'image': Image.fromarray((img*255).clip(0,255).astype('uint8'))})
-        except Exception:
+        except Exception as e:
+            from src.utils.logging import get_logger
+            logger = get_logger(__name__)
+            logger.error(f"Failed to generate sample for class {cls}: {e}", exc_info=True)
             continue
     # Restore original training state
     if was_training:

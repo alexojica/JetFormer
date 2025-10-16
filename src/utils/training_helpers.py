@@ -10,7 +10,7 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader
 
 import wandb
-from PIL import Image as PILImage
+from PIL import Image
 from wandb.sdk.data_types.image import Image as WandbImage
 from src.utils.logging import get_logger
 logger = get_logger(__name__)
@@ -235,15 +235,17 @@ def generate_flow_only_samples(base_model, device: torch.device, num_samples: in
     from src.utils.sampling import sample_flow_images
     try:
         H, W = base_model.input_size
+        logger.info(f"Sampling flow images with shape ({H}, {W}, 3)")
         # Sample from Gaussian prior in latent space
         pil_images = sample_flow_images(base_model.jet, device, num_samples, (H, W, 3))
+        logger.info(f"Successfully generated {len(pil_images)} flow-only images")
         samples = [{'prompt': f'Flow-only sample {i+1}', 'image': img} for i, img in enumerate(pil_images)]
         return samples
     except Exception as e:
-        print(f"Error generating flow-only samples: {e}")
+        logger.error(f"Error generating flow-only samples: {e}", exc_info=True)
         # Return placeholder images on error
         from PIL import Image
-        placeholder = PILImage.new('RGB', (32, 32), color='red')
+        placeholder = Image.new('RGB', (32, 32), color='red')
         return [{'prompt': f'Error {i+1}', 'image': placeholder} for i in range(num_samples)]
 
 
@@ -264,76 +266,90 @@ def generate_and_log_samples(base_model,
         return
         
     # Handle flow-only mode
-    if flow_only_mode:
-        samples = generate_flow_only_samples(base_model, device, num_samples)
-    else:
-        # Standard JetFormer generation
-        dataset_choice_l = str(dataset_choice).lower() if dataset_choice is not None else ''
-        if dataset_choice_l in ('imagenet64_tfds', 'imagenet21k_folder', 'cifar10', 'imagenet1k_hf'):
-            # Pick top-frequency classes actually present in the (possibly truncated) train subset
-            class_ids = None
-            try:
-                ds = dataset
-                # TFDSImagenetResized64 / ImageNet21kFolder expose `samples: List[(index_or_path, class_idx)]`
-                if hasattr(ds, 'samples') and isinstance(ds.samples, (list, tuple)) and len(ds.samples) > 0:
-                    from collections import Counter
-                    counts = Counter()
-                    for item in ds.samples:
-                        try:
-                            if isinstance(item, (tuple, list)) and len(item) >= 2:
-                                counts[int(item[1])] += 1
-                        except Exception:
-                            continue
-                    if len(counts) > 0:
-                        class_ids = [cid for cid, _ in counts.most_common(4)]
-                # Fallback: derive evenly spaced ids from available classes
-                if (not class_ids) and hasattr(ds, 'classes') and isinstance(ds.classes, list) and len(ds.classes) > 0:
-                    n = len(ds.classes)
-                    picks = [0, max(0, n // 3), max(0, (2 * n) // 3), n - 1]
-                    class_ids = sorted(set(int(p) for p in picks if 0 <= p < n))
-            except Exception:
-                class_ids = None
-            # Clamp to model's valid class table
-            try:
-                max_cls = int(getattr(base_model, 'num_classes', 0))
-            except Exception:
-                max_cls = 0
-            if isinstance(class_ids, (list, tuple)) and max_cls and max_cls > 0:
-                class_ids = [int(c) for c in class_ids if 0 <= int(c) < max_cls]
-            if not class_ids or len(class_ids) == 0:
-                # Final fallback: first few valid class ids
-                if max_cls and max_cls > 0:
-                    class_ids = list(range(min(4, max_cls)))
-                else:
-                    class_ids = [0, 1, 2, 3]
-            # Try to forward temperature controls when present in config
-            t_scales = None
-            t_probs = None
-            try:
-                t_scales = float(getattr(dataset, 'temperature_scales'))  # unlikely
-            except Exception:
-                t_scales = None
-            try:
-                t_probs = float(getattr(dataset, 'temperature_probs'))
-            except Exception:
-                t_probs = None
-            samples = generate_class_conditional_samples(
-                base_model, device, class_ids,
-                cfg_strength=float(cfg_strength), cfg_mode=str(cfg_mode),
-                dataset=dataset, temperature_scales=t_scales, temperature_probs=t_probs
-            )
+    samples = []
+    try:
+        if flow_only_mode:
+            logger.info(f"Generating {num_samples} flow-only samples")
+            samples = generate_flow_only_samples(base_model, device, num_samples)
         else:
-            samples = generate_text_to_image_samples_cfg(
-                base_model, dataset, device,
-                num_samples=num_samples,
-                cfg_strength=float(cfg_strength),
-                cfg_mode=str(cfg_mode)
-            )
+            # Standard JetFormer generation
+            dataset_choice_l = str(dataset_choice).lower() if dataset_choice is not None else ''
+            if dataset_choice_l in ('imagenet64_tfds', 'imagenet21k_folder', 'cifar10', 'imagenet1k_hf'):
+                # Pick top-frequency classes actually present in the (possibly truncated) train subset
+                class_ids = None
+                try:
+                    ds = dataset
+                    # TFDSImagenetResized64 / ImageNet21kFolder expose `samples: List[(index_or_path, class_idx)]`
+                    if hasattr(ds, 'samples') and isinstance(ds.samples, (list, tuple)) and len(ds.samples) > 0:
+                        from collections import Counter
+                        counts = Counter()
+                        for item in ds.samples:
+                            try:
+                                if isinstance(item, (tuple, list)) and len(item) >= 2:
+                                    counts[int(item[1])] += 1
+                            except Exception:
+                                continue
+                        if len(counts) > 0:
+                            class_ids = [cid for cid, _ in counts.most_common(4)]
+                    # Fallback: derive evenly spaced ids from available classes
+                    if (not class_ids) and hasattr(ds, 'classes') and isinstance(ds.classes, list) and len(ds.classes) > 0:
+                        n = len(ds.classes)
+                        picks = [0, max(0, n // 3), max(0, (2 * n) // 3), n - 1]
+                        class_ids = sorted(set(int(p) for p in picks if 0 <= p < n))
+                except Exception:
+                    class_ids = None
+                # Clamp to model's valid class table
+                try:
+                    max_cls = int(getattr(base_model, 'num_classes', 0))
+                except Exception:
+                    max_cls = 0
+                if isinstance(class_ids, (list, tuple)) and max_cls and max_cls > 0:
+                    class_ids = [int(c) for c in class_ids if 0 <= int(c) < max_cls]
+                if not class_ids or len(class_ids) == 0:
+                    # Final fallback: first few valid class ids
+                    if max_cls and max_cls > 0:
+                        class_ids = list(range(min(4, max_cls)))
+                    else:
+                        class_ids = [0, 1, 2, 3]
+                # Try to forward temperature controls when present in config
+                t_scales = None
+                t_probs = None
+                try:
+                    t_scales = float(getattr(dataset, 'temperature_scales'))  # unlikely
+                except Exception:
+                    t_scales = None
+                try:
+                    t_probs = float(getattr(dataset, 'temperature_probs'))
+                except Exception:
+                    t_probs = None
+                logger.info(f"Generating class-conditional samples for classes: {class_ids}")
+                samples = generate_class_conditional_samples(
+                    base_model, device, class_ids,
+                    cfg_strength=float(cfg_strength), cfg_mode=str(cfg_mode),
+                    dataset=dataset, temperature_scales=t_scales, temperature_probs=t_probs
+                )
+            else:
+                logger.info(f"Generating {num_samples} text-to-image samples")
+                samples = generate_text_to_image_samples_cfg(
+                    base_model, dataset, device,
+                    num_samples=num_samples,
+                    cfg_strength=float(cfg_strength),
+                    cfg_mode=str(cfg_mode)
+                )
+        logger.info(f"Generated {len(samples)} samples")
+    except Exception as e:
+        logger.error(f"Failed to generate samples: {e}", exc_info=True)
+        samples = []
 
+    # Check if we actually got any samples
+    if not samples:
+        logger.warning(f"Sample generation returned no samples (stage: {stage_label}, step: {step})")
+        return
+    
     # Assert that upstream samplers produced concrete image payloads
     for idx, sample in enumerate(samples):
         img_obj = sample.get('image', None)
-        assert isinstance(img_obj, PILImage), f"Sample {idx} has non-image payload of type {type(img_obj)!r}"
+        assert isinstance(img_obj, Image.Image), f"Sample {idx} has non-image payload of type {type(img_obj)!r}"
 
     # Create wandb images for grid display
     wandb_images = []
@@ -349,14 +365,13 @@ def generate_and_log_samples(base_model,
     for idx, wb_image in enumerate(wandb_images):
         assert isinstance(wb_image, WandbImage), f"Logged sample {idx} is not a WandB Image (type={type(wb_image)!r})"
 
-    # Prepare log payload
-    log_payload = {"generation/step": step}
-    if wandb_images:
-        log_payload["generation/samples"] = wandb_images
-
-    if len(log_payload) == 1:  # only step present
+    # If there are no images to log, return early.
+    if not wandb_images:
         logger.warning("No samples generated to log")
         return
+
+    # Prepare log payload, associating samples directly with the training step.
+    log_payload = {"generation/samples": wandb_images}
 
     try:
         wandb.log(log_payload, step=int(step))
