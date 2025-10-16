@@ -100,6 +100,7 @@ num_workers: 16
 max_samples: null
 ignore_pad: false
 random_flip_prob: 0.5
+dataloader_prefetch_factor: 4
 
 # Accelerator
 accelerator: auto

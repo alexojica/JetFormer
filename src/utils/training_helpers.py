@@ -329,13 +329,12 @@ def generate_and_log_samples(base_model,
         for i, sample in enumerate(samples):
             table.add_data(stage_label, i+1, sample['prompt'], wandb.Image(sample['image']))
 
-    image_dict = {f"generation/{stage_label}_image_{i+1}_{s['prompt']}": wandb.Image(s['image']) for i, s in enumerate(samples)}
     wandb_images = [wandb.Image(s['image'], caption=s['prompt']) for s in samples]
     try:
-        wandb.log({"generation/samples_table": table, **image_dict, "samples": wandb_images, "generation/step": step}, step=int(step))
+        wandb.log({"generation/samples_table": table, "generation/samples": wandb_images, "generation/step": step}, step=int(step))
     except Exception:
         try:
-            wandb.log({"generation/samples_table": table, **image_dict, "samples": wandb_images, "generation/step": step})
+            wandb.log({"generation/samples_table": table, "generation/samples": wandb_images, "generation/step": step})
         except Exception:
             pass
 
