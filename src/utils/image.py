@@ -53,7 +53,7 @@ def compute_image_bpd(gmm_nll_nats: torch.Tensor,
 
     This function forwards to losses.bits_per_dim_ar and returns the total_bpd.
     """
-    from src.losses import bits_per_dim_ar
+    from src.utils.losses import bits_per_dim_ar
     total_bpd, _, _ = bits_per_dim_ar(gmm_nll_nats, residual_nll_nats, flow_logdet, image_shape_chw, reduce=False)
     return total_bpd
 

@@ -16,6 +16,8 @@ jet:
   num_heads: 8
   actnorm: false
   invertible_dense: false
+  # Paper default uses channel-only couplings; keep spatial disabled
+  # by setting channel_repeat=0 and relying on channels-only sequence.
 
 # AR Transformer (Base scale per paper)
 d_model: 1024

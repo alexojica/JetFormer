@@ -132,20 +132,25 @@ class Invertible1x1Conv(nn.Module):
 
 
 class MlpBlock(nn.Module):
-    """A Gemma-style MLP block using GatedMLP."""
-    def __init__(self, in_dim, mlp_dim=None, dropout=0.0, activation="silu"):
+    """A standard ViT-style MLP block."""
+    def __init__(self, in_dim, mlp_dim=None, dropout=0.0, activation="gelu"):
         super().__init__()
         self.mlp_dim = mlp_dim or 4 * in_dim
-        self.gated_mlp = GatedMLP(
-            in_features=in_dim,
-            hidden_features=self.mlp_dim,
-            out_features=in_dim,
-            activation=activation
-        )
+        self.fc1 = nn.Linear(in_dim, self.mlp_dim)
+        if activation == "gelu":
+            self.activation_fn = nn.GELU()
+        elif activation == "silu":
+            self.activation_fn = nn.SiLU()
+        else:
+            raise ValueError(f"Unsupported activation: {activation}")
+        self.fc2 = nn.Linear(self.mlp_dim, in_dim)
         self.dropout = nn.Dropout(dropout)
         
     def forward(self, x):
-        return self.dropout(self.gated_mlp(x))
+        x = self.fc1(x)
+        x = self.activation_fn(x)
+        x = self.fc2(x)
+        return self.dropout(x)
 
 
 class ViTEncoderBlock(nn.Module):
@@ -157,7 +162,7 @@ class ViTEncoderBlock(nn.Module):
         self.dropout_attn = nn.Dropout(dropout)
 
         self.norm2 = nn.LayerNorm(emb_dim)
-        self.mlp = MlpBlock(in_dim=emb_dim, mlp_dim=mlp_dim, dropout=dropout, activation="silu")
+        self.mlp = MlpBlock(in_dim=emb_dim, mlp_dim=mlp_dim, dropout=dropout, activation="gelu")
 
     def forward(self, x, src_key_padding_mask=None):
         residual = x
@@ -846,21 +851,18 @@ class FlowCore(nn.Module):
 
         Returns a dict with keys: loss, bpd, nll_bpd, flow_bpd, logdet_bpd.
         """
-        # Uniform dequantization and normalization to [0,1]
-        images_float = images_uint8_chw.float()
-        noise_u = torch.rand_like(images_float)
-        images01 = (images_float + noise_u) / 256.0
-
-        # Cosine RGB noise curriculum; do not clamp after adding Gaussian noise
-        # Note: paper describes floor(I + sigma*N). Here we use dequantization + Gaussian
-        # in [0,1] space without flooring; the ln(256) constant in the BPD recovers
-        # the correct discrete lower bound.
+        # 8-bit rounding noise curriculum (paper/JAX parity):
+        # r = round((I/127.5 - 1 + 1) * 127.5) == I (uint8); apply sigma*N, round, back to [-1,1]
+        images_f = images_uint8_chw.float()  # [0,255]
         step_val = self._train_step.to(dtype=torch.float32)
         t_prog = torch.clamp(step_val / max(1, self.noise_total_steps), min=0.0, max=1.0)
-        sigma_t = torch.tensor(self.rgb_sigma0, device=images01.device) * (1.0 + math.cos(math.pi * t_prog)) * 0.5
+        sigma_t = torch.tensor(self.rgb_sigma0, device=images_f.device) * (1.0 + math.cos(math.pi * t_prog)) * 0.5
         sigma_t = torch.clamp_min(sigma_t, float(self.rgb_sigma_final))
-        gaussian = torch.randn_like(images01) * (sigma_t / 255.0)
-        images01 = images01 + gaussian
+        noisy = images_f + sigma_t * torch.randn_like(images_f)
+        noisy = torch.round(noisy)
+        x11 = (noisy / 127.5) - 1.0
+        # Clamp to valid range [0,1] when converting to NHWC
+        images01 = ((x11 + 1.0) * 0.5).clamp(0.0, 1.0)
 
         # NHWC for flow core
         x_nhwc = images01.permute(0, 2, 3, 1).contiguous()

@@ -67,6 +67,29 @@ def generate_text_to_image_samples(model, dataset, device, num_samples: int = 3,
     return samples
 
 
+class CFGDensity:
+    """Distribution-level CFG wrapper for two PDFs with weight w.
+
+    This class wraps two distribution-like objects (with sample() and log_prob())
+    and exposes a guided density. For sampling, we use the conditional PDF's
+    sampler. For scoring, we interpolate log-probabilities:
+      log p_guided(x) = log p_u(x) + w * (log p_c(x) - log p_u(x)).
+    """
+
+    def __init__(self, pdf_cond, pdf_uncond, w: float):
+        self.pdf_c = pdf_cond
+        self.pdf_u = pdf_uncond
+        self.w = float(w)
+
+    def sample(self):
+        # Use conditional sampler for guided sampling
+        return self.pdf_c.sample()
+
+    def log_prob(self, x: torch.Tensor):
+        logp_u = self.pdf_u.log_prob(x)
+        logp_c = self.pdf_c.log_prob(x)
+        return logp_u + self.w * (logp_c - logp_u)
+
 @torch.no_grad()
 def generate_text_to_image_samples_cfg(
     model,
@@ -74,7 +97,7 @@ def generate_text_to_image_samples_cfg(
     device,
     num_samples: int = 3,
     cfg_strength: float = 4.0,
-    cfg_mode: str = "interp",
+    cfg_mode: str = "density",
     prompts: list | None = None,
     fast_mixture_first: bool = False,
     temperature_scales: float | None = None,
@@ -155,12 +178,17 @@ def generate_text_to_image_samples_cfg(
             current_pos = prefix_c.shape[1]
 
             for pos in range(model.image_seq_len):
-                # Apply CFG on pre-logits before the head
-                guided_prelogits = last_prelogits_u + cfg_strength * (last_prelogits_c - last_prelogits_u)
-                
-                # Get PDF from guided pre-logits and sample
-                pdf = model.get_pdf(guided_prelogits, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
-                sampled_token = pdf.sample() # Shape: [B, 1, D_ar]
+                if cfg_mode == "density":
+                    # Build distribution-level CFG from conditional and unconditional densities
+                    pdf_c = model.get_pdf(last_prelogits_c, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
+                    pdf_u = model.get_pdf(last_prelogits_u, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
+                    pdf = CFGDensity(pdf_c, pdf_u, w=cfg_strength)
+                    sampled_token = pdf.sample()
+                else:
+                    # Pre-logit interpolation (legacy)
+                    guided_prelogits = last_prelogits_u + cfg_strength * (last_prelogits_c - last_prelogits_u)
+                    pdf = model.get_pdf(guided_prelogits, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
+                    sampled_token = pdf.sample() # Shape: [B, 1, D_ar]
                 image_tokens[:, pos, :] = sampled_token.squeeze(1)
 
                 if pos == model.image_seq_len - 1:

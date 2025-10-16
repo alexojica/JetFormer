@@ -56,10 +56,6 @@ from src.utils.accelerators import GPUAccelerator, TPUAccelerator, HAS_TPU as _H
 
 IMAGE_SIZE = (256, 256, 3)
 
-
-    
-
-
 def train_from_config(config_dict: dict):
     # Accelerator + process setup
     cfg_raw = dict(config_dict or {})

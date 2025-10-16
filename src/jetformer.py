@@ -696,7 +696,7 @@ class JetFormer(nn.Module):
         return h[:, -1:, :], new_caches
 
     @torch.no_grad()
-    def extend_cache(self, x_next: torch.Tensor, cache: list, position_ids: torch.Tensor) -> Tuple[torch.Tensor, list]:
+    def extend_cache(self, x_next: torch.Tensor, cache: list, position_ids: torch.Tensor, cache_size: int | None = None) -> Tuple[torch.Tensor, list]:
         """Extend decode cache with one more embedded token and return last prelogits.
 
         Uses per-layer KV caches.
@@ -704,23 +704,35 @@ class JetFormer(nn.Module):
             x_next: [B,1,D] next-step embedding
             cache: list of KV caches from previous step
             position_ids: [B,1] tensor of current positions
+            cache_size: optional total KV cache window length (defaults to max_seq_len)
         Returns:
             last_prelogits: [B,1,D]
             new_cache: updated list of KV caches
         """
         h = x_next
+        # Build per-step attention mask [B,1,1,S] allowing attend up to current position
+        try:
+            B = x_next.size(0)
+            cs = int(cache_size) if isinstance(cache_size, int) and cache_size > 0 else int(getattr(self, 'max_seq_len', h.shape[1]))
+            cur_pos = position_ids.view(B)
+            keys = torch.arange(cs, device=x_next.device).view(1, 1, cs)
+            # allow keys in [0..cur_pos] inclusive
+            mask_keys = (keys <= cur_pos.view(B, 1, 1))
+            step_mask = mask_keys.unsqueeze(1)  # [B,1,1,S]
+        except Exception:
+            step_mask = None
         new_caches = []
         if isinstance(self.transformer, nn.ModuleList):
             for i, layer in enumerate(self.transformer):
                 layer_cache = cache[i] if cache and i < len(cache) else None
                 # Provide explicit mask to avoid relying on implicit causal flag
                 # For single-token decoding, mask can be None
-                h, new_cache = layer(h, mask=None, position_ids=position_ids, cache=layer_cache)
+                h, new_cache = layer(h, mask=step_mask, position_ids=position_ids, cache=layer_cache)
                 new_caches.append(new_cache)
             if not self.per_modality_final_norm:
                 h = self.final_norm(h)
         else:
-            h, _ = self.transformer(h, attn_mask=None, position_ids=position_ids)
+            h, _ = self.transformer(h, attn_mask=step_mask, position_ids=position_ids)
 
         return h[:, -1:, :], new_caches
         
