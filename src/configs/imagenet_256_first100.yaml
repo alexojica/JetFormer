@@ -78,10 +78,7 @@ adaptor:
 ema:
   enabled: false
 
-# Noise curriculum
-rgb_sigma0: 64.0
-rgb_sigma_final: 0.0
-noise_curriculum_epochs: 200
+# Noise curriculum (handled by noise_scale/noise_min for PCA path)
 latent_noise_std: 0.3
 text_loss_weight: 1.0
 image_loss_weight: 1.0
@@ -123,7 +120,7 @@ strict_special_ids: true
 use_boi_token: true
 # PCA pixel noise schedule (optional). If set, applies constant sigma per batch.
 noise_scale: 64.0
-noise_min: 3.0
+noise_min: 0.0
 rgb_noise_on_image_prefix: true
 right_align_inputs: true
 

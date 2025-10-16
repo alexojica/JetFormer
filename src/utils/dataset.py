@@ -715,12 +715,6 @@ class TorchvisionCIFAR10(Dataset):
 _IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tif', '.tiff'}
 
 
-class KaggleImageFolderImagenet(Dataset):
-    """Deprecated. Use TFDSImagenetResized64 instead."""
-    def __init__(self, *args, **kwargs):
-        raise RuntimeError("KaggleImageFolderImagenet is deprecated. Use TFDSImagenetResized64 / imagenet64_tfds.")
-
-
 class ImageNet21kFolder(Dataset):
     """Generic ImageNet-21k style folder loader with class subfolders."""
 

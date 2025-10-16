@@ -16,7 +16,7 @@ from src.utils.sampling import (
     generate_class_conditional_samples,
 )
 from src.utils.schedules import rgb_cosine_sigma
-from src.utils.losses import compute_jetformer_loss, compute_jetformer_pca_loss, compute_flow_only_loss
+from src.utils.losses import compute_jetformer_pca_loss, compute_flow_only_loss
 
 
 def resolve_wandb_resume_by_name(cfg: Dict[str, Any]) -> None:
@@ -428,8 +428,6 @@ def train_step(model: torch.nn.Module,
                step: int,
                total_steps: int,
                config: SimpleNamespace) -> Dict[str, Any]:
-    rgb_sigma0 = float(getattr(config, 'rgb_sigma0'))
-    rgb_sigma_final = float(getattr(config, 'rgb_sigma_final'))
     eval_no_rgb_noise = bool(batch.get('no_rgb_noise'))
     advanced_metrics = bool(getattr(config, 'advanced_metrics', False))
     
@@ -464,9 +462,9 @@ def train_step(model: torch.nn.Module,
     except Exception:
         noise_scale = None
     try:
-        noise_min = float(getattr(config, 'noise_min')) if hasattr(config, 'noise_min') else None
+        noise_min = float(getattr(config, 'noise_min', 0.0))
     except Exception:
-        noise_min = None
+        noise_min = 0.0
     rgb_noise_on_image_prefix = bool(getattr(config, 'rgb_noise_on_image_prefix', True))
     from src.utils.losses import compute_jetformer_pca_loss
     out = compute_jetformer_pca_loss(

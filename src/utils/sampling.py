@@ -224,37 +224,74 @@ def generate_class_conditional_samples(base,
 
     for cls in safe_ids:
         try:
-            # Represent class as text tokens: single-token sequence with id 'cls'
+            # --- 1. Tokenize prompt and prepare unconditional inputs ---
             text_tokens = torch.full((1, 1), int(cls), dtype=torch.long, device=device)
             text_mask = torch.ones(1, 1, dtype=torch.bool, device=device)
-            text_first_mask = torch.tensor([True], device=device)
+
+            # --- 2. Prefill KV cache for conditional and unconditional passes ---
+            def get_prefix(is_unconditional):
+                drop_mask = torch.tensor([is_unconditional], device=device, dtype=torch.bool)
+                text_first_mask = torch.tensor([True], device=device)
+                
+                x, attn_mask, _, padding_mask = base.embed_sequence(
+                    text_tokens,
+                    torch.empty(1, 0, base.image_ar_dim, device=device), # No image tokens
+                    text_first_mask,
+                    text_mask,
+                    drop_text_cond_mask=drop_mask
+                )
+                
+                if base.use_boi_token:
+                    boi_emb = base.lookup_token(base.boi_id, 1)
+                    x = torch.cat([x, boi_emb], dim=1)
+                    padding_mask = torch.cat([padding_mask, torch.ones(1, 1, dtype=torch.bool, device=device)], dim=1)
+
+                seq_len = x.shape[1]
+                causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=device, dtype=torch.bool))
+                attn_mask = causal_mask.unsqueeze(0).expand(1, -1, -1)
+                attn_mask = torch.logical_and(attn_mask, padding_mask.unsqueeze(1))
+                attn_mask = attn_mask.unsqueeze(1)
+                
+                return x, attn_mask, padding_mask
+
+            prefix_c, attn_mask_c, input_mask_c = get_prefix(is_unconditional=False)
+            prefix_u, attn_mask_u, input_mask_u = get_prefix(is_unconditional=True)
+            
+            last_prelogits_c, cache_c = base.prefill_cache(prefix_c, attn_mask_c, input_mask_c, cache_size=base.max_seq_len)
+            last_prelogits_u, cache_u = base.prefill_cache(prefix_u, attn_mask_u, input_mask_u, cache_size=base.max_seq_len)
+            
+            # --- 3. Autoregressive decoding loop ---
             img_tokens = torch.zeros(1, base.image_seq_len, base.image_ar_dim, device=device)
+            current_pos = prefix_c.shape[1]
 
             for pos in range(base.image_seq_len):
-                # Conditional and unconditional forward passes
-                text_logits_c, image_logits_c = base(text_tokens, img_tokens, text_first_mask, text_mask, drop_text_cond_mask=None)
-                text_logits_u, image_logits_u = base(text_tokens, img_tokens, text_first_mask, text_mask, drop_text_cond_mask=base.get_drop_labels(1.0, 1, device=device))
+                if cfg_mode == "density":
+                    pdf_c = base.get_pdf(last_prelogits_c, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
+                    pdf_u = base.get_pdf(last_prelogits_u, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
+                    pdf = CFGDensity(pdf_c, pdf_u, w=cfg_strength)
+                    sampled = pdf.sample()
+                else:  # Default to "interp" mode (logit interpolation)
+                    guided_logits = last_prelogits_u + cfg_strength * (last_prelogits_c - last_prelogits_u)
+                    pdf = base.get_pdf(guided_logits, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
+                    sampled = pdf.sample()  # [B, 1, D_ar]
+                
+                img_tokens[:, pos] = sampled.squeeze(1)
 
-                if pos < image_logits_c.shape[1]:
-                    if cfg_mode == "interp_fast" and fast_mixture_first:
-                        # Interpolate in the hidden space before the final projection
-                        hid_c = base.compute_image_hidden(text_tokens, img_tokens, text_first_mask, text_mask, drop_text_cond_mask=None)
-                        hid_u = base.compute_image_hidden(text_tokens, img_tokens, text_first_mask, text_mask, drop_text_cond_mask=base.get_drop_labels(1.0, 1, device=device))
-                        guided_hid = hid_u + cfg_strength * (hid_c - hid_u)
-                        pos_hidden = guided_hid[:, pos:pos+1]
-                        sampled = base.sample_from_hidden_mixture_first(pos_hidden)
-                        img_tokens[0, pos] = sampled[0, 0]
-                    else:  # Default to "interp" mode (logit interpolation)
-                        guided_logits = image_logits_u + cfg_strength * (image_logits_c - image_logits_u)
-                        pdf = base.get_pdf(guided_logits[:, pos:pos+1], temperature_scales=temperature_scales, temperature_probs=temperature_probs)
-                        sampled = pdf.sample()  # [B, 1, D_ar]
-                        img_tokens[0, pos] = sampled.squeeze(0).squeeze(0)
+                if pos == base.image_seq_len - 1:
+                    break
+                
+                new_token_emb = base.image_emb(sampled)
+                position_ids = torch.tensor([[current_pos + pos + 1]], device=device, dtype=torch.long)
+                
+                last_prelogits_c, cache_c = base.extend_cache(new_token_emb, cache_c, position_ids)
+                last_prelogits_u, cache_u = base.extend_cache(new_token_emb, cache_u, position_ids)
 
+            # --- 4. Decode final image ---
             res_dim = max(0, base.image_token_dim - base.image_ar_dim)
             tokens_full = torch.cat([img_tokens, torch.randn(1, base.image_seq_len, res_dim, device=device)], dim=-1) if res_dim > 0 else img_tokens
             image01_bchw = base.decode_tokens_to_image01(tokens_full)
             img = image01_bchw[0].permute(1,2,0).cpu().numpy()
-            # Prefer human-readable class names when available
+            
             prompt_name = None
             try:
                 if dataset is not None and hasattr(dataset, 'classes') and isinstance(dataset.classes, list):

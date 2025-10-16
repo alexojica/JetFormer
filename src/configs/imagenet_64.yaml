@@ -71,12 +71,9 @@ adaptor:
 ema:
   enabled: false
 
-# Noise curriculum
-rgb_sigma0: 64.0
-rgb_sigma_final: 0.0
-noise_curriculum_epochs: 500
+# Noise curriculum (handled by noise_scale/noise_min for PCA path)
 latent_noise_std: 0.3
-text_loss_weight: 0.0
+text_loss_weight: 1.0  # JAX trainer default for class-conditional
 image_loss_weight: 1.0
 grad_accum_steps: 1
 
@@ -115,7 +112,7 @@ num_vocab_repeats: 16
 per_modality_final_norm: false
 # PCA pixel noise schedule (optional). If set, applies constant sigma per batch.
 noise_scale: 64.0
-noise_min: 3.0
+noise_min: 0.0
 rgb_noise_on_image_prefix: true
 right_align_inputs: true
 
