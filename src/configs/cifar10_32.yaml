@@ -9,10 +9,10 @@ use_bfloat16_img_head: true
 
 # Flow (Jet)
 jet:
-  depth: 26
+  depth: 32
   block_depth: 4
-  emb_dim: 320
-  num_heads: 6
+  emb_dim: 512
+  num_heads: 8
   actnorm: false
   invertible_dense: false
 
@@ -43,7 +43,7 @@ boi_id: 11
 nolabel_id: 12
 
 # Optimization / curriculum
-batch_size: 256
+batch_size: 512
 learning_rate: 0.0001
 warmup_percent: 0.1
 use_cosine: true
