@@ -52,6 +52,13 @@ class ClassAsTextDataset(Dataset):
         item['text_loss'] = torch.ones(1, dtype=torch.bool)
         return item
 
+    def __getattr__(self, name):
+        # Safely forward attribute access to the wrapped dataset to expose 'classes', etc.
+        # Use __dict__ to avoid recursive calls to __getattr__ from hasattr.
+        if 'dataset' in self.__dict__ and hasattr(self.dataset, name):
+            return getattr(self.dataset, name)
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
 def _import_tfds_cpu_only():
     """Import tensorflow_datasets with TensorFlow forced to use CPU only and not pre-allocate GPU VRAM.
 
@@ -508,12 +515,11 @@ class HFImagenet1k(Dataset):
         except Exception:
             self.classes = list(range(1000))
 
-        # Optional class filtering: support single id/name, lists, and range strings like "0:100" or mixed comma lists
-        self._indices: Optional[List[int]] = None
-        self._label_remap = None  # maps original label id -> [0..K-1] when subset active
-        self._selected_ids: Optional[List[int]] = None
+        # --- Efficient filtering and remapping using HF Datasets primitives ---
+
+        # 1. Parse class_subset argument into a set of original class IDs to select
+        selected: Optional[set] = None
         if self.class_subset is not None:
-            selected: Optional[set] = None
             try:
                 if isinstance(self.class_subset, (list, tuple)):
                     vals: List[int] = []
@@ -531,7 +537,6 @@ class HFImagenet1k(Dataset):
                             elif s.isdigit():
                                 vals.append(int(s))
                             else:
-                                # map class name to id when available
                                 if isinstance(self.classes[0], str):
                                     name_to_idx = {n: i for i, n in enumerate(self.classes)}
                                     idx = name_to_idx.get(s, None)
@@ -567,54 +572,48 @@ class HFImagenet1k(Dataset):
                     selected = {int(self.class_subset)}
             except Exception:
                 selected = None
-
             if selected is not None and len(selected) == 0:
                 selected = None
 
-            if selected is not None:
-                # Build stable, contiguous remapping for selected classes
-                self._selected_ids = list(sorted(int(x) for x in selected))
-                self._label_remap = {orig: new for new, orig in enumerate(self._selected_ids)}
+        # 2. If a class subset is active, filter the dataset and remap labels to a contiguous range
+        self._label_remap = None
+        self._selected_ids: Optional[List[int]] = None
+        if selected is not None:
+            self._selected_ids = list(sorted(int(x) for x in selected))
+            self._label_remap = {orig: new for new, orig in enumerate(self._selected_ids)}
 
-                # Update human-readable classes when available
-                try:
-                    if isinstance(self.classes[0], str):
-                        self.classes = [self.classes[i] for i in self._selected_ids if 0 <= int(i) < len(self.classes)]
-                    else:
-                        # Fallback: expose 0..K-1
-                        self.classes = list(range(len(self._selected_ids)))
-                except Exception:
+            # Use .filter() for efficiency; avoid manual iteration over the full dataset
+            self._hf_ds = self._hf_ds.filter(
+                lambda example: example['label'] in selected,
+                num_proc=max(1, getattr(os, 'cpu_count', lambda: 4)())
+            )
+            # Use .map() to apply the label remapping
+            self._hf_ds = self._hf_ds.map(
+                lambda example: {'label': self._label_remap[example['label']]},
+                num_proc=max(1, getattr(os, 'cpu_count', lambda: 4)())
+            )
+
+            # Update human-readable .classes attribute to reflect the subset
+            try:
+                if isinstance(self.classes[0], str):
+                    self.classes = [self.classes[i] for i in self._selected_ids if 0 <= int(i) < len(self.classes)]
+                else:
                     self.classes = list(range(len(self._selected_ids)))
+            except Exception:
+                self.classes = list(range(len(self._selected_ids)))
 
-                self._indices = []
-                count = 0
-                for i, ex in enumerate(self._hf_ds):
-                    try:
-                        lbl = int(ex['label'])
-                    except Exception:
-                        continue
-                    if lbl in selected:
-                        self._indices.append(i)
-                        count += 1
-                        if self._max_samples is not None and count >= self._max_samples:
-                            break
+        # 3. Apply max_samples truncation to the (already filtered) dataset
+        if self._max_samples is not None:
+            num_to_take = min(self._max_samples, len(self._hf_ds))
+            self._hf_ds = self._hf_ds.select(range(num_to_take))
 
-        # Apply dataset-level truncation when no class subset indexing is used
-        if self._indices is None and self._max_samples is not None:
-            self._length = min(self._max_samples, len(self._hf_ds))
-        else:
-            self._length = len(self._indices) if self._indices is not None else len(self._hf_ds)
+        self._length = len(self._hf_ds)
 
     def __len__(self) -> int:
         return int(self._length)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        # Resolve underlying index when class-subset is active
-        if self._indices is not None:
-            base_idx = self._indices[idx]
-        else:
-            base_idx = idx
-        ex = self._hf_ds[int(base_idx)]
+        ex = self._hf_ds[int(idx)]
 
         try:
             if getattr(self, '_safe_decode', False):
@@ -663,12 +662,10 @@ class HFImagenet1k(Dataset):
         img_tensor = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()
 
         try:
+            # Label has already been remapped in __init__ if a class_subset was used
             lbl = int(ex['label'])
         except Exception:
             lbl = -1
-        # Remap labels into contiguous range when subset is active
-        if self._label_remap is not None and lbl in self._label_remap:
-            lbl = int(self._label_remap[lbl])
         label_tensor = torch.tensor(lbl, dtype=torch.long)
         return {"image": img_tensor, "label": label_tensor}
 

@@ -110,8 +110,11 @@ def generate_text_to_image_samples_cfg(
             prefix_c, attn_mask_c, input_mask_c = get_prefix(is_unconditional=False)
             prefix_u, attn_mask_u, input_mask_u = get_prefix(is_unconditional=True)
 
-            last_prelogits_c, cache_c = model.prefill_cache(prefix_c, attn_mask_c, input_mask_c, cache_size=model.max_seq_len)
-            last_prelogits_u, cache_u = model.prefill_cache(prefix_u, attn_mask_u, input_mask_u, cache_size=model.max_seq_len)
+            prefix_len = prefix_c.shape[1]
+            cache_size = prefix_len + model.image_seq_len
+
+            last_prelogits_c, cache_c = model.prefill_cache(prefix_c, attn_mask_c, input_mask_c, cache_size=cache_size)
+            last_prelogits_u, cache_u = model.prefill_cache(prefix_u, attn_mask_u, input_mask_u, cache_size=cache_size)
 
             # --- 3. Autoregressive decoding loop ---
             ar_dim = getattr(model, 'image_ar_dim', model.image_token_dim)
@@ -149,8 +152,8 @@ def generate_text_to_image_samples_cfg(
                 new_token_emb = model.image_emb(sampled_token)
                 position_ids = torch.tensor([[current_pos + pos]], device=device, dtype=torch.long)
                 
-                last_prelogits_c, cache_c = model.extend_cache(new_token_emb, cache_c, position_ids)
-                last_prelogits_u, cache_u = model.extend_cache(new_token_emb, cache_u, position_ids)
+                last_prelogits_c, cache_c = model.extend_cache(new_token_emb, cache_c, position_ids, cache_size=cache_size)
+                last_prelogits_u, cache_u = model.extend_cache(new_token_emb, cache_u, position_ids, cache_size=cache_size)
 
             # --- 4. Decode final image ---
             full_dim = model.image_token_dim
@@ -266,8 +269,11 @@ def generate_class_conditional_samples(base,
             prefix_c, attn_mask_c, input_mask_c = get_prefix(is_unconditional=False)
             prefix_u, attn_mask_u, input_mask_u = get_prefix(is_unconditional=True)
             
-            last_prelogits_c, cache_c = base.prefill_cache(prefix_c, attn_mask_c, input_mask_c, cache_size=base.max_seq_len)
-            last_prelogits_u, cache_u = base.prefill_cache(prefix_u, attn_mask_u, input_mask_u, cache_size=base.max_seq_len)
+            prefix_len = prefix_c.shape[1]
+            cache_size = prefix_len + base.image_seq_len
+            
+            last_prelogits_c, cache_c = base.prefill_cache(prefix_c, attn_mask_c, input_mask_c, cache_size=cache_size)
+            last_prelogits_u, cache_u = base.prefill_cache(prefix_u, attn_mask_u, input_mask_u, cache_size=cache_size)
             
             # --- 3. Autoregressive decoding loop ---
             img_tokens = torch.zeros(1, base.image_seq_len, base.image_ar_dim, device=device)
@@ -301,8 +307,8 @@ def generate_class_conditional_samples(base,
                 new_token_emb = base.image_emb(sampled)
                 position_ids = torch.tensor([[current_pos + pos]], device=device, dtype=torch.long)
                 
-                last_prelogits_c, cache_c = base.extend_cache(new_token_emb, cache_c, position_ids)
-                last_prelogits_u, cache_u = base.extend_cache(new_token_emb, cache_u, position_ids)
+                last_prelogits_c, cache_c = base.extend_cache(new_token_emb, cache_c, position_ids, cache_size=cache_size)
+                last_prelogits_u, cache_u = base.extend_cache(new_token_emb, cache_u, position_ids, cache_size=cache_size)
 
             # --- 4. Decode final image ---
             res_dim = max(0, base.image_token_dim - base.image_ar_dim)

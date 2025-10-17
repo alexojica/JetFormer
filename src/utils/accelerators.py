@@ -110,8 +110,8 @@ class GPUAccelerator:
 
     def build_samplers(self, train_dataset, val_dataset):
         if self.ddp_enabled:
-            train_sampler = DistributedSampler(train_dataset, shuffle=True)
-            val_sampler = DistributedSampler(val_dataset, shuffle=False) if val_dataset is not None else None
+            train_sampler = DistributedSampler(train_dataset, shuffle=True, drop_last=True)
+            val_sampler = DistributedSampler(val_dataset, shuffle=False, drop_last=False) if val_dataset is not None else None
         else:
             train_sampler = None
             val_sampler = None

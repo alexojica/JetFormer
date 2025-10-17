@@ -24,7 +24,7 @@ n_layers: 24
 d_ff: 4096
 n_kv_heads: 1
 dropout: 0.1
-max_seq_len: 64
+max_seq_len: 96
 
 # Conditioning (class-conditional ImageNet subset)
 num_classes: 50
@@ -67,7 +67,7 @@ patch_pca:
   input_size: [256, 256]
   patch_size: 16
   depth_to_seq: 1
-  skip_pca: false
+  skip_pca: true
 
 # Latent Jet adaptor configuration
 adaptor:
@@ -87,6 +87,7 @@ grad_accum_steps: 1
 # Epoch-level schedules
 sample_every_epochs: 5
 val_every_epochs: 5
+sample_every_batches: 0
 
 # Evaluation controls
 eval_no_rgb_noise: true

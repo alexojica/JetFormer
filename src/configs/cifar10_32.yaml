@@ -1,4 +1,4 @@
-vocab_size: 32000
+vocab_size: 13
 
 # Image/tokenization
 input_size: [32, 32]
@@ -9,11 +9,11 @@ use_bfloat16_img_head: true
 
 # Flow (Jet)
 jet:
-  depth: 16
-  block_depth: 2
-  emb_dim: 256
-  num_heads: 4
-  actnorm: true
+  depth: 32
+  block_depth: 4
+  emb_dim: 512
+  num_heads: 8
+  actnorm: false
   invertible_dense: false
 
 # AR Transformer
@@ -27,10 +27,10 @@ max_seq_len: 96  # 64 image tokens + class tokens + slack
 
 # Conditioning (class-conditional CIFAR-10)
 num_classes: 10
-class_token_length: 8
+class_token_length: 16
 cfg_drop_prob: 0.1
 cfg_strength: 4.0
-cfg_mode: "reject"
+cfg_mode: "interp"
 
 # Dataset / training target
 dataset: cifar10
@@ -43,15 +43,15 @@ boi_id: 11
 nolabel_id: 12
 
 # Optimization / curriculum
-batch_size: 32
-learning_rate: 0.001
+batch_size: 128
+learning_rate: 0.0001
 warmup_percent: 0.1
 use_cosine: true
 weight_decay: 0.0001
 opt_b1: 0.9
 opt_b2: 0.95
 grad_clip_norm: 1.0
-num_epochs: 100
+num_epochs: 50
 precision: fp32
 torch_compile: false
 grad_checkpoint_transformer: false
@@ -61,8 +61,12 @@ flow_grad_checkpoint: false
 ema:
   enabled: false
 
-# Training mode (paper path on CIFAR-10): PCA + adaptor
+# Training mode (paper path): PCA+Adaptor latent training
 jetformer_training_mode: pca
+text_prefix_prob: 1.0
+loss_on_prefix: false
+stop_grad_nvp_prefix: true
+input_noise_std: 0.3
 
 patch_pca:
   pca_init_file: null
@@ -72,18 +76,19 @@ patch_pca:
   input_size: [32, 32]
   patch_size: 4
   depth_to_seq: 1
-  skip_pca: false
+  skip_pca: true
 
 adaptor:
   kind: jet
+  latent_noise_dim: 0
 
 text_loss_weight: 1.0
 image_loss_weight: 1.0
 grad_accum_steps: 1
 
 # Epoch-level schedules
-sample_every_epochs: 5
-val_every_epochs: 5
+sample_every_epochs: 2
+val_every_epochs: 2
 
 # Evaluation controls
 eval_no_rgb_noise: true
@@ -108,3 +113,13 @@ wandb_offline: false
 wandb_project: "jetformer-cifar10-32"
 wandb_run_name: "CIFAR10-32-p4-AR512x12"
 wandb_tags: ["cifar10", "32x32", "p4", "small"]
+
+# JAX parity controls
+rope_skip_pad: true
+num_vocab_repeats: 16
+per_modality_final_norm: false
+# PCA pixel noise schedule (optional). If set, applies constant sigma per batch.
+noise_scale: 64.0
+noise_min: 0.0
+rgb_noise_on_image_prefix: true
+right_align_inputs: true
