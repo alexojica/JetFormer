@@ -1,134 +1,130 @@
-vocab_size: 53
-
-# Image/tokenization
-input_size: [256, 256]
-patch_size: 16
-image_ar_dim: 128
-num_mixtures: 1024
-use_bfloat16_img_head: true
-channel_repeat: 0
-
-# Flow (Jet)
-jet:
-  depth: 32
-  block_depth: 4
-  emb_dim: 512
-  num_heads: 8
-  actnorm: false
-  invertible_dense: false
-
-# AR Transformer (Base scale per paper)
-d_model: 1024
-n_heads: 16
-n_layers: 24
-d_ff: 4096
-n_kv_heads: 1
-dropout: 0.1
-max_seq_len: 96
-
-# Conditioning (class-conditional ImageNet subset)
-num_classes: 50
-class_token_length: 16
-cfg_drop_prob: 0.1
-cfg_strength: 4.0
-cfg_mode: "interp"
-
-# Dataset / training target
-dataset: imagenet1k_hf
-hf_safe_image_decode: true
-class_subset: "50:100"
-
-# Optimization / curriculum
-batch_size: 56
-learning_rate: 0.0001
-weight_decay: 0.0001
-opt_b1: 0.9
-opt_b2: 0.95
-grad_clip_norm: 1.0
+# General
 num_epochs: 50
-precision: bf16
 torch_compile: false
-grad_checkpoint_transformer: false
-flow_grad_checkpoint: false
-
-# Training mode (paper path): PCA+Adaptor latent training
 jetformer_training_mode: pca
-text_prefix_prob: 1.0
-loss_on_prefix: false
-stop_grad_nvp_prefix: true
-input_noise_std: 0.3
-
-# PatchPCA configuration (defaults are sensible; keep explicit for clarity)
-patch_pca:
-  pca_init_file: null
-  whiten: true
-  noise_std: 0.01
-  add_dequant_noise: false
-  input_size: [256, 256]
-  patch_size: 16
-  depth_to_seq: 1
-  skip_pca: true
-
-# Latent Jet adaptor configuration
-adaptor:
-  kind: jet
-  latent_noise_dim: 640
-
-# EMA
-ema:
-  enabled: false
-
-# Noise curriculum (handled by noise_scale/noise_min for PCA path)
-latent_noise_std: 0.3
-text_loss_weight: 1.0
-image_loss_weight: 1.0
+advanced_metrics: true
+batch_size: 56
 grad_accum_steps: 1
 
-# Epoch-level schedules
-sample_every_epochs: 5
-val_every_epochs: 5
-sample_every_batches: 0
+# Input/Dataset
+input:
+  dataset: imagenet1k_hf
+  hf_safe_image_decode: true
+  class_subset: "50:100"
+  input_size: [256, 256]
+  num_classes: 50
+  num_workers: 16
+  dataloader_prefetch_factor: 4
+  max_samples: null
+  random_flip_prob: 0.5
+  class_token_length: 16
+  ignore_pad: false
 
-# Evaluation controls
-eval_no_rgb_noise: true
-fid_every_epochs: 0
-is_every_epochs: 0
-fid_is_num_samples: 0
-advanced_metrics: true
+# Model Configuration
+model:
+  width: 1024
+  depth: 24
+  mlp_dim: 4096
+  num_heads: 16
+  num_kv_heads: 1
+  vocab_size: 53
+  bos_id: 50
+  boi_id: 51
+  nolabel_id: 52
+  num_mixtures: 1024
+  dropout: 0.1
+  drop_labels_probability: 0.1
+  head_dtype: 'bfloat16'
+  remat_policy: 'none'
+  num_vocab_repeats: 16
+  per_modality_final_norm: false
+  right_align_inputs: true
+  strict_special_ids: true
+  use_boi_token: true
+  max_seq_len: 64
+  rope_skip_pad: true
 
-# Dataloader / augmentation
-num_workers: 16
-max_samples: null
-ignore_pad: false
-random_flip_prob: 0.5
-dataloader_prefetch_factor: 4
+# Patch PCA
+patch_pca:
+  model:
+    depth_to_seq: 1
+    input_size: [256, 256]
+    patch_size: 16
+    codeword_dim: 128
+    noise_std: 0.0
+    add_dequant_noise: true
+    skip_pca: true
+    whiten: true
+    pca_init_file: null
 
-# Accelerator
-accelerator: auto
-device: auto
+# Adaptor/Jet
+use_adaptor: true
+adaptor:
+  model:
+    depth: 32
+    block_depth: 4
+    emb_dim: 512
+    num_heads: 8
+    actnorm: false
+    invertible_dense: false
+    flow_grad_checkpoint: false
+  latent_noise_dim: 640
+  kind: 'jet'
+
+# Optimizer & Schedule
+optimizer:
+  lr: 0.0001
+  wd: 0.0001
+  b1: 0.9
+  b2: 0.95
+  grad_clip_norm: 1.0
+
+ema_decay: 0.0
+
+schedule:
+  warmup_percent: 0.1
+  decay_type: 'cosine'
+
+# Training Curriculum
+training:
+  input_noise_std: 0.3
+  noise_scale: 64.0
+  noise_min: 0.0
+  text_prefix_prob: 1.0
+  loss_on_prefix: false
+  stop_grad_nvp_prefix: true
+  rgb_noise_on_image_prefix: true
+  text_loss_weight: 1.0
+  image_loss_weight: 1.0
+  latent_noise_std: 0.3
+
+# Sampling & Evaluation
+sampling:
+  cfg_strength: 4.0
+  cfg_mode: "interp"
+
+eval:
+  sample_every_epochs: 5
+  val_every_epochs: 5
+  sample_every_batches: 0
+  eval_no_rgb_noise: true
+  fid_every_epochs: 0
+  is_every_epochs: 0
+  fid_is_num_samples: 0
 
 # W&B
-wandb: true
-wandb_offline: false
-wandb_project: "jetformer-imagenet-256"
-wandb_run_name: "B-256-first100"
-wandb_tags: ["imagenet", "256x256", "B", "first100"]
+wandb:
+  enabled: true
+  offline: false
+  project: "jetformer-imagenet-256"
+  run_name: "B-256-first100"
+  tags: ["imagenet", "256x256", "B", "first100"]
 
-# JAX parity controls
-rope_skip_pad: true
-num_vocab_repeats: 16
-per_modality_final_norm: false
-strict_special_ids: true
-use_boi_token: true
-# PCA pixel noise schedule (optional). If set, applies constant sigma per batch.
-noise_scale: 64.0
-noise_min: 0.0
-rgb_noise_on_image_prefix: true
-right_align_inputs: true
-
-bos_id: 50
-boi_id: 51
-nolabel_id: 52
+# Accelerator
+accelerator:
+  name: auto
+  device: auto
+  precision: bf16
 
 
 

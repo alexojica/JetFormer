@@ -12,237 +12,135 @@ except Exception:
 
 
 def _get_from_ns_or_dict(config: SimpleNamespace | Dict[str, Any], key: str, default=None):
-    if isinstance(config, dict):
+    """Safely get a value from a SimpleNamespace or dict, supporting dot notation."""
+    if hasattr(config, 'get') and callable(getattr(config, 'get')):
         return config.get(key, default)
+    
+    # Fallback for plain objects or dicts without a .get method for nested keys
     try:
-        return getattr(config, key)
-    except Exception:
+        keys = key.split('.')
+        val = config
+        for k in keys:
+            if isinstance(val, dict):
+                val = val.get(k)
+                if val is None: return default
+            elif isinstance(val, SimpleNamespace):
+                val = getattr(val, k, None)
+                if val is None: return default
+            else:
+                return default
+        return val
+    except (AttributeError, KeyError):
         return default
-
+        
 
 def build_jetformer_from_config(config: SimpleNamespace | Dict[str, Any], device: torch.device) -> JetFormer:
-    """Construct JetFormer from a SimpleNamespace or dict config on the given device.
+    """Construct JetFormer from a nested SimpleNamespace or dict config."""
+    
+    # Helper to resolve a config value, preferring the nested SimpleNamespace first
+    def _get(key, default=None):
+        return _get_from_ns_or_dict(config, key, default)
 
-    Accepts both dict- and attribute-style configs. Handles tuple conversion for input_size.
-    """
-    param_names = [
-        'vocab_size','d_model','n_heads','n_kv_heads','n_layers','d_ff','max_seq_len','num_mixtures','dropout',
-        'patch_size','image_ar_dim','use_bfloat16_img_head',
-        'num_classes','class_token_length','latent_projection','latent_proj_matrix_path','pre_latent_projection',
-        'pre_latent_proj_matrix_path','pre_factor_dim',
-        'grad_checkpoint_transformer','flow_grad_checkpoint',
-        # New parity flags
-        'use_boi_token','causal_mask_on_prefix','untie_output_vocab','per_modality_final_norm',
-        'num_vocab_repeats','bos_id','boi_id','nolabel_id','scale_tol','right_align_inputs'
-    ]
-    kwargs: Dict[str, Any] = {}
-    for name in param_names:
-        val = _get_from_ns_or_dict(config, name, None)
-        if name == 'pre_factor_dim':
-            v = val
-            if isinstance(v, str):
-                vl = v.strip().lower()
-                if vl in {"none", "null", "false", ""}:
-                    v = None
-                else:
-                    try:
-                        v = int(v)
-                    except Exception:
-                        v = None
-            elif isinstance(v, float):
-                try:
-                    v = int(v)
-                except Exception:
-                    v = None
-            if isinstance(v, int) and v <= 0:
-                v = None
-            if v is not None:
-                kwargs[name] = v
-        elif val is not None:
-            kwargs[name] = val
-
-    # Determine training mode early so we can coordinate Jet construction
-    # Default to 'pca' (paper path); unify on adaptor Jet over PatchPCA latents
-    training_mode = str(_get_from_ns_or_dict(config, 'jetformer_training_mode', 'pca') or 'pca').lower()
-
-    # Handle jet config from a nested block
-    jet_cfg = _get_from_ns_or_dict(config, 'jet', {})
-    jet_params_for_constructor = {
-        'jet_depth': _get_from_ns_or_dict(jet_cfg, 'depth'),
-        'jet_block_depth': _get_from_ns_or_dict(jet_cfg, 'block_depth'),
-        'jet_emb_dim': _get_from_ns_or_dict(jet_cfg, 'emb_dim'),
-        'jet_num_heads': _get_from_ns_or_dict(jet_cfg, 'num_heads'),
-        'flow_actnorm': _get_from_ns_or_dict(jet_cfg, 'actnorm'),
-        'flow_invertible_dense': _get_from_ns_or_dict(jet_cfg, 'invertible_dense'),
+    # --- Model Parameters ---
+    model_cfg = _get('model', {})
+    kwargs = {
+        'd_model': _get_from_ns_or_dict(model_cfg, 'width'),
+        'n_layers': _get_from_ns_or_dict(model_cfg, 'depth'),
+        'd_ff': _get_from_ns_or_dict(model_cfg, 'mlp_dim'),
+        'n_heads': _get_from_ns_or_dict(model_cfg, 'num_heads'),
+        'n_kv_heads': _get_from_ns_or_dict(model_cfg, 'num_kv_heads'),
+        'vocab_size': _get_from_ns_or_dict(model_cfg, 'vocab_size'),
+        'bos_id': _get_from_ns_or_dict(model_cfg, 'bos_id'),
+        'boi_id': _get_from_ns_or_dict(model_cfg, 'boi_id'),
+        'nolabel_id': _get_from_ns_or_dict(model_cfg, 'nolabel_id'),
+        'num_mixtures': _get_from_ns_or_dict(model_cfg, 'num_mixtures'),
+        'dropout': _get_from_ns_or_dict(model_cfg, 'dropout'),
+        'use_bfloat16_img_head': _get_from_ns_or_dict(model_cfg, 'head_dtype', 'fp32') == 'bfloat16',
+        'num_vocab_repeats': _get_from_ns_or_dict(model_cfg, 'num_vocab_repeats', 1),
+        'scale_tol': _get_from_ns_or_dict(model_cfg, 'scale_tol', 1e-6),
+        'causal_mask_on_prefix': _get_from_ns_or_dict(model_cfg, 'causal_mask_on_prefix', True),
+        'untie_output_vocab': _get_from_ns_or_dict(model_cfg, 'untie_output_vocab', False),
+        'per_modality_final_norm': _get_from_ns_or_dict(model_cfg, 'per_modality_final_norm', False),
+        'right_align_inputs': _get_from_ns_or_dict(model_cfg, 'right_align_inputs', True),
+        'strict_special_ids': _get_from_ns_or_dict(model_cfg, 'strict_special_ids', True),
+        'use_boi_token': _get_from_ns_or_dict(model_cfg, 'use_boi_token', True),
+        'max_seq_len': _get_from_ns_or_dict(model_cfg, 'max_seq_len'),
+        'rope_skip_pad': _get_from_ns_or_dict(model_cfg, 'rope_skip_pad', True),
+        'grad_checkpoint_transformer': _get_from_ns_or_dict(model_cfg, 'remat_policy', 'none') != 'none',
     }
-    kwargs.update({k: v for k, v in jet_params_for_constructor.items() if v is not None})
 
-    # Disable pixel/patch Jet in PCA mode to avoid constructing two flows
-    if training_mode == 'pca':
-        # Force-disable pixel-space Jet construction; adaptor flow will be used instead.
-        kwargs['jet_depth'] = 0
-    # Expose the intended training mode on the model later
+    # --- Input and PCA/Adaptor dependent params ---
+    input_cfg = _get('input', {})
+    pca_model_cfg = _get('patch_pca.model', {})
+    adaptor_cfg = _get('adaptor', {})
+    adaptor_model_cfg = _get_from_ns_or_dict(adaptor_cfg, 'model', {})
+    
+    kwargs['input_size'] = tuple(_get_from_ns_or_dict(input_cfg, 'input_size'))
+    kwargs['patch_size'] = int(_get_from_ns_or_dict(pca_model_cfg, 'patch_size'))
+    kwargs['image_ar_dim'] = int(_get_from_ns_or_dict(pca_model_cfg, 'codeword_dim'))
+    kwargs['num_classes'] = _get_from_ns_or_dict(input_cfg, 'num_classes')
+    kwargs['class_token_length'] = _get_from_ns_or_dict(input_cfg, 'class_token_length')
 
-    # Enforce strict special tokens: require ids when flag true; else warn
-    bos_id = _get_from_ns_or_dict(config, 'bos_id', None)
-    nolabel_id = _get_from_ns_or_dict(config, 'nolabel_id', None)
-    boi_id = _get_from_ns_or_dict(config, 'boi_id', None)
-    ssi_cfg = _get_from_ns_or_dict(config, 'strict_special_ids', True)
-    if ssi_cfg and not (isinstance(bos_id, int) and isinstance(nolabel_id, int)):
-        # Hard default to strict parity; if missing ids, set safe defaults and continue
-        bos_id = 0 if bos_id is None else bos_id
-        nolabel_id = 0 if nolabel_id is None else nolabel_id
-        try:
-            if _mf_logger is not None:
-                _mf_logger.warning("strict_special_ids=True but missing bos_id/nolabel_id; defaulting missing ids to 0 for parity.")
-        except Exception:
-            pass
-    kwargs['bos_id'] = bos_id
-    kwargs['nolabel_id'] = nolabel_id
-    if boi_id is not None:
-        kwargs['boi_id'] = boi_id
-    # Pass through explicit intent to use BOI token (default True for parity) and enforce under strict mode
-    use_boi = _get_from_ns_or_dict(config, 'use_boi_token', True)
-    kwargs['use_boi_token'] = bool(use_boi)
-    kwargs['strict_special_ids'] = bool(ssi_cfg)
+    # --- Jet/Flow Parameters ---
+    kwargs['jet_depth'] = _get_from_ns_or_dict(adaptor_model_cfg, 'depth')
+    kwargs['jet_block_depth'] = _get_from_ns_or_dict(adaptor_model_cfg, 'block_depth')
+    kwargs['jet_emb_dim'] = _get_from_ns_or_dict(adaptor_model_cfg, 'emb_dim')
+    kwargs['jet_num_heads'] = _get_from_ns_or_dict(adaptor_model_cfg, 'num_heads')
+    kwargs['flow_actnorm'] = _get_from_ns_or_dict(adaptor_model_cfg, 'actnorm', False)
+    kwargs['flow_invertible_dense'] = _get_from_ns_or_dict(adaptor_model_cfg, 'invertible_dense', False)
+    kwargs['flow_grad_checkpoint'] = _get_from_ns_or_dict(adaptor_model_cfg, 'flow_grad_checkpoint', False)
 
-    # Optional dtype parsing for heads/embeddings
-    def _to_torch_dtype(v):
-        if v is None:
-            return None
-        if isinstance(v, torch.dtype):
-            return v
-        if isinstance(v, str):
-            s = v.strip().lower()
-            return {
-                'fp32': torch.float32,
-                'float32': torch.float32,
-                'f32': torch.float32,
-                'bf16': torch.bfloat16,
-                'bfloat16': torch.bfloat16,
-                'fp16': torch.float16,
-                'float16': torch.float16,
-            }.get(s, None)
-        return None
-
-    hd = _get_from_ns_or_dict(config, 'head_dtype', None)
-    ed = _get_from_ns_or_dict(config, 'embed_dtype', None)
-    if hd is not None:
-        kwargs['head_dtype'] = _to_torch_dtype(hd)
-    if ed is not None:
-        kwargs['embed_dtype'] = _to_torch_dtype(ed)
-    # Attention logits softcap
-    sc = _get_from_ns_or_dict(config, 'attn_logits_softcap', None)
-    if sc is not None:
-        try:
-            kwargs['attn_logits_softcap'] = float(sc)
-        except Exception:
-            kwargs['attn_logits_softcap'] = None
-    # Multivariate head flags
-    mv = _get_from_ns_or_dict(config, 'multivariate', None)
-    if mv is not None:
-        kwargs['multivariate'] = bool(mv)
-    mv_d = _get_from_ns_or_dict(config, 'out_dim', None)
-    if mv_d is not None:
-        kwargs['multivariate_out_dim'] = int(mv_d)
-    # Optional rope_skip_pad exposure (default False)
-    rsp = _get_from_ns_or_dict(config, 'rope_skip_pad', None)
-    if rsp is not None:
-        kwargs['rope_skip_pad'] = bool(rsp)
-    else:
-        # Default to True for JAX parity in masked positions
-        kwargs['rope_skip_pad'] = True
-    # Optional strict_special_ids exposure
-    ssi = _get_from_ns_or_dict(config, 'strict_special_ids', None)
-    if ssi is not None:
-        kwargs['strict_special_ids'] = bool(ssi)
-    inp = _get_from_ns_or_dict(config, 'input_size', None)
-    if inp is not None:
-        kwargs['input_size'] = tuple(inp)
-    model = JetFormer(**kwargs).to(device)
-    # Record selected training mode on the model for downstream helpers
-    try:
-        model.training_mode = training_mode
-    except Exception:
-        pass
-
-    # Training-mode gate: default to PCA+Adaptor (paper path) unless explicitly set to 'legacy'
-
-    # Attach PatchPCA and Adaptor either from nested blocks or sensible defaults when training_mode=='pca'
+    # Filter out None values before passing to constructor
+    final_kwargs = {k: v for k, v in kwargs.items() if v is not None}
+    
+    model = JetFormer(**final_kwargs).to(device)
+    
+    # Attach training mode
+    model.training_mode = _get('jetformer_training_mode', 'pca')
+    
+    # Attach PatchPCA and Adaptor
     try:
         from src.latents.patch_pca import PatchPCA
-        pca_cfg = _get_from_ns_or_dict(config, 'patch_pca', None)
-        if training_mode == 'pca' and not isinstance(pca_cfg, (dict, SimpleNamespace)):
-            # Build with defaults if no explicit block provided
-            pca_cfg = {
-                'pca_init_file': None,
-                'whiten': True,
-                'noise_std': 0.0,
-                'add_dequant_noise': False,
-                'input_size': _get_from_ns_or_dict(config, 'input_size', (256, 256)),
-                'patch_size': _get_from_ns_or_dict(config, 'patch_size', 16),
-                'depth_to_seq': 1,
-                'skip_pca': False,
-            }
-        if isinstance(pca_cfg, (dict, SimpleNamespace)):
-            pcakw = dict(pca_cfg) if isinstance(pca_cfg, dict) else {k: getattr(pca_cfg, k) for k in dir(pca_cfg) if not k.startswith('_')}
-            model.patch_pca = PatchPCA(
-                pca_init_file=pcakw.get('pca_init_file'),
-                whiten=bool(pcakw.get('whiten', True)),
-                noise_std=float(pcakw.get('noise_std', 0.0)),
-                add_dequant_noise=bool(pcakw.get('add_dequant_noise', False)),
-                input_size=tuple(pcakw.get('input_size', getattr(config, 'input_size', (256, 256)))),
-                patch_size=int(pcakw.get('patch_size', getattr(config, 'patch_size', 16))),
-                depth_to_seq=int(pcakw.get('depth_to_seq', 1)),
-                skip_pca=bool(pcakw.get('skip_pca', False)),
-            ).to(device)
+        if _get('patch_pca') is not None:
+            model.patch_pca = PatchPCA(**_get('patch_pca.model', {})).to(device)
     except Exception:
-        pass
-
+        pass # Fail gracefully if import or instantiation fails
+        
     try:
         from src.latents.jet_adaptor import build_adaptor
-        adaptor_cfg = _get_from_ns_or_dict(config, 'adaptor', None)
-        H, W = kwargs.get('input_size', tuple(_get_from_ns_or_dict(config, 'input_size', (256, 256))))
-        ps = int(kwargs.get('patch_size', _get_from_ns_or_dict(config, 'patch_size', 16)))
-        grid_h, grid_w = (H // ps, W // ps)
-        # For adaptor over patch latents, the channel dim must match full patch token dim
-        full_token_dim = 3 * ps * ps
+        if _get('use_adaptor', False):
+            H, W = kwargs['input_size']
+            ps = kwargs['patch_size']
+            grid_h, grid_w = H // ps, W // ps
+            
+            # The dimension for the adaptor is the full patch token dimension
+            full_token_dim = 3 * ps * ps
 
-        # Build default adaptor when training_mode=='pca' and none provided
-        if training_mode == 'pca' and not isinstance(adaptor_cfg, (dict, SimpleNamespace)):
-            adaptor_cfg = {'kind': 'jet', 'depth': 8, 'block_depth': 2, 'emb_dim': 256, 'num_heads': 4}
-
-        if isinstance(adaptor_cfg, (dict, SimpleNamespace)):
-            ak = dict(adaptor_cfg) if isinstance(adaptor_cfg, dict) else {k: getattr(adaptor_cfg, k) for k in dir(adaptor_cfg) if not k.startswith('_')}
-            kind = str(ak.get('kind', 'none') or 'none').lower()
-            if kind != 'none':
-                dim = int(ak.get('dim', full_token_dim))
-                # Pass through latent_noise_dim
-                model._latent_noise_dim = int(ak.get('latent_noise_dim', _get_from_ns_or_dict(config, 'latent_noise_dim', 0)))
-
-                # Use shared jet config for adaptor params
-                jet_params_for_adaptor = dict(jet_cfg) if isinstance(jet_cfg, dict) else {k: getattr(jet_cfg, k) for k in dir(jet_cfg) if not k.startswith('_')}
-
-                model.adaptor = build_adaptor(kind, grid_h, grid_w, dim, **jet_params_for_adaptor)
-                model.adaptor = model.adaptor.to(device)
-        # If explicitly legacy, ensure no adaptor by default
-        if training_mode != 'pca' and not isinstance(adaptor_cfg, (dict, SimpleNamespace)):
-            model.adaptor = None
+            adaptor_kind = _get_from_ns_or_dict(adaptor_cfg, 'kind', 'jet')
+            # Pass adaptor_model_cfg as kwargs to build_adaptor
+            model.adaptor = build_adaptor(
+                kind=adaptor_kind, 
+                grid_h=grid_h, 
+                grid_w=grid_w, 
+                dim=full_token_dim, 
+                **adaptor_model_cfg
+            ).to(device)
+            
+            # For latent_noise_dim
+            model._latent_noise_dim = _get_from_ns_or_dict(adaptor_cfg, 'latent_noise_dim', 0)
     except Exception:
         pass
-
-    # Unify the active Jet component: always reference the active flow as model.jet
-    # - In PCA mode, point model.jet to the adaptor's FlowCore (latent grid)
-    # - In legacy mode, keep model.jet as the pixel/patch-grid FlowCore constructed inside JetFormer
+        
+    # Alias model.jet to the correct flow module
     try:
-        if training_mode == 'pca' and getattr(model, 'adaptor', None) is not None:
-            # Alias to latent flow for a single source of truth
+        if model.training_mode == 'pca' and getattr(model, 'adaptor', None) is not None:
             model.jet = getattr(model.adaptor, 'flow', model.adaptor)
             model.jet_is_latent = True
         else:
-            model.jet_is_latent = bool(getattr(model, 'pre_factor_dim', None) is not None)
+            model.jet_is_latent = bool(_get('model.pre_factor_dim') is not None)
     except Exception:
         pass
+        
     return model
 
 
