@@ -9,10 +9,10 @@ use_bfloat16_img_head: true
 
 # Flow (Jet)
 jet:
-  depth: 32
+  depth: 26
   block_depth: 4
-  emb_dim: 512
-  num_heads: 8
+  emb_dim: 384
+  num_heads: 6
   actnorm: false
   invertible_dense: false
 
