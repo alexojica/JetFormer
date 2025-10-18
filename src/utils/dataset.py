@@ -808,45 +808,46 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
     Returns (dataset, val_dataset, dataloader, val_loader).
     """
     # All dataset classes are defined in this module; avoid cross-module shim imports
+    input_cfg = config.input
 
-    dataset_choice = getattr(config, 'dataset')
+    dataset_choice = getattr(input_cfg, 'dataset')
     if str(dataset_choice).lower() == 'imagenet64_tfds':
-        H, W = tuple(getattr(config, 'input_size'))
+        H, W = tuple(getattr(input_cfg, 'input_size'))
         res = int(H)
         if res != 64 or res != int(W):
             raise ValueError("imagenet64_tfds requires input_size [64, 64]")
         dataset = TFDSImagenetResized64(
             split='train',
-            max_samples=getattr(config, 'max_samples', None),
-            class_subset=getattr(config, 'class_subset', None)
+            max_samples=getattr(input_cfg, 'max_samples', None),
+            class_subset=getattr(input_cfg, 'class_subset', None)
         )
         val_dataset = TFDSImagenetResized64(
             split='validation',
-            max_samples=getattr(config, 'max_samples', None),
-            class_subset=getattr(config, 'class_subset', None)
+            max_samples=getattr(input_cfg, 'max_samples', None),
+            class_subset=getattr(input_cfg, 'class_subset', None)
         )
     elif str(dataset_choice).lower() == 'imagenet21k_folder':
         root = getattr(config, 'imagenet21k_root', None)
         if not root:
             raise ValueError("--imagenet21k_root must be provided for imagenet21k_folder dataset")
-        H, W = tuple(getattr(config, 'input_size'))
+        H, W = tuple(getattr(input_cfg, 'input_size'))
         res = int(H)
         dataset = ImageNet21kFolder(
             root_dir=root,
             split='train',
             resolution=res,
-            max_samples=getattr(config, 'max_samples', None),
-            class_subset=getattr(config, 'class_subset', None)
+            max_samples=getattr(input_cfg, 'max_samples', None),
+            class_subset=getattr(input_cfg, 'class_subset', None)
         )
         val_dataset = ImageNet21kFolder(
             root_dir=root,
             split='val',
             resolution=res,
-            max_samples=getattr(config, 'max_samples', None),
-            class_subset=getattr(config, 'class_subset', None)
+            max_samples=getattr(input_cfg, 'max_samples', None),
+            class_subset=getattr(input_cfg, 'class_subset', None)
         )
     elif str(dataset_choice).lower() == 'cifar10':
-        flip_prob = float(getattr(config, 'random_flip_prob', 0.0))
+        flip_prob = float(getattr(input_cfg, 'random_flip_prob', 0.0))
         dataset = TorchvisionCIFAR10(split='train', download=True, random_flip_prob=flip_prob)
         val_dataset = TorchvisionCIFAR10(split='test', download=True, random_flip_prob=0.0)
         # Provide class label as text tokens for AR conditioning
@@ -854,17 +855,17 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
         val_dataset = ClassAsTextDataset(val_dataset)
     elif str(dataset_choice).lower() == 'imagenet1k_hf':
         # Use HF ILSVRC/imagenet-1k with user-specified resolution
-        H, W = tuple(getattr(config, 'input_size'))
+        H, W = tuple(getattr(input_cfg, 'input_size'))
         res = int(H)
         if res != int(W):
             raise ValueError("imagenet1k_hf requires square input_size [H, W]")
-        flip_prob = float(getattr(config, 'random_flip_prob', 0.0))
-        safe_decode = bool(getattr(config, 'hf_safe_image_decode', True))
+        flip_prob = float(getattr(input_cfg, 'random_flip_prob', 0.0))
+        safe_decode = bool(getattr(input_cfg, 'hf_safe_image_decode', True))
         dataset = HFImagenet1k(
             split='train',
             resolution=res,
-            max_samples=getattr(config, 'max_samples', None),
-            class_subset=getattr(config, 'class_subset', None),
+            max_samples=getattr(input_cfg, 'max_samples', None),
+            class_subset=getattr(input_cfg, 'class_subset', None),
             random_flip_prob=flip_prob,
             safe_decode=safe_decode,
         )
@@ -873,8 +874,8 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
         val_dataset = HFImagenet1k(
             split='validation',
             resolution=res,
-            max_samples=getattr(config, 'max_samples', None),
-            class_subset=getattr(config, 'class_subset', None),
+            max_samples=getattr(input_cfg, 'max_samples', None),
+            class_subset=getattr(input_cfg, 'class_subset', None),
             random_flip_prob=0.0,
             safe_decode=safe_decode,
         )
@@ -885,8 +886,8 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
         logger.warning(f"Dataset '{dataset_choice}' not recognized or handled; falling back to 'imagenet64_tfds'.")
         dataset = TFDSImagenetResized64(
             split='train',
-            max_samples=getattr(config, 'max_samples', None),
-            class_subset=getattr(config, 'class_subset', None)
+            max_samples=getattr(input_cfg, 'max_samples', None),
+            class_subset=getattr(input_cfg, 'class_subset', None)
         )
         val_dataset = TFDSImagenetResized64(split='validation')
 
@@ -898,7 +899,7 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
         batch_size=config.batch_size,
         shuffle=(train_sampler is None),
         sampler=train_sampler,
-        num_workers=int(getattr(config, 'num_workers')),
+        num_workers=int(getattr(input_cfg, 'num_workers')),
         prefetch_factor=4,
         persistent_workers=True,
         drop_last=True,
@@ -910,7 +911,7 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
         batch_size=config.batch_size,
         shuffle=False,
         sampler=val_sampler,
-        num_workers=int(getattr(config, 'num_workers')),
+        num_workers=int(getattr(input_cfg, 'num_workers')),
         prefetch_factor=4,
         persistent_workers=True,
         drop_last=False,

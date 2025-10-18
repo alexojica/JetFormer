@@ -3,9 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from typing import Tuple
+from types import SimpleNamespace
 from src.utils.image import patchify as tk_patchify, unpatchify as tk_unpatchify
 from src.utils.losses import gmm_params as mix_gmm_params, gmm_distribution as mix_gmm_distribution, sample_gmm as mix_sample_gmm
-from src.flow.jet_flow import JetModel
 from src.transformer import GemmaBlock
 from src.flow.projections import InvertibleLinear
 import torch.utils.checkpoint as checkpoint
@@ -117,7 +117,8 @@ class JetFormer(nn.Module):
         assert head_dim % 2 == 0, "Head dimension must be even for RoPE"
         
         # JAX parity flags
-        # Respect explicit flag and enforce boi_id under strict mode when enabled
+        # BOI usage is gated strictly by the presence of boi_id (parity with JAX).
+        # The incoming use_boi_token flag is ignored for behavior.
         self.use_boi_token = bool(use_boi_token)
         self.causal_mask_on_prefix = bool(causal_mask_on_prefix)
         self.untie_output_vocab = bool(untie_output_vocab)
@@ -127,15 +128,15 @@ class JetFormer(nn.Module):
         self.bos_id = int(bos_id) if bos_id is not None else None
         self.boi_id = int(boi_id) if boi_id is not None else None
         self.nolabel_id = int(nolabel_id) if nolabel_id is not None else None
+        # Enforce BOI gating solely by id presence
+        self.use_boi_token = (self.boi_id is not None)
         # Position id / alignment controls (default absolute positions; JAX uses absolute in training)
         self.rope_skip_pad = bool(rope_skip_pad)
         self.strict_special_ids = bool(strict_special_ids)
         self.right_align_inputs = bool(right_align_inputs)  # when True, right-align tokens by input mask
         # Note: rope_skip_pad is a no-op in this implementation because positions
         # are derived from the input mask (pads are naturally skipped), matching JAX behavior.
-        # Enforce presence of BOI id when BOI token usage is requested in strict mode
-        if self.use_boi_token and self.strict_special_ids and (self.boi_id is None):
-            raise RuntimeError("use_boi_token=True requires integer boi_id when strict_special_ids=True")
+        # BOI usage is already gated by id presence; no additional enforcement needed here
         # Fallback learned special embeddings when ids are not provided
         self._use_learned_specials = not (isinstance(self.bos_id, int) and isinstance(self.nolabel_id, int))
         if self.strict_special_ids and self._use_learned_specials:
@@ -145,40 +146,19 @@ class JetFormer(nn.Module):
             self.boi_emb = nn.Parameter(torch.randn(1, 1, d_model) * (1.0 / math.sqrt(d_model)))
             self.nolabel_emb = nn.Parameter(torch.randn(1, 1, d_model) * (1.0 / math.sqrt(d_model)))
         
-        # Use Jet normalizing flow (JetModel). Two modes:
-        # - Default (post-flow factoring): flow runs on pixel grid NHWC with ps=patch_size
-        # - Pre-flow factoring: flow runs on patch grid (H/ps, W/ps, d) with ps=1
-        H, W = input_size
-        if self.pre_factor_dim is None:
-            self.jet = JetModel(
-                input_img_shape_hwc=(H, W, 3),
-                depth=jet_depth,
-                block_depth=jet_block_depth,
-                emb_dim=jet_emb_dim,
-                num_heads=jet_num_heads,
-                ps=patch_size,
-                actnorm=flow_actnorm,
-                invertible_dense=flow_invertible_dense,
-                use_grad_checkpoint=self.flow_grad_checkpoint,
-            )
-        else:
-            # Flow over patch-grid tokens (ps=1)
-            self.jet = JetModel(
-                input_img_shape_hwc=(H // patch_size, W // patch_size, int(self.pre_factor_dim)),
-                depth=jet_depth,
-                block_depth=jet_block_depth,
-                emb_dim=jet_emb_dim,
-                num_heads=jet_num_heads,
-                ps=1,
-                actnorm=flow_actnorm,
-                invertible_dense=flow_invertible_dense,
-                use_grad_checkpoint=self.flow_grad_checkpoint,
-            )
+        # Note: In the JAX implementation, the normalizing flow operates as a separate
+        # adaptor over PatchPCA latents (ps=1 over the patch grid). We do NOT
+        # instantiate a flow inside the decoder model. The adaptor is attached
+        # externally in the factory and can be accessed via `self.adaptor`.
         
         # Multivariate head controls
         self.multivariate = bool(multivariate)
         # Default out_dim equals AR image dimension if not provided
         self.out_dim = int(multivariate_out_dim) if (multivariate_out_dim is not None) else int(image_ar_dim)
+
+        # Parity with JAX: multivariate mode requires exactly one mixture
+        if self.multivariate and int(self.num_mixtures) != 1:
+            raise ValueError("Cannot do multivariate GMM: num_mixtures must be 1 in multivariate mode")
 
         # Support num_vocab_repeats in embedding table
         self.text_emb = nn.Embedding(vocab_size * self.num_vocab_repeats, d_model)
@@ -233,7 +213,13 @@ class JetFormer(nn.Module):
             self.final_norm = None
 
         # Text head (untied option); default is tied via embedding weight
-        self.text_head = nn.Linear(d_model, vocab_size, bias=False)
+        if bool(untie_output_vocab):
+            # JAX constraint: untied head only supported when repeats==1
+            if int(self.num_vocab_repeats) != 1:
+                raise ValueError("untie_output_vocab=True requires num_vocab_repeats==1 for JAX parity")
+            self.text_head = nn.Linear(d_model, vocab_size, bias=False)
+        else:
+            self.text_head = nn.Linear(d_model, vocab_size, bias=False)
         # Image head output dimension depends on multivariate setting
         if self.multivariate:
             img_out = (self.out_dim * self.out_dim) + self.out_dim
@@ -275,73 +261,6 @@ class JetFormer(nn.Module):
         self.patch_pca = None
         self.adaptor = None
         
-    def freeze_for_flow_only(self) -> int:
-        """Freeze autoregressive (non-flow) parameters for flow-only training.
-
-        This freezes transformer backbone, embeddings, AR heads, special embeddings,
-        and class token table. It intentionally does NOT freeze the flow components
-        (self.jet) nor invertible projections (self.proj, self.pre_proj).
-
-        Returns the number of parameters frozen.
-        """
-        frozen_params = 0
-
-        def _freeze_param(p: torch.nn.Parameter) -> int:
-            if isinstance(p, torch.nn.Parameter) and p.requires_grad:
-                p.requires_grad = False
-                return p.numel()
-            return 0
-
-        def _freeze_module(m: nn.Module) -> int:
-            count = 0
-            if isinstance(m, nn.Module):
-                for p in m.parameters(recurse=True):
-                    count += _freeze_param(p)
-            return count
-
-        # Freeze transformer backbone
-        if hasattr(self, 'transformer') and isinstance(self.transformer, nn.Module):
-            # Prefer module-provided freeze() if available
-            try:
-                if hasattr(self.transformer, 'freeze') and callable(getattr(self.transformer, 'freeze')):
-                    self.transformer.freeze()
-                    for p in self.transformer.parameters(recurse=True):
-                        if not p.requires_grad:
-                            frozen_params += p.numel()
-                else:
-                    frozen_params += _freeze_module(self.transformer)
-            except Exception:
-                frozen_params += _freeze_module(self.transformer)
-
-        # Final norm of AR backbone
-        if hasattr(self, 'final_norm') and isinstance(self.final_norm, nn.Module):
-            frozen_params += _freeze_module(self.final_norm)
-
-        # Embeddings and AR heads
-        for attr in ['text_emb', 'image_emb', 'text_head', 'img_head', 'text_norm', 'img_norm']:
-            try:
-                mod = getattr(self, attr, None)
-                if isinstance(mod, nn.Module):
-                    frozen_params += _freeze_module(mod)
-            except Exception:
-                pass
-
-        # Special embeddings and class tokens
-        for attr in ['bos_emb', 'boi_emb', 'nolabel_emb']:
-            try:
-                prm = getattr(self, attr, None)
-                frozen_params += _freeze_param(prm)
-            except Exception:
-                pass
-        try:
-            if hasattr(self, 'class_tokens_table') and isinstance(self.class_tokens_table, torch.nn.Parameter):
-                frozen_params += _freeze_param(self.class_tokens_table)
-        except Exception:
-            pass
-
-        # NOTE: Do NOT freeze self.jet (flow) nor self.proj/self.pre_proj (invertible projections)
-        return frozen_params
-
     def _patchify(self, images_nhwc: torch.Tensor) -> torch.Tensor:
         """Convert NHWC images to [B, N_patches, 3*ps*ps] tokens."""
         return tk_patchify(images_nhwc, self.patch_size)
@@ -364,35 +283,32 @@ class JetFormer(nn.Module):
                                         text_seq_len: int,
                                         image_seq_len: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Split transformer outputs into (text_first/text_second, image_first/image_second) views.
-
         Mirrors JAX split logic and centralizes indexing to avoid subtle drift
         across BOI and repeated-vocab configurations.
-
         Returns:
             text_out_when_first, text_out_when_second, image_out_when_second, image_out_when_first
         """
         B, L, D = x.shape
         repeats = int(self.num_vocab_repeats)
         text_len_rep = text_seq_len * repeats
-
         if self.use_boi_token:
             # Sequence layout before shift:
             #  - Text-first:  [BOS, text(T*rep), BOI, image(I)]
             #  - Image-first: [BOI, image(I), BOS, text(T*rep)]
-            # After shift we removed the last token; indexing below follows prior implementation.
-            a_txt = x[:, :text_len_rep]
+            # After shift we removed the last token; JAX implementation slices only
+            # the first `text_seq_len` logits for text loss calculation.
+            a_txt = x[:, :text_seq_len]
             a_img = x[:, text_len_rep + 1:]
             b_img = x[:, :image_seq_len]
-            b_txt = x[:, image_seq_len + 1:image_seq_len + 1 + text_len_rep]
+            b_txt = x[:, image_seq_len + 1:image_seq_len + 1 + text_seq_len]
         else:
             # Sequence layout before shift:
             #  - Text-first:  [BOS, text(T*rep), image(I)]
             #  - Image-first: [BOS, image(I), text(T*rep)]
-            a_txt = x[:, :text_len_rep]
+            a_txt = x[:, :text_seq_len]
             a_img = x[:, text_len_rep:]
             b_img = x[:, :image_seq_len]
-            b_txt = x[:, image_seq_len:image_seq_len + text_len_rep]
-
+            b_txt = x[:, image_seq_len:image_seq_len + text_seq_len]
         return a_txt, b_txt, a_img, b_img
 
     def _right_align(self, x: torch.Tensor, attn_mask_l_s: torch.Tensor, input_mask_l: torch.Tensor):
@@ -454,7 +370,7 @@ class JetFormer(nn.Module):
 
     # Removed duplicate gaussian_residual_nll; use utils.losses.gaussian_residual_nll
 
-    def embed_sequence(self, text_tokens, image_tokens, text_first_mask, input_mask, drop_text_cond_mask=None):
+    def embed_sequence(self, text_tokens, image_tokens, text_first_mask, input_mask, drop_text_cond_mask=None, shift: bool = True):
         batch_size = text_tokens.shape[0]
         device = text_tokens.device
         
@@ -492,9 +408,10 @@ class JetFormer(nn.Module):
             nolabel_single = self.nolabel_emb.expand(batch_size, 1, -1)
         # Image embeddings (computed before any optional drop so we can override if needed)
         image_emb = self.image_emb(image_tokens)
-        # CFG drop parity with JAX: drop labels for the active prefix (text-first or image-first).
+        # CFG drop parity with JAX: drop text when text-first, drop image when image-first.
         if drop_text_cond_mask is not None:
             drop_b = drop_text_cond_mask.view(-1).bool()  # [B]
+
             # Drop text embeddings when text-first
             drop_txt = (text_first_mask & drop_b)
             if drop_txt.any():
@@ -510,13 +427,12 @@ class JetFormer(nn.Module):
                 # Force text mask to full True when dropped (parity with JAX)
                 x_txt_m = torch.where(drop_txt.view(-1, 1), torch.ones_like(x_txt_m), x_txt_m)
 
-            # Drop image embeddings when image-first (broadcast nolabel across image tokens)
+            # Drop image embeddings when image-first
             drop_img = ((~text_first_mask) & drop_b)
             if drop_img.any():
-                nolabel_img = nolabel_single  # [B,1,D]
-                image_emb = torch.where(drop_img.view(-1, 1, 1).expand_as(image_emb),
-                                        nolabel_img.expand_as(image_emb),
-                                        image_emb)
+                # Use a single nolabel token embedding expanded across image sequence (JAX behavior)
+                nolabel_img = nolabel_single.expand(batch_size, image_emb.shape[1], -1)
+                image_emb = torch.where(drop_img.view(-1, 1, 1).expand_as(image_emb), nolabel_img, image_emb)
 
         x_img_m = torch.full(image_tokens.shape[:-1], True, device=device)
         bos_m = torch.full((batch_size, 1), True, device=device)
@@ -542,8 +458,9 @@ class JetFormer(nn.Module):
         padding_mask = torch.where(mask_first_expanded, text_first_mask_seq, image_first_mask_seq)
         x = torch.where(text_first_expanded, text_first_seq, image_first_seq)
         
-        x = x[:, :-1]
-        padding_mask = padding_mask[:, :-1]
+        if shift:
+            x = x[:, :-1]
+            padding_mask = padding_mask[:, :-1]
 
         seq_len = x.shape[1]
         # Build attention mask: causal with optional prefix unmasking, then apply input padding on key dimension
@@ -611,7 +528,7 @@ class JetFormer(nn.Module):
         
         text_first_expanded = text_first_mask.reshape(batch_size, 1, 1).to(device)
         text_feats = torch.where(
-            text_first_expanded.expand(-1, text_seq_len_rep, x.shape[-1]),
+            text_first_expanded.expand(-1, text_seq_len, x.shape[-1]),
             text_out_when_first, 
             text_out_when_second
         )
@@ -640,7 +557,7 @@ class JetFormer(nn.Module):
         return text_logits, image_logits
 
     @torch.no_grad()
-    def prefill_cache(self, x: torch.Tensor, attn_mask_b_1_l_s: torch.Tensor, input_mask_b_l: torch.Tensor, cache_size: int | None = None) -> Tuple[torch.Tensor, list]:
+    def prefill_cache(self, x: torch.Tensor, attn_mask_b_1_l_s: torch.Tensor, input_mask_b_l: torch.Tensor, cache_size: int | None = None) -> Tuple[torch.Tensor, dict]:
         """Initialize a decode cache using right-align semantics.
 
         Args:
@@ -665,9 +582,14 @@ class JetFormer(nn.Module):
             position_ids = torch.clamp(position_ids, min=0)
         else:
             position_ids = torch.arange(seq_len, device=x_aligned.device).unsqueeze(0).expand(x_aligned.size(0), -1)
-        # During prefill, don't pad the mask - it should match the actual sequence length
-        # The KV cache will grow dynamically as tokens are generated
-        # Padding the mask here causes shape mismatches in attention computation
+
+        # JAX parity: pad attention mask along cache (key) dimension up to cache_size
+        # before filling the cache, so mask shape matches the target cache window.
+        if attn_mask is not None and isinstance(cache_size, int) and cache_size > 0:
+            pad_needed = int(cache_size) - int(attn_mask.shape[-1])
+            if pad_needed > 0:
+                attn_mask = F.pad(attn_mask, (0, pad_needed), value=False)
+
         h = x_aligned
         
         new_caches = []
@@ -682,44 +604,54 @@ class JetFormer(nn.Module):
             # This path is for non-Gemma transformer, which doesn't have caching implemented
             h, _ = self.transformer(h, attn_mask, position_ids)
 
-        # Pad attention mask along cache (key) dimension up to cache_size (parity with JAX)
-        if attn_mask is not None and isinstance(cache_size, int) and cache_size > 0:
-            pad_needed = int(cache_size) - int(attn_mask.shape[-1])
-            if pad_needed > 0:
-                attn_mask = F.pad(attn_mask, (0, pad_needed), value=False)
-
-        return h[:, -1:, :], new_caches
+        # JAX parity: track cache window for sliding-window attention during decode
+        cache_state = {'kv': new_caches}
+        if isinstance(cache_size, int) and cache_size > 0 and input_mask is not None:
+            seq_len = torch.sum(input_mask.to(torch.long), dim=-1)
+            cache_state['begin'] = x_aligned.shape[1] - seq_len
+            cache_state['end'] = torch.full_like(seq_len, x_aligned.shape[1])
+        return h[:, -1:, :], cache_state
 
     @torch.no_grad()
-    def extend_cache(self, x_next: torch.Tensor, cache: list, position_ids: torch.Tensor, cache_size: int | None = None) -> Tuple[torch.Tensor, list]:
+    def extend_cache(self, x_next: torch.Tensor, cache: dict, position_ids: torch.Tensor, cache_size: int | None = None) -> Tuple[torch.Tensor, dict]:
         """Extend decode cache with one more embedded token and return last prelogits.
-
-        Uses per-layer KV caches.
+        Uses per-layer KV caches and supports JAX-style sliding window.
         Args:
             x_next: [B,1,D] next-step embedding
-            cache: list of KV caches from previous step
+            cache: dict containing 'kv' list and optional 'begin'/'end' tensors
             position_ids: [B,1] tensor of current positions
             cache_size: optional total KV cache window length (defaults to max_seq_len)
         Returns:
             last_prelogits: [B,1,D]
-            new_cache: updated list of KV caches
+            new_cache: updated cache dictionary
         """
         h = x_next
         # Build per-step attention mask [B,1,1,S] allowing attend up to current position
         try:
             B = x_next.size(0)
             cs = int(cache_size) if isinstance(cache_size, int) and cache_size > 0 else int(getattr(self, 'max_seq_len', h.shape[1]))
-            cur_pos = position_ids.view(B)
-            keys = torch.arange(cs, device=x_next.device).view(1, 1, cs)
-            # allow keys in [0..cur_pos] inclusive
-            mask_keys = (keys <= cur_pos.view(B, 1, 1))
-            step_mask = mask_keys.unsqueeze(1)  # [B,1,1,S]
+            keys = torch.arange(cs, device=x_next.device).view(1, 1, 1, cs)
+            
+            # Default to causal mask up to current position
+            cur_pos = position_ids.view(B, 1, 1, 1)
+            mask_keys = (keys <= cur_pos)
+
+            # JAX parity: apply sliding window if cache state is present
+            if isinstance(cache, dict) and 'begin' in cache and 'end' in cache:
+                cache_begin = cache['begin'].view(B, 1, 1, 1)
+                cache_end = (cache['end'] + 1).view(B, 1, 1, 1)
+                window_mask = (keys >= cache_begin) & (keys < cache_end)
+                mask_keys = window_mask
+            
+            step_mask = mask_keys  # [B,1,1,S]
         except Exception:
             step_mask = None
+        
         new_caches = []
+        kv_list = cache.get('kv', []) if isinstance(cache, dict) else cache
         if isinstance(self.transformer, nn.ModuleList):
             for i, layer in enumerate(self.transformer):
-                layer_cache = cache[i] if cache and i < len(cache) else None
+                layer_cache = kv_list[i] if kv_list and i < len(kv_list) else None
                 # Provide explicit mask to avoid relying on implicit causal flag
                 # For single-token decoding, mask can be None
                 h, new_cache = layer(h, mask=step_mask, position_ids=position_ids, cache=layer_cache)
@@ -729,7 +661,13 @@ class JetFormer(nn.Module):
         else:
             h, _ = self.transformer(h, attn_mask=step_mask, position_ids=position_ids)
 
-        return h[:, -1:, :], new_caches
+        # Return updated cache state
+        new_cache_state = {'kv': new_caches}
+        if isinstance(cache, dict) and 'begin' in cache and 'end' in cache:
+            new_cache_state['begin'] = cache['begin']
+            new_cache_state['end'] = cache['end'] + 1
+        
+        return h[:, -1:, :], new_cache_state
         
     # ==== JAX-parity APIs for sampling distribution ====
     @torch.no_grad()
@@ -854,13 +792,20 @@ class JetFormer(nn.Module):
             image_out_when_second,
             image_out_when_first
         )
+        # JAX parity: return prelogits-equivalent for image positions.
+        # When per-modality norms are enabled, the modality-specific norm is
+        # applied only at logits computation time, not here.
         return image_hidden
 
     @torch.no_grad()
     def sample_from_hidden_mixture_first(self, hidden_pos: torch.Tensor) -> torch.Tensor:
         """Mixture-first sampling via GMM params. hidden_pos: [B,1,D] -> [B,1,image_ar_dim]."""
         # Compute logits for this single position
-        logits = self.img_head(hidden_pos)  # [B,1,K + 2*K*d]
+        # JAX parity: apply per-modality final norm before logits when enabled
+        feats = hidden_pos
+        if self.per_modality_final_norm:
+            feats = self.img_norm(feats)
+        logits = self.img_head(feats)  # [B,1,K + 2*K*d]
         mix_logits, means, scales = self.gmm_params(logits)  # shapes [B,1,K], [B,1,K,d], [B,1,K,d]
         # Squeeze sequence dim and sample using utility
         mix_logits_b = mix_logits.squeeze(1)
@@ -930,15 +875,8 @@ class JetFormer(nn.Module):
             return torch.clamp(x01, 0.0, 1.0)
 
         if self.pre_factor_dim is None:
-            # Default path: inverse flow on pixel grid
-            z_nhwc = self._unpatchify(tokens, H, W)
-            x_nhwc, _ = self.jet.inverse(z_nhwc)
-            if self.pre_latent_projection is not None and self.pre_proj is not None:
-                tokens_px = self._patchify(x_nhwc)
-                tokens_orig, _ = self.pre_proj.inverse(tokens_px)
-                x_nhwc = self._unpatchify(tokens_orig, H, W)
-            x_chw = torch.clamp(x_nhwc.permute(0, 3, 1, 2), 0.0, 1.0)
-            return x_chw
+            # Pixel-space flow decode is not supported; PatchPCA is required.
+            raise RuntimeError("decode_tokens_to_image01 requires PatchPCA; pixel-space flow decode is disabled.")
 
         # Pre-flow factoring path
         d = int(self.pre_factor_dim)
@@ -950,6 +888,8 @@ class JetFormer(nn.Module):
         tokens_tilde = tokens[..., d:]            # [B,N,D_full-d]
         # Inverse flow over patch grid (ps=1)
         z_hat_grid = tokens_hat_latents.transpose(1, 2).contiguous().view(B, d, H_patch, W_patch).permute(0, 2, 3, 1).contiguous()
+        if not hasattr(self, 'jet') or self.jet is None:
+            raise RuntimeError("Pre-factor decode path requires a flow instance on model.jet.")
         x_hat_grid, _ = self.jet.inverse(z_hat_grid)   # [B,H/ps,W/ps,d]
         tokens_hat_after_W = x_hat_grid.permute(0, 3, 1, 2).contiguous().view(B, d, N).transpose(1, 2).contiguous()  # [B,N,d]
         # Merge with Gaussian residual dims to reconstruct pre-projection patch tokens
@@ -962,3 +902,127 @@ class JetFormer(nn.Module):
         x_nhwc = self._unpatchify(tokens_px_orig, H, W)
         x_chw = torch.clamp(x_nhwc.permute(0, 3, 1, 2), 0.0, 1.0)
         return x_chw
+
+    # ==== Factory integration: build model and attach latents/adaptor from config ====
+    @staticmethod
+    def _get_from_ns(config: SimpleNamespace, key: str, default=None):
+        """Safely get a value from a nested SimpleNamespace, supporting dot notation."""
+        keys = key.split('.')
+        val = config
+        for k in keys:
+            if not isinstance(val, SimpleNamespace) or not hasattr(val, k):
+                return default
+            val = getattr(val, k)
+        return val
+
+    @classmethod
+    def from_config(cls, config: SimpleNamespace, device: torch.device) -> "JetFormer":
+        """Construct JetFormer and its auxiliary modules directly from a nested config."""
+        get = cls._get_from_ns
+
+        # --- Core model parameters ---
+        kwargs = {
+            'd_model': get(config, 'model.width'),
+            'n_layers': get(config, 'model.depth'),
+            'd_ff': get(config, 'model.mlp_dim'),
+            'n_heads': get(config, 'model.num_heads'),
+            'n_kv_heads': get(config, 'model.num_kv_heads'),
+            'vocab_size': get(config, 'model.vocab_size'),
+            'bos_id': get(config, 'model.bos_id'),
+            'boi_id': get(config, 'model.boi_id'),
+            'nolabel_id': get(config, 'model.nolabel_id'),
+            'num_mixtures': get(config, 'model.num_mixtures'),
+            'dropout': get(config, 'model.dropout'),
+            # Prefer boolean control for head dtype to avoid string->dtype mismatch
+            'use_bfloat16_img_head': get(config, 'model.head_dtype', 'fp32') == 'bfloat16',
+            'num_vocab_repeats': get(config, 'model.num_vocab_repeats', 1),
+            'scale_tol': get(config, 'model.scale_tol', 1e-6),
+            'causal_mask_on_prefix': get(config, 'model.causal_mask_on_prefix', True),
+            'untie_output_vocab': get(config, 'model.untie_output_vocab', False),
+            'per_modality_final_norm': get(config, 'model.per_modality_final_norm', False),
+            'right_align_inputs': get(config, 'model.right_align_inputs', True),
+            'strict_special_ids': get(config, 'model.strict_special_ids', True),
+            'use_boi_token': get(config, 'model.use_boi_token', True),
+            'max_seq_len': get(config, 'model.max_seq_len'),
+            'rope_skip_pad': get(config, 'model.rope_skip_pad', True),
+            'grad_checkpoint_transformer': get(config, 'model.remat_policy', 'none') != 'none',
+        }
+
+        # --- Input and PCA-related dependent params ---
+        kwargs['input_size'] = tuple(get(config, 'input.input_size'))
+        kwargs['patch_size'] = int(get(config, 'patch_pca.model.patch_size'))
+        kwargs['image_ar_dim'] = int(get(config, 'patch_pca.model.codeword_dim'))
+        kwargs['num_classes'] = get(config, 'input.num_classes')
+        kwargs['class_token_length'] = get(config, 'input.class_token_length')
+
+        # --- Jet/Flow parameters surfaced from adaptor config ---
+        adaptor_model_cfg = get(config, 'adaptor.model', SimpleNamespace())
+        kwargs['jet_depth'] = getattr(adaptor_model_cfg, 'depth', None)
+        kwargs['jet_block_depth'] = getattr(adaptor_model_cfg, 'block_depth', None)
+        kwargs['jet_emb_dim'] = getattr(adaptor_model_cfg, 'emb_dim', None)
+        kwargs['jet_num_heads'] = getattr(adaptor_model_cfg, 'num_heads', None)
+        kwargs['flow_actnorm'] = getattr(adaptor_model_cfg, 'actnorm', False)
+        kwargs['flow_invertible_dense'] = getattr(adaptor_model_cfg, 'invertible_dense', False)
+        kwargs['flow_grad_checkpoint'] = getattr(adaptor_model_cfg, 'flow_grad_checkpoint', False)
+
+        # Filter out None values before constructing
+        final_kwargs = {k: v for k, v in kwargs.items() if v is not None}
+        model = cls(**final_kwargs).to(device)
+
+        # Attach training mode (e.g., 'pca')
+        try:
+            model.training_mode = get(config, 'jetformer_training_mode', 'pca')
+        except Exception:
+            pass
+
+        # Attach PatchPCA if configured
+        try:
+            from src.latents import PatchPCA
+            pca_model_params = get(config, 'patch_pca.model')
+            if pca_model_params:
+                pca_params_dict = vars(pca_model_params)
+                # Ensure PCA input size matches dataset/model
+                if 'input_size' not in pca_params_dict or pca_params_dict['input_size'] is None:
+                    pca_params_dict['input_size'] = kwargs['input_size']
+                allowed_keys = {
+                    'pca_init_file', 'whiten', 'noise_std', 'add_dequant_noise',
+                    'input_size', 'patch_size', 'depth_to_seq', 'skip_pca', 'eps'
+                }
+                safe_params = {k: v for k, v in pca_params_dict.items() if k in allowed_keys}
+                model.patch_pca = PatchPCA(**safe_params).to(device)
+        except Exception:
+            pass
+
+        # Attach Adaptor/Flow if enabled
+        try:
+            from src.latents import build_adaptor
+            use_adaptor = get(config, 'use_adaptor', False)
+            if use_adaptor:
+                H, W = kwargs['input_size']
+                ps = kwargs['patch_size']
+                grid_h, grid_w = H // ps, W // ps
+                full_token_dim = 3 * ps * ps
+                adaptor_cfg = get(config, 'adaptor', SimpleNamespace())
+                adaptor_model_cfg_ns = get(adaptor_cfg, 'model', SimpleNamespace())
+                model.adaptor = build_adaptor(
+                    kind=getattr(adaptor_cfg, 'kind', 'jet'),
+                    grid_h=grid_h,
+                    grid_w=grid_w,
+                    dim=full_token_dim,
+                    **vars(adaptor_model_cfg_ns)
+                ).to(device)
+                model._latent_noise_dim = getattr(adaptor_cfg, 'latent_noise_dim', 0)
+        except Exception:
+            pass
+
+        # Alias model.jet to the proper flow module for training/sampling utilities
+        try:
+            if getattr(model, 'training_mode', 'pca') == 'pca' and getattr(model, 'adaptor', None) is not None:
+                model.jet = getattr(model.adaptor, 'flow', model.adaptor)
+                model.jet_is_latent = True
+            else:
+                model.jet_is_latent = False
+        except Exception:
+            pass
+
+        return model

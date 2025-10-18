@@ -36,7 +36,8 @@ def aspect_preserving_resize_and_center_crop(img: Image.Image, resolution: int) 
         scale = float(resolution) / float(min(w, h))
         new_w = max(1, int(round(w * scale)))
         new_h = max(1, int(round(h * scale)))
-        img = img.resize((new_w, new_h), Image.Resampling.BICUBIC)
+        # JAX parity: resize_small(..., method="bicubic", antialias=True)
+        img = img.resize((new_w, new_h), Image.Resampling.BICUBIC, reducing_gap=1.0)
         w, h = img.size
     if (w, h) != (resolution, resolution):
         left = max(0, (w - resolution) // 2)

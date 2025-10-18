@@ -1,9 +1,8 @@
 # General
 num_epochs: 50
 torch_compile: false
-jetformer_training_mode: pca
 advanced_metrics: true
-batch_size: 512
+batch_size: 32
 grad_accum_steps: 1
 
 # Input/Dataset
@@ -13,8 +12,7 @@ input:
   num_classes: 10
   num_workers: 8
   random_flip_prob: 0.5
-  class_token_length: 16
-  ignore_pad: false
+  class_token_length: 1
   
 # Model Configuration
 model:
@@ -23,6 +21,7 @@ model:
   mlp_dim: 2048
   num_heads: 8
   num_kv_heads: 1
+  head_dim: 64
   vocab_size: 13
   bos_id: 10
   boi_id: 11
@@ -31,7 +30,7 @@ model:
   dropout: 0.1
   drop_labels_probability: 0.1
   head_dtype: 'bfloat16'
-  remat_policy: 'none'
+  remat_policy: 'nothing_saveable'
   num_vocab_repeats: 16
   scale_tol: 1e-6
   causal_mask_on_prefix: true
@@ -47,7 +46,6 @@ model:
 patch_pca:
   model:
     depth_to_seq: 1
-    input_size: [32, 32]
     patch_size: 4
     codeword_dim: 48
     noise_std: 0.01
@@ -59,10 +57,10 @@ patch_pca:
 use_adaptor: true
 adaptor:
   model:
-    depth: 26
+    depth: 16
     block_depth: 4
-    emb_dim: 384
-    num_heads: 6
+    emb_dim: 256
+    num_heads: 8
     actnorm: false
     invertible_dense: false
     flow_grad_checkpoint: false
@@ -73,7 +71,6 @@ adaptor:
 optimizer:
   lr: 0.0001
   wd: 0.0001
-  b1: 0.9
   b2: 0.95
   grad_clip_norm: 1.0
 
@@ -97,11 +94,12 @@ training:
 
 # Sampling & Evaluation
 sampling:
-  cfg_strength: 4.0
+  cfg_inference_weight: 4.0
   cfg_mode: "interp"
+  temperature: 1.0
+  temperature_probs: 1.0
 
 eval:
-  sample_every_epochs: 2
   val_every_epochs: 2
   eval_no_rgb_noise: true
   fid_every_epochs: 0

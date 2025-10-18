@@ -322,10 +322,10 @@ def build_accelerator(config: dict):
 
     Mirrors previous helper in training_helpers to keep a single source of truth.
     """
-    accelerator_choice = config.get('accelerator')
+    accelerator_choice = config.get('name')
     accelerator_choice = str(accelerator_choice).lower() if accelerator_choice is not None else None
     if accelerator_choice is None:
-        raise KeyError("accelerator must be specified")
+        raise KeyError("accelerator name must be specified in config")
     if accelerator_choice == 'tpu' or (accelerator_choice == 'auto' and HAS_TPU):
         if TPUAccelerator is None:
             raise RuntimeError("TPU accelerator requested but torch_xla is not available.")

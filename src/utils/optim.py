@@ -54,20 +54,15 @@ def get_optimizer_and_scheduler(model: torch.nn.Module, cfg: Dict[str, Any], tot
     else:
         raise KeyError('weight_decay (or wd) must be provided')
 
-    if 'opt_b1' not in cfg or 'opt_b2' not in cfg:
-        raise KeyError('opt_b1 and opt_b2 must be provided')
-    beta1 = float(cfg['opt_b1'])
-    beta2 = float(cfg['opt_b2'])
+    b1 = float(cfg.get('b1', cfg.get('opt_b1', 0.9)))
+    b2 = float(cfg.get('b2', cfg.get('opt_b2', 0.95)))
 
-    if 'warmup_percent' not in cfg:
-        raise KeyError('warmup_percent must be provided')
-    warmup_percent = float(cfg['warmup_percent'])
-
-    if 'use_cosine' not in cfg:
-        raise KeyError('use_cosine must be provided')
-    use_cosine = bool(cfg['use_cosine'])
-
-    optimizer = create_adamw(model, lr=lr, wd=wd, beta1=beta1, beta2=beta2)
+    # Scheduler config comes from top-level 'schedule' block, not optimizer block
+    warmup_percent = float(cfg.get('warmup_percent', 0.1))
+    decay_type = cfg.get('decay_type', 'cosine')
+    use_cosine = (str(decay_type).lower() == 'cosine')
+    
+    optimizer = create_adamw(model, lr=lr, wd=wd, beta1=b1, beta2=b2)
     scheduler = build_cosine_scheduler(optimizer, total_steps=total_steps, warmup_percent=warmup_percent, use_cosine=use_cosine)
     return optimizer, scheduler
 

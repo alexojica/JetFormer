@@ -140,6 +140,10 @@ class MlpBlock(nn.Module):
         super().__init__()
         self.mlp_dim = mlp_dim or 4 * in_dim
         self.fc1 = nn.Linear(in_dim, self.mlp_dim)
+        # JAX parity: Xavier-uniform weights and Normal(1e-6) biases
+        nn.init.xavier_uniform_(self.fc1.weight)
+        if self.fc1.bias is not None:
+            nn.init.normal_(self.fc1.bias, std=1e-6)
         if activation == "gelu":
             self.activation_fn = nn.GELU()
         elif activation == "silu":
@@ -147,6 +151,10 @@ class MlpBlock(nn.Module):
         else:
             raise ValueError(f"Unsupported activation: {activation}")
         self.fc2 = nn.Linear(self.mlp_dim, in_dim)
+        # JAX parity: Xavier-uniform weights and Normal(1e-6) biases
+        nn.init.xavier_uniform_(self.fc2.weight)
+        if self.fc2.bias is not None:
+            nn.init.normal_(self.fc2.bias, std=1e-6)
         self.dropout = nn.Dropout(dropout)
         
     def forward(self, x):
@@ -162,6 +170,15 @@ class ViTEncoderBlock(nn.Module):
         super().__init__()
         self.norm1 = nn.LayerNorm(emb_dim)
         self.attn = nn.MultiheadAttention(embed_dim=emb_dim, num_heads=num_heads, dropout=dropout, batch_first=True)
+        # JAX parity: Xavier-uniform weights and Normal(1e-6) biases for attention projections
+        if hasattr(self.attn, 'in_proj_weight') and self.attn.in_proj_weight is not None:
+            nn.init.xavier_uniform_(self.attn.in_proj_weight)
+        if hasattr(self.attn, 'in_proj_bias') and self.attn.in_proj_bias is not None:
+            nn.init.normal_(self.attn.in_proj_bias, std=1e-6)
+        if hasattr(self.attn, 'out_proj') and self.attn.out_proj is not None:
+            nn.init.xavier_uniform_(self.attn.out_proj.weight)
+            if self.attn.out_proj.bias is not None:
+                nn.init.normal_(self.attn.out_proj.bias, std=1e-6)
         self.dropout_attn = nn.Dropout(dropout)
 
         self.norm2 = nn.LayerNorm(emb_dim)
@@ -229,9 +246,10 @@ class DNN(nn.Module):
         self.scale_factor = scale_factor
 
         self.init_proj = nn.Linear(dnn_io_dim, vit_hidden_dim)
+        # JAX parity: Xavier-uniform weights and Normal(1e-6) biases
         nn.init.xavier_uniform_(self.init_proj.weight)
         if self.init_proj.bias is not None:
-            nn.init.zeros_(self.init_proj.bias)
+            nn.init.normal_(self.init_proj.bias, std=1e-6)
 
         self.posemb = None
 
@@ -241,6 +259,18 @@ class DNN(nn.Module):
             num_heads=num_heads,
             use_grad_checkpoint=use_grad_checkpoint
         )
+
+        # Optional cross-attention on context to match JAX DNN behavior when provided
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=vit_hidden_dim,
+            num_heads=num_heads,
+            dropout=0.0,
+            batch_first=True,
+        )
+        # Zero-init output of cross attention as in JAX (out_kernel_init=zeros)
+        nn.init.zeros_(self.cross_attn.out_proj.weight)
+        if self.cross_attn.out_proj.bias is not None:
+            nn.init.zeros_(self.cross_attn.out_proj.bias)
 
         self.final_proj = nn.Linear(vit_hidden_dim, 2 * dnn_io_dim)
         nn.init.zeros_(self.final_proj.weight)
@@ -257,20 +287,26 @@ class DNN(nn.Module):
             raise ValueError(f"Positional embedding is not set or has wrong length (found {self.posemb.shape} vs expected B×{N}×d).")
         x_with_pos = x_proj + self.posemb
 
+        # Residual cross-attention on context when available
+        if context is not None:
+            if context.dim() != 3 or context.shape[0] != B:
+                raise ValueError("DNN context must be shaped [B, N_ctx, D_ctx].")
+            if context.shape[-1] != self.vit_hidden_dim:
+                raise ValueError(f"DNN context last dim must equal vit_hidden_dim={self.vit_hidden_dim}.")
+            y, _ = self.cross_attn(query=x_with_pos, key=context, value=context, need_weights=False)
+            x_with_pos = x_with_pos + y
+
         vit_out = self.vit_encoder(x_with_pos)
 
         bias_scale = self.final_proj(vit_out)
         bias, raw_scale = torch.chunk(bias_scale, 2, dim=-1)
 
         # --- Numerical stability guard ---
-        sigma = torch.sigmoid(raw_scale)
-        # Clamp to avoid exactly 0 or 1 which would yield log(0) = -inf and blow up training
-        sigma = sigma.clamp(min=1e-4, max=1.0 - 1e-4)
-
-        scale = sigma * self.scale_factor
+        # --- JAX parity for numerical stability ---
+        scale = torch.sigmoid(raw_scale) * self.scale_factor
 
         # log|det| contribution per element
-        logdet_per_element = torch.log(sigma) + math.log(self.scale_factor)
+        logdet_per_element = F.logsigmoid(raw_scale) + math.log(self.scale_factor)
         logdet = logdet_per_element.view(B, -1).sum(dim=1)
 
         return bias, scale, logdet
@@ -290,8 +326,13 @@ def get_spatial_coupling_masks_torch(depth, num_tokens, proj_kinds, grid_h, grid
         if kind.startswith("checkerboard"):
             if n % 2 != 0:
                 raise ValueError("checkerboard requires an even number of tokens.")
-            idx1 = torch.arange(0, n, 2, device=device)
-            idx2 = torch.arange(1, n, 2, device=device)
+            # Row-aware parity like JAX: alternate by row and column.
+            vals = torch.arange(n, device=device).view(grid_h, grid_w) + torch.arange(grid_h, device=device).view(grid_h, 1)
+            vals = vals.flatten()
+            mask_even = (vals % 2) == 0
+            idx_all = torch.arange(n, device=device)
+            idx1 = idx_all[mask_even]
+            idx2 = idx_all[~mask_even]
 
         elif kind.startswith("hstripes"): # horizontal stripes = rows
             if grid_h % 2 != 0:
@@ -666,7 +707,9 @@ class FlowCore(nn.Module):
                  channel_repeat: int = 0,
                  spatial_mode: str = 'mix',
                  channels_coupling_projs: Sequence[str] = ('random',),
-                 masking_mode: str = 'pairing',
+                 spatial_coupling_projs: Optional[Sequence[str]] = None,
+                 kinds: Optional[Sequence[str]] = None,
+                 masking_mode: str = 'masking',
                  actnorm: bool = False,
                  invertible_dense: bool = False,
                  use_grad_checkpoint: bool = False,
@@ -695,40 +738,58 @@ class FlowCore(nn.Module):
         if seed is not None:
             self.rng = torch.Generator(device='cpu').manual_seed(seed)
 
-        spatial_mode = spatial_mode.lower()
-        if spatial_mode not in {"row", "column", "checkerboard", "mix"}:
-            raise ValueError(f"Invalid spatial_mode '{spatial_mode}'.")
-
-        if spatial_mode == "row":
-            self.spatial_coupling_projs_config = (
-                'hstripes', 'hstripes-inv'
-            )
-        elif spatial_mode == "column":
-            self.spatial_coupling_projs_config = (
-                'vstripes', 'vstripes-inv'
-            )
-        elif spatial_mode == "checkerboard":
-            self.spatial_coupling_projs_config = (
-                'checkerboard', 'checkerboard-inv'
-            )
+        if spatial_coupling_projs is not None:
+            self.spatial_coupling_projs_config = tuple(spatial_coupling_projs)
         else:
-            self.spatial_coupling_projs_config = (
-                'checkerboard', 'checkerboard-inv',
-                'vstripes', 'vstripes-inv',
-                'hstripes', 'hstripes-inv'
-            )
+            spatial_mode = spatial_mode.lower()
+            if spatial_mode not in {"row", "column", "checkerboard", "mix"}:
+                raise ValueError(f"Invalid spatial_mode '{spatial_mode}'.")
+            if spatial_mode == "row":
+                self.spatial_coupling_projs_config = (
+                    'hstripes', 'hstripes-inv'
+                )
+            elif spatial_mode == "column":
+                self.spatial_coupling_projs_config = (
+                    'vstripes', 'vstripes-inv'
+                )
+            elif spatial_mode == "checkerboard":
+                self.spatial_coupling_projs_config = (
+                    'checkerboard', 'checkerboard-inv'
+                )
+            else:
+                self.spatial_coupling_projs_config = (
+                    'checkerboard', 'checkerboard-inv',
+                    'vstripes', 'vstripes-inv',
+                    'hstripes', 'hstripes-inv'
+                )
 
-        kinds_sequence: Sequence[str] = []
-        if channel_repeat == -1:
-            kinds_sequence = ["spatial"] * depth
-        elif channel_repeat == 0:
-            kinds_sequence = ["channels"] * depth
+        if kinds is not None:
+            kinds_sequence = [str(k).lower() for k in kinds]
+            if any(k not in {"channels", "spatial"} for k in kinds_sequence):
+                raise ValueError(f"Unsupported coupling kind in {kinds_sequence}; expected 'channels' or 'spatial'.")
+            # Cycle or truncate to match depth like JAX
+            if len(kinds_sequence) < depth:
+                import itertools as _it
+                kinds_sequence = list(_it.islice(_it.cycle(kinds_sequence), depth))
+            else:
+                kinds_sequence = kinds_sequence[:depth]
         else:
-            while len(kinds_sequence) < depth:
-                kinds_sequence.extend(["channels"] * channel_repeat)
-                if len(kinds_sequence) < depth:
-                    kinds_sequence.append("spatial")
-            kinds_sequence = kinds_sequence[:depth]
+            kinds_sequence: Sequence[str] = []
+            if channel_repeat == -1:
+                kinds_sequence = ["spatial"] * depth
+            elif channel_repeat == 0:
+                # Default mixed coupling pattern matching JAX Jet defaults:
+                # ("channels", "channels", "spatial") repeated across depth.
+                pattern = ["channels", "channels", "spatial"]
+                while len(kinds_sequence) < depth:
+                    kinds_sequence.extend(pattern)
+                kinds_sequence = kinds_sequence[:depth]
+            else:
+                while len(kinds_sequence) < depth:
+                    kinds_sequence.extend(["channels"] * channel_repeat)
+                    if len(kinds_sequence) < depth:
+                        kinds_sequence.append("spatial")
+                kinds_sequence = kinds_sequence[:depth]
 
         self.kinds_config = tuple(kinds_sequence)
 

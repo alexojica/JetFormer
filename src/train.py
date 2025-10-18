@@ -13,15 +13,11 @@ import numpy as np
 from torch.utils.data import DataLoader, Dataset
 import torch.distributed as dist
 from contextlib import nullcontext
- 
+from collections.abc import Mapping
+
 from src.utils.logging import WBLogger
 from src.utils.optim import get_optimizer_and_scheduler as get_opt_sched
-from src.utils.config import migrate_and_normalize_config, get_nested_config
 from src.jetformer import JetFormer
-from PIL import Image
-import torchvision.transforms as transforms
-from types import SimpleNamespace
-from tqdm import tqdm
 from src.utils.training_helpers import (
     init_wandb as helpers_init_wandb,
     count_model_parameters,
@@ -39,8 +35,199 @@ from src.utils.training_helpers import (
 from src.utils.dataset import create_datasets_and_loaders
 from src.utils.eval import evaluate_one_epoch, compute_and_log_fid_is
 import src.utils.training_helpers as training_helpers
-from src.utils.schedules import rgb_cosine_sigma
-from src.utils.losses import compute_jetformer_pca_loss, compute_flow_only_loss
+from src.utils.losses import compute_jetformer_pca_loss
+from types import SimpleNamespace
+from tqdm import tqdm
+from src.utils.accelerators import build_accelerator as _build_accel
+
+# Centralized config processing logic
+def _deep_update(d: dict, u: Mapping) -> dict:
+    for k, v in u.items():
+        if isinstance(v, Mapping):
+            d[k] = _deep_update(d.get(k, {}), v)
+        else:
+            d[k] = v
+    return d
+
+def get_default_config() -> dict:
+    """Provides a default configuration inspired by the JAX implementation."""
+    # Defaults primarily based on the 350M model configuration for ImageNet 256.
+    return {
+        'num_epochs': 100,
+        'torch_compile': False,
+        'advanced_metrics': True,
+        'batch_size': 2048,
+        'grad_accum_steps': 1,
+        'input': {
+            'dataset': 'imagenet1k_hf',
+            'hf_safe_image_decode': True,
+            'input_size': [256, 256],
+            'num_classes': 1000,
+            'num_workers': 16,
+            'dataloader_prefetch_factor': 2,
+            'max_samples': None,
+            'random_flip_prob': 0.5,
+            'class_token_length': 1,
+        },
+        'model': {
+            'width': 1024,
+            'depth': 24,
+            'mlp_dim': 4096,
+            'num_heads': 16,
+            'num_kv_heads': 1,
+            'head_dim': 64,
+            'vocab_size': 1003,
+            'bos_id': 1000,
+            'boi_id': 1001,
+            'nolabel_id': 1002,
+            'num_mixtures': 1024,
+            'scale_tol': 1e-6,
+            'dropout': 0.1,
+            'drop_labels_probability': 0.1,
+            'head_dtype': 'bfloat16',
+            'remat_policy': 'nothing_saveable',
+            'num_vocab_repeats': 16,
+            'per_modality_final_norm': False,
+        },
+        'patch_pca': {
+            'model': {
+                'depth_to_seq': 1,
+                'input_size': [256, 256],
+                'patch_size': 16,
+                'codeword_dim': 128,
+                'noise_std': 0.0,
+                'add_dequant_noise': True,
+                'skip_pca': True,
+            }
+        },
+        'use_adaptor': True,
+        'adaptor': {
+            'model': {
+                'depth': 32,
+                'block_depth': 4,
+                'emb_dim': 512,
+                'num_heads': 8,
+                'ps': 1,  # Patch size for flow (always 1 for latent space)
+                'kinds': ('channels',),  # Coupling layer types
+                'channels_coupling_projs': ('random',),
+                'spatial_coupling_projs': ('checkerboard', 'checkerboard-inv'),
+            },
+            'latent_noise_dim': -1,  # Auto-computed
+            'kind': 'jet',  # Flow type: 'jet' (normalizing flow) or 'none' (identity)
+        },
+        'optimizer': {
+            'name': 'adamw',
+            'lr': 0.001,
+            'wd': 0.0001,
+            'b1': 0.9,
+            'b2': 0.95,
+            'grad_clip_norm': 1.0,
+        },
+        'ema_decay': 0.0,
+        'schedule': {
+            'warmup_percent': 0.1,
+            'decay_type': 'cosine',
+        },
+        'training': {
+            # JAX defaults
+            'input_noise_std': 0.0,
+            'noise_scale': 0.0,
+            'noise_min': 0.0,
+            'text_prefix_prob': 0.5,
+            'loss_on_prefix': True,
+            'stop_grad_nvp_prefix': False,  # JAX default
+            'rgb_noise_on_image_prefix': True,
+            'text_loss_weight': 1.0, # JAX default; configs may override per task
+        },
+        'sampling': {
+            'cfg_inference_weight': 3.0,
+            'temperature': 0.94,
+            'temperature_probs': 1.0,
+            'cfg_strength': 3.0, # Legacy, prefer cfg_inference_weight
+            'cfg_mode': "interp",
+        },
+        'eval': {
+            'val_every_epochs': 5,
+            'sample_every_batches': 0,
+            'sample_every_epochs': 0,
+            'eval_no_rgb_noise': True,
+            'fid_every_epochs': 0,
+            'is_every_epochs': 0,
+            'fid_is_num_samples': 0,
+        },
+        'wandb': {
+            'enabled': True,
+            'offline': False,
+            'project': 'jetformer',
+            'run_name': 'default-run',
+            'tags': [],
+        },
+        'accelerator': {
+            'name': 'auto',
+            'device': 'auto',
+            'precision': 'bf16',
+        },
+        'resume_from': None,
+        'log_every_batches': 50,
+        'grad_logging': False,
+    }
+
+def _dict_to_sns(d: dict) -> SimpleNamespace:
+    if not isinstance(d, dict):
+        return d
+    return SimpleNamespace(**{k: _dict_to_sns(v) for k, v in d.items()})
+
+def get_config_from_yaml_and_cli(config_path: str, cli_args: argparse.Namespace) -> SimpleNamespace:
+    """Loads a YAML config, merges with defaults and CLI overrides, and returns a nested SimpleNamespace."""
+    config = get_default_config()
+
+    if config_path and Path(config_path).exists():
+        with open(config_path, 'r') as f:
+            yaml_config = yaml.safe_load(f) or {}
+            config = _deep_update(config, yaml_config)
+
+    # Apply CLI overrides
+    cli_vars = vars(cli_args)
+    for key, value in cli_vars.items():
+        if key not in ('config', 'help') and value is not None:
+            keys = key.split('.')
+            d = config
+            for part in keys[:-1]:
+                d = d.setdefault(part, {})
+            # Handle boolean strings from CLI
+            if isinstance(value, str) and value.lower() in ('true', 'false'):
+                d[keys[-1]] = value.lower() == 'true'
+            else:
+                d[keys[-1]] = value
+
+    # --- Backward compatibility and derived values ---
+    if 'lr' in config: config['optimizer']['lr'] = config.pop('lr')
+    if 'wd' in config: config['optimizer']['wd'] = config.pop('wd')
+    if 'learning_rate' in config: config['optimizer']['lr'] = config.pop('learning_rate')
+    if 'weight_decay' in config: config['optimizer']['wd'] = config.pop('weight_decay')
+    
+    # Unify sampling CFG strength parameter
+    if 'cfg_strength' in config['sampling']:
+        config['sampling']['cfg_inference_weight'] = config['sampling']['cfg_strength']
+
+    # Auto-compute latent_noise_dim if not set
+    if config['adaptor'].get('latent_noise_dim', -1) <= 0:
+        ps = int(config['patch_pca']['model']['patch_size'])
+        cd = int(config['patch_pca']['model']['codeword_dim'])
+        # latent_noise_dim = per-patch token dim (3*ps*ps) - codeword_dim
+        # This is independent of the image grid size.
+        config['adaptor']['latent_noise_dim'] = (3 * ps * ps) - cd
+
+    # Ensure PatchPCA input_size matches the dataset input_size
+    try:
+        if 'input' in config and 'input_size' in config['input']:
+            config.setdefault('patch_pca', {}).setdefault('model', {})
+            config['patch_pca']['model']['input_size'] = config['input']['input_size']
+    except Exception:
+        pass
+
+    return _dict_to_sns(config)
+
 
 # Prefer CUDA graphs when using torch.compile reduce-overhead
 try:
@@ -55,18 +242,9 @@ from src.utils.accelerators import GPUAccelerator, TPUAccelerator, HAS_TPU as _H
 
 IMAGE_SIZE = (256, 256, 3)
 
-def train_from_config(config_dict: dict):
-    # --- Config Migration ---
-    # This is the central point where we migrate the old flat config to the new nested one.
-    try:
-        migrated_config_dict = migrate_and_normalize_config(config_dict)
-    except Exception as e:
-        print(f"Error during config migration: {e}. Using raw config.")
-        migrated_config_dict = config_dict
-
+def train_from_config(config: SimpleNamespace):
     # Accelerator + process setup
-    accel_cfg = migrated_config_dict.get('accelerator', {})
-    from src.utils.accelerators import build_accelerator as _build_accel
+    accel_cfg = vars(config.accelerator)
     accelerator = _build_accel(accel_cfg)
 
     device_obj = accelerator.device
@@ -76,31 +254,35 @@ def train_from_config(config_dict: dict):
         acc_name = accelerator.__class__.__name__.replace('Accelerator', '').upper()
         print(f"Using device: {device_obj}; accelerator={acc_name}; DDP: {ddp_enabled}; world_size={accelerator.world_size}; rank={accelerator.rank}")
 
-    # Pass the full migrated config to wandb
-    wb_run = helpers_init_wandb(migrated_config_dict, is_main_process=is_main_process)
+    # Pass the raw dict representation to wandb
+    def sns_to_dict(sns):
+        if isinstance(sns, SimpleNamespace):
+            return {k: sns_to_dict(v) for k, v in sns.__dict__.items()}
+        return sns
+    
+    wb_cfg = sns_to_dict(config)
+    wb_run = helpers_init_wandb(wb_cfg, is_main_process=is_main_process)
     if os.environ.get('DEBUG') is not None:
         torch.autograd.set_detect_anomaly(True)
 
-    # Use the migrated config from here on out.
-    # If wandb is active, it will have the migrated config. Otherwise, use our migrated dict.
-    cfg_map = dict(wandb.config) if wb_run is not None else migrated_config_dict
-    config = get_nested_config(cfg_map)
-    
+    # If wandb is active, it owns the config. Rebuild SNS from it.
+    if wb_run:
+        config = get_config_from_yaml_and_cli(None, SimpleNamespace(**wandb.config))
+
     print(f"Using device: {device_obj}")
     
     # total_steps set later after dataloader creation
-    dataset_choice = config.get('input.dataset')
+    dataset_choice = config.input.dataset
 
     # Resolve resume path from the original, pre-migration config dict
-    resume_from_path = config_dict.get('resume_from', None)
+    resume_from_path = config.resume_from
 
-    from src.utils.model_factory import build_jetformer_from_config
-    model = build_jetformer_from_config(config, device_obj)
+    model = JetFormer.from_config(config, device_obj)
     
     # If resuming, load model weights before optional compile/wrap
     start_epoch = 0
     _loaded_ckpt = None
-    if isinstance(resume_from_path, str) and os.path.exists(resume_from_path):
+    if resume_from_path and os.path.exists(resume_from_path):
         try:
             print(f"Resuming from checkpoint: {resume_from_path}")
             _loaded_ckpt = torch.load(resume_from_path, map_location=device_obj)
@@ -113,34 +295,19 @@ def train_from_config(config_dict: dict):
     
     total_params, jet_params, transformer_params = count_model_parameters(model)
     
+    
     print(f"Total parameters: {total_params:,}")
     print(f"Jet flow parameters: {jet_params:,}")
     print(f"Transformer parameters: {transformer_params:,}")
-    
-    # Freeze transformer parameters if in flow-only mode
-    freeze_transformer = bool(config.get('freeze_transformer', False))
-    frozen_params = 0
-    if freeze_transformer:
-        print("Freezing transformer parameters for flow-only training via model.freeze_for_flow_only()...")
-        try:
-            frozen_params = int(getattr(model, 'freeze_for_flow_only')())
-        except Exception:
-            try:
-                frozen_params = 0
-            except Exception:
-                frozen_params = 0
-        print(f"Frozen {frozen_params:,} parameters; trainable: {total_params - frozen_params:,}")
     
     wb_logger = WBLogger(wb_run, config)
     wb_logger.update_summary_config({
         'total': total_params,
         'jet': jet_params,
         'transformer': transformer_params,
-        'frozen': frozen_params,
-        'trainable': total_params - frozen_params,
     })
 
-    compiled_enabled = bool(config.get('torch_compile'))
+    compiled_enabled = config.torch_compile
     if compiled_enabled:
         model = torch.compile(model, mode="reduce-overhead")
         print("Model compiled with torch.compile")
@@ -158,14 +325,14 @@ def train_from_config(config_dict: dict):
     # Wrap with accelerator (adds DDP where applicable) AFTER init
     model = accelerator.wrap_model(model)
     
-    grad_accum_steps = int(config.get('grad_accum_steps', 1))
-    total_opt_steps = (len(dataloader) * int(config.get('num_epochs')) + (grad_accum_steps - 1)) // max(1, grad_accum_steps)
+    grad_accum_steps = config.grad_accum_steps
+    total_opt_steps = (len(dataloader) * config.num_epochs + (grad_accum_steps - 1)) // max(1, grad_accum_steps)
     set_model_total_steps(model, total_opt_steps)
     
     try:
-        noise_epochs = int(config.get('training.noise_curriculum_epochs', 0))
+        noise_epochs = config.training.noise_curriculum_epochs
         noise_steps = (len(dataloader) * noise_epochs + (grad_accum_steps - 1)) // max(1, grad_accum_steps)
-    except Exception:
+    except AttributeError:
         noise_steps = 0
     try:
         base_model = unwrap_base_model(model)
@@ -186,11 +353,14 @@ def train_from_config(config_dict: dict):
         pass
 
     total_steps = total_opt_steps
-    optimizer, scheduler = get_opt_sched(model, cfg_map, total_steps)
-    resume_optimizer_from_ckpt(optimizer, _loaded_ckpt)
+    # Merge schedule params into optimizer cfg for scheduler construction
+    opt_cfg = {**vars(config.optimizer), **vars(getattr(config, 'schedule', SimpleNamespace()))}
+    optimizer, scheduler = get_opt_sched(model, opt_cfg, total_steps)
+    if _loaded_ckpt:
+        resume_optimizer_from_ckpt(optimizer, _loaded_ckpt)
     step = initialize_step_from_ckpt(model, len(dataloader), start_epoch, device_obj, _loaded_ckpt)
 
-    ema_decay_val = config.get('ema_decay', 0.0)
+    ema_decay_val = config.ema_decay
     ema_enabled = ema_decay_val > 0.0
     ema = None
     if ema_enabled:
@@ -205,13 +375,13 @@ def train_from_config(config_dict: dict):
     scaler = accelerator.create_grad_scaler(enabled=True)
 
     model.train()
-    persist_wandb_run_id(cfg_map, wb_run)
+    persist_wandb_run_id(vars(config), wb_run)
     
     best_val_loss = float('inf')
     if is_main_process:
-        v_total, v_text, v_img, v_flow = evaluate_one_epoch(model, val_loader, accelerator, eval_no_rgb_noise=bool(config.get('eval.eval_no_rgb_noise', True)), config=config)
+        v_total, v_text, v_img, v_flow = evaluate_one_epoch(model, val_loader, accelerator, eval_no_rgb_noise=config.eval.eval_no_rgb_noise, config=config)
         print(f"Initial Val — total: {v_total:.4f} | text: {v_text:.4f} | img: {v_img:.4f}")
-        if wb_run is not None:
+        if wb_run:
             wb_logger.log_validation_epoch(model, v_total, v_text, v_img, v_flow, epoch=0, step=0)
             try:
                 if ema_enabled and ema is not None:
@@ -221,13 +391,13 @@ def train_from_config(config_dict: dict):
                     base_model=base,
                     dataset=dataset,
                     device=device_obj,
+                    config=config,
                     dataset_choice=dataset_choice,
-                    cfg_strength=float(config.get('sampling.cfg_strength')),
-                    cfg_mode=str(config.get('sampling.cfg_mode')),
+                    cfg_strength=config.sampling.cfg_inference_weight,
+                    cfg_mode=config.sampling.cfg_mode,
                     step=0,
                     stage_label="init_val",
                     num_samples=4,
-                    flow_only_mode=bool(config.get('flow_only_mode', False)),
                 )
             except Exception as e:
                 print(f"Sampling at initial validation failed: {e}")
@@ -236,7 +406,7 @@ def train_from_config(config_dict: dict):
                     ema.restore(model)
         best_val_loss = v_total
 
-    for epoch in range(int(start_epoch), int(config.get('num_epochs'))):
+    for epoch in range(int(start_epoch), int(config.num_epochs)):
         epoch_losses = {
             'total': 0.0,
             'text': 0.0,
@@ -250,7 +420,7 @@ def train_from_config(config_dict: dict):
             dataloader.sampler.set_epoch(epoch)
 
         iterable = accelerator.wrap_dataloader(dataloader, is_train=True) if hasattr(accelerator, 'wrap_dataloader') else dataloader
-        progress_bar = tqdm(iterable, desc=f"Train Epoch {epoch+1}/{config.get('num_epochs')}", total=len(dataloader), leave=True) if is_main_process else iterable
+        progress_bar = tqdm(iterable, desc=f"Train Epoch {epoch+1}/{config.num_epochs}", total=len(dataloader), leave=True) if is_main_process else iterable
         ema = locals().get('ema', None)
         if ema is None and ema_enabled:
             from src.utils.ema import ExponentialMovingAverage
@@ -285,7 +455,7 @@ def train_from_config(config_dict: dict):
                 # Unscale (noop for bf16/fp32) and clip once per optimizer step
                 if hasattr(scaler, 'unscale_'):
                     scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), float(config.get('optimizer.grad_clip_norm', 1.0)))
+                torch.nn.utils.clip_grad_norm_(model.parameters(), config.optimizer.grad_clip_norm)
 
                 if hasattr(accelerator, 'step'):
                     accelerator.step(optimizer, scaler, scheduler)
@@ -316,17 +486,17 @@ def train_from_config(config_dict: dict):
                     pass
             
             # Log on a per-batch cadence for smoother curves, independent of grad accumulation
-            if is_main_process and wb_run is not None and (batch_idx % int(config.get('log_every_batches', 10)) == 0):
+            if is_main_process and wb_run and (batch_idx % config.log_every_batches == 0):
                 # Only compute gradient metrics on accumulation boundaries to avoid extra all-reduces in DDP
-                want_grad_logging = bool(config.get('grad_logging', False))
+                want_grad_logging = config.grad_logging
                 log_grads = bool(is_accum_boundary and want_grad_logging)
                 wb_logger.log_train_step(model, optimizer, out, step, epoch, time.time() - start_time, log_grads=log_grads)
             
             # If an epoch-level sampling schedule is configured, it overrides per-batch sampling
-            sample_every_epochs = int(config.get('eval.sample_every_epochs', 0) or 0)
-            sample_every = int(config.get('eval.sample_every_batches', 0)) if sample_every_epochs <= 0 else 0
-            if is_main_process and wb_run is not None and sample_every > 0 and (batch_idx % sample_every == 0):
-                print(f"Epoch {epoch+1}/{config.get('num_epochs')}, "
+            sample_every_epochs = config.eval.sample_every_epochs
+            sample_every = config.eval.sample_every_batches if sample_every_epochs <= 0 else 0
+            if is_main_process and wb_run and sample_every > 0 and (batch_idx % sample_every == 0):
+                print(f"Epoch {epoch+1}/{config.num_epochs}, "
                         f"Batch {batch_idx}/{len(dataloader)}, "
                         f"Total Loss: {loss.item():.4f}, "
                         f"Text: {float(out.get('text_loss', 0.0)):.4f}, "
@@ -341,14 +511,14 @@ def train_from_config(config_dict: dict):
                         base_model=base,
                         dataset=dataset,
                         device=device_obj,
+                        config=config,
                         dataset_choice=dataset_choice,
-                        cfg_strength=float(config.get('sampling.cfg_strength')),
-                        cfg_mode=str(config.get('sampling.cfg_mode')),
+                        cfg_strength=config.sampling.cfg_inference_weight,
+                        cfg_mode=config.sampling.cfg_mode,
                         step=step,
                         stage_label=f"epoch{epoch+1}_batch{batch_idx}",
                         num_samples=3,
                         batch_idx=batch_idx,
-                        flow_only_mode=bool(config.get('flow_only_mode', False)),
                     )
                 except Exception as e:
                     print(f"Failed to generate samples: {e}")
@@ -369,13 +539,13 @@ def train_from_config(config_dict: dict):
                     pass
         # End of epoch: run validation and optional sampling per-epoch schedule
         run_val_this_epoch = True
-        if hasattr(config, 'val_every_epochs') and isinstance(config.get('eval.val_every_epochs'), (int, float)):
-            vee = int(config.get('eval.val_every_epochs'))
-            run_val_this_epoch = (vee <= 1) or (((epoch + 1) % max(1, vee)) == 0)
+        val_every = getattr(config.eval, 'val_every_epochs', 1)
+        run_val_this_epoch = (val_every <= 1) or (((epoch + 1) % max(1, val_every)) == 0)
+
         if is_main_process and run_val_this_epoch:
-            v_total, v_text, v_img, v_flow = evaluate_one_epoch(model, val_loader, accelerator, eval_no_rgb_noise=bool(config.get('eval.eval_no_rgb_noise', True)), config=config)
+            v_total, v_text, v_img, v_flow = evaluate_one_epoch(model, val_loader, accelerator, eval_no_rgb_noise=config.eval.eval_no_rgb_noise, config=config)
             print(f"Val Epoch {epoch+1} — total: {v_total:.4f} | text: {v_text:.4f} | img: {v_img:.4f}")
-            if wb_run is not None:
+            if wb_run:
                 wb_logger.log_validation_epoch(model, v_total, v_text, v_img, v_flow, epoch=epoch+1, step=step)
             # (moved) FID/IS computation now happens independently of validation cadence
 
@@ -384,10 +554,7 @@ def train_from_config(config_dict: dict):
             if improved:
                 best_val_loss = v_total
                 # Include run name for clarity
-                try:
-                    rn = cfg_map.get('wandb.run_name', None)
-                except Exception:
-                    rn = None
+                rn = config.wandb.run_name
                 ckpt_name = f"jetformer_{rn}_best.pt" if rn else "jetformer_best.pt"
                 ckpt_path = os.path.join('checkpoints', ckpt_name)
                 save_checkpoint(
@@ -397,7 +564,7 @@ def train_from_config(config_dict: dict):
                     epoch=epoch,
                     ckpt_path=ckpt_path,
                     wb_run=wb_run,
-                    config_dict=cfg_map,
+                    config_dict=sns_to_dict(config),
                     extra_fields=(
                         {'best_val_loss': best_val_loss, 'ema_state_dict': ema.state_dict()} if (ema_enabled and ema is not None)
                         else {'best_val_loss': best_val_loss}
@@ -406,8 +573,8 @@ def train_from_config(config_dict: dict):
 
         # Periodic FID/IS computation after epoch (EMA weights) based solely on epoch cadence
         try:
-            fid_every = int(config.get('eval.fid_every_epochs', 0) or 0)
-            is_every = int(config.get('eval.is_every_epochs', 0) or 0)
+            fid_every = config.eval.fid_every_epochs
+            is_every = config.eval.is_every_epochs
             do_fid = fid_every > 0 and (((epoch + 1) % fid_every) == 0)
             do_is = is_every > 0 and (((epoch + 1) % is_every) == 0)
         except Exception:
@@ -419,7 +586,7 @@ def train_from_config(config_dict: dict):
                 if ema_enabled and ema is not None:
                     ema.apply_to(model)
                 base = unwrap_base_model(model)
-                num_eval_samples = int(config.get('eval.fid_is_num_samples'))
+                num_eval_samples = config.eval.fid_is_num_samples
                 fid_is_metrics = compute_and_log_fid_is(
                     base_model=base,
                     dataset=dataset,
@@ -430,8 +597,8 @@ def train_from_config(config_dict: dict):
                     compute_is=do_is,
                     step=step,
                     epoch=epoch,
-                    cfg_strength=float(config.get('sampling.cfg_strength')),
-                    cfg_mode=str(config.get('sampling.cfg_mode')),
+                    cfg_strength=config.sampling.cfg_inference_weight,
+                    cfg_mode=config.sampling.cfg_mode,
                 )
                 try:
                     if do_fid:
@@ -459,8 +626,8 @@ def train_from_config(config_dict: dict):
 
         # Epoch-level sampling independent of validation cadence
         try:
-            see = int(config.get('eval.sample_every_epochs', 0) or 0)
-        except Exception:
+            see = config.eval.sample_every_epochs
+        except AttributeError:
             see = 0
         if is_main_process and see > 0 and (((epoch + 1) % see) == 0):
             try:
@@ -471,13 +638,13 @@ def train_from_config(config_dict: dict):
                     base_model=base,
                     dataset=dataset,
                     device=device_obj,
+                    config=config,
                     dataset_choice=dataset_choice,
-                    cfg_strength=float(config.get('sampling.cfg_strength')),
-                    cfg_mode=str(config.get('sampling.cfg_mode')),
+                    cfg_strength=config.sampling.cfg_inference_weight,
+                    cfg_mode=config.sampling.cfg_mode,
                     step=step,
                     stage_label=f"epoch_{epoch+1}",
                     num_samples=3,
-                    flow_only_mode=bool(config.get('flow_only_mode', False)),
                 )
             except Exception as e:
                 print(f"Sampling at epoch boundary failed: {e}")
@@ -490,7 +657,7 @@ def train_from_config(config_dict: dict):
 
         # Always save/overwrite rolling last checkpoint at end of each epoch
         if is_main_process:
-            rn = cfg_map.get('wandb.run_name', None)
+            rn = config.wandb.run_name
             last_ckpt_name = f"jetformer_{rn}_last.pt" if rn else "jetformer_last.pt"
             last_ckpt_path = os.path.join('checkpoints', last_ckpt_name)
             save_checkpoint(
@@ -500,13 +667,13 @@ def train_from_config(config_dict: dict):
                 epoch=epoch,
                 ckpt_path=last_ckpt_path,
                 wb_run=wb_run,
-                config_dict=cfg_map,
+                config_dict=sns_to_dict(config),
                 extra_fields=(({'ema_state_dict': ema.state_dict()} if (ema_enabled and ema is not None) else {})),
             )
 
     print("Training completed!")
     # Final checkpoint is already covered by the rolling 'last.pt' saved each epoch.
-    if is_main_process and wb_run is not None:
+    if is_main_process and wb_run:
         wandb.finish()
     accelerator.cleanup()
     return model
@@ -514,141 +681,23 @@ def train_from_config(config_dict: dict):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train JetFormer model (YAML + CLI overrides)')
-    parser.add_argument('--config', type=str, default=None, help='Path to YAML config file')
-    # All other argparse definitions are now superseded by the YAML config,
-    # but we'll keep them for backward compatibility. The merge logic below handles it.
+    parser.add_argument('--config', type=str, required=True, help='Path to YAML config file')
+    # Add CLI overrides for frequently changed parameters
+    parser.add_argument('--batch_size', type=int, help='Override batch size')
+    parser.add_argument('--learning_rate', type=float, help='Override learning rate')
+    parser.add_argument('--num_epochs', type=int, help='Override number of epochs')
+    parser.add_argument('--resume_from', type=str, help='Path to checkpoint to resume from')
+
+    args, unknown = parser.parse_known_args()
     
-    # --- This block is an example of what can be removed, but we keep it for now ---
-    # Model (JetFormer-B ImageNet class-conditional defaults)
-    for name, typ, default in [
-        ('vocab_size', int, 32000),
-        ('d_model', int, 1024),
-        ('n_heads', int, 16),
-        ('n_kv_heads', int, 1),
-        ('n_layers', int, 24),
-        ('d_ff', int, 4096),
-        ('max_seq_len', int, 64),
-        ('num_mixtures', int, 1024),
-        ('dropout', float, 0.1),
-        ('jet_depth', int, 32),
-        ('jet_block_depth', int, 4),
-        ('jet_emb_dim', int, 512),
-        ('jet_num_heads', int, 8),
-        ('patch_size', int, 16),
-        ('image_ar_dim', int, 128)]:
-        parser.add_argument(f'--{name}', type=typ, default=default)
-    parser.add_argument('--input_size', type=int, nargs=2, default=[256, 256], metavar=('H','W'))
-    parser.add_argument('--num_classes', type=int, default=1000)
-    parser.add_argument('--class_token_length', type=int, default=16)
-    parser.add_argument('--latent_projection', type=str, default=None, choices=['learned','pca_frozen','none'])
-    parser.add_argument('--latent_proj_matrix_path', type=str, default=None)
-    parser.add_argument('--pre_latent_projection', type=str, default='none', choices=['learned','pca_frozen','none'])
-    parser.add_argument('--pre_latent_proj_matrix_path', type=str, default=None)
-    # Flow ablations
-    parser.add_argument('--flow_actnorm', type=str, default='true', choices=['true','false'])
-    parser.add_argument('--flow_invertible_dense', type=str, default='true', choices=['true','false'])
-    # Pre-flow factoring
-    parser.add_argument('--pre_factor_dim', type=int, default=None, help='Keep d channels per patch before flow; remaining modeled as Gaussian')
-    parser.add_argument('--use_bfloat16_img_head', type=str, default='true', choices=['true','false'])
-    # Training
-    parser.add_argument('--batch_size', type=int, default=None)
-    parser.add_argument('--learning_rate', type=float, default=0.001)
-    parser.add_argument('--weight_decay', type=float, default=0.0001)
-    parser.add_argument('--opt_b1', type=float, default=0.9)
-    parser.add_argument('--opt_b2', type=float, default=0.95)
-    parser.add_argument('--num_epochs', type=int, default=100)
-    parser.add_argument('--val_every_epochs', type=int, default=3)
-    parser.add_argument('--sample_every_epochs', type=int, default=3)
-    parser.add_argument('--noise_curriculum_epochs', type=int, default=100)
-    parser.add_argument('--torch_compile', type=str, default='false', choices=['true','false'])
-    parser.add_argument('--grad_checkpoint_transformer', type=str, default='false', choices=['true','false'])
-    parser.add_argument('--flow_grad_checkpoint', type=str, default='false', choices=['true','false'])
-    parser.add_argument('--device', type=str, default='auto', choices=['auto','cpu','cuda','mps'])
-    parser.add_argument('--accelerator', type=str, default='auto', choices=['auto','gpu','tpu'])
-    parser.add_argument('--distributed', type=str, default='false', choices=['true','false'])
-    parser.add_argument('--precision', type=str, default='bf16', choices=['auto','fp32','fp16','bf16','tf32'])
-    parser.add_argument('--grad_accum_steps', type=int, default=1)
-    parser.add_argument('--grad_clip_norm', type=float, default=1.0)
-    # Dataset
-    parser.add_argument('--dataset', type=str, default='imagenet64_tfds', choices=['laion_pop','imagenet64_tfds','imagenet21k_folder','imagenet1k_hf'])
-    parser.add_argument('--imagenet21k_root', type=str, default=None)
-    parser.add_argument('--class_subset', type=str, nargs='+', default=None, help='Restrict to one or more classes (ids or names)')
-    parser.add_argument('--max_samples', type=int, default=None)
-    parser.add_argument('--use_cogvlm_captions', type=str, default='true', choices=['true','false'])
-    parser.add_argument('--min_resolution', type=int, default=512)
-    parser.add_argument('--num_workers', type=int, default=8)
-    parser.add_argument('--dataloader_prefetch_factor', type=int, default=None)
-    parser.add_argument('--ignore_pad', type=str, default='false', choices=['true','false'])
-    parser.add_argument('--tokenizer_path', type=str, default='gs://t5-data/vocabs/cc_en.32000/sentencepiece.model')
-    parser.add_argument('--cache_dir', type=str, default='./laion_pop_cache')
-    # Schedules / logs
-    parser.add_argument('--rgb_sigma0', type=float, default=64.0)
-    parser.add_argument('--rgb_sigma_final', type=float, default=0.0)
-    parser.add_argument('--latent_noise_std', type=float, default=0.3)
-    parser.add_argument('--text_loss_weight', type=float, default=0.0)
-    parser.add_argument('--image_loss_weight', type=float, default=1.0)
-    parser.add_argument('--cfg_drop_prob', type=float, default=0.1)
-    parser.add_argument('--cfg_strength', type=float, default=4.0)
-    parser.add_argument('--log_every_batches', type=int, default=10)
-    parser.add_argument('--grad_logging', type=str, default='false', choices=['true','false'])
-    parser.add_argument('--sample_every_batches', type=int, default=100)
-    parser.add_argument('--warmup_percent', type=float, default=0.0)
-    parser.add_argument('--use_cosine', type=str, default='true', choices=['true','false'])
-    # Special tokens and strict parity
-    parser.add_argument('--bos_id', type=int, default=None)
-    parser.add_argument('--boi_id', type=int, default=None)
-    parser.add_argument('--nolabel_id', type=int, default=None)
-    parser.add_argument('--strict_special_ids', type=str, default='true', choices=['true','false'])
-    # Latent noise dims for PCA+Adaptor path
-    parser.add_argument('--latent_noise_dim', type=int, default=0)
-    # Diagnostics
-    parser.add_argument('--advanced_metrics', type=str, default='false', choices=['true','false'])
-    # FID / IS
-    parser.add_argument('--fid_every_epochs', type=int, default=5)
-    parser.add_argument('--is_every_epochs', type=int, default=5)
-    parser.add_argument('--fid_is_num_samples', type=int, default=500)
-    # Eval/data flags
-    parser.add_argument('--eval_no_rgb_noise', type=str, default='true', choices=['true','false'])
-    parser.add_argument('--random_flip_prob', type=float, default=0.5)
-    # W&B
-    parser.add_argument('--wandb', type=str, default=None, choices=['true','false'])
-    parser.add_argument('--wandb_offline', type=str, default=None, choices=['true','false'])
-    parser.add_argument('--wandb_project', type=str, default=None)
-    parser.add_argument('--wandb_run_name', type=str, default=None)
-    parser.add_argument('--wandb_run_id', type=str, default=None)
-    parser.add_argument('--wandb_tags', type=str, nargs='*', default=None)
-    # Resume / checkpoint
-    parser.add_argument('--resume_from', type=str, default=None, help='Path to checkpoint .pt to resume from')
+    # Handle unknown args for nested config overrides
+    for arg in unknown:
+        if arg.startswith(("-", "--")):
+            parser.add_argument(arg.split('=')[0], type=str)
 
     args = parser.parse_args()
-    # Load YAML
-    cfg = {}
-    if args.config and Path(args.config).exists():
-        with open(args.config, 'r') as f:
-            cfg = yaml.safe_load(f) or {}
 
-    # Determine which CLI flags were explicitly provided to override YAML
-    provided_cli_keys = set()
-    for tok in sys.argv[1:]:
-        if tok.startswith('--'):
-            key = tok[2:].split('=')[0]
-            provided_cli_keys.add(key)
+    # Centralized config loading and processing
+    config = get_config_from_yaml_and_cli(args.config, args)
     
-    # Build defaults map from parser (for backward compatibility)
-    defaults = {action.dest: action.default for action in parser._actions if action.option_strings}
-
-    # Merge YAML + CLI: explicit CLI overrides YAML; otherwise, CLI default is ignored
-    # if the key exists in YAML. This prioritizes YAML over CLI defaults.
-    merged = dict(cfg)
-    args_dict = vars(args)
-    for k, v in args_dict.items():
-        if k in ('config', 'help'):
-            continue
-        # Only override if the CLI flag was explicitly provided.
-        if k in provided_cli_keys:
-            # Normalize boolean-like strings
-            if isinstance(v, str) and v.lower() in ('true','false'):
-                v = (v.lower() == 'true')
-            merged[k] = v
-
-    model = train_from_config(merged)
+    train_from_config(config)

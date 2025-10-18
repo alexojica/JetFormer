@@ -20,8 +20,7 @@ from src.utils.sampling import (
     generate_text_to_image_samples_cfg,
     generate_class_conditional_samples,
 )
-from src.utils.schedules import rgb_cosine_sigma
-from src.utils.losses import compute_jetformer_pca_loss, compute_flow_only_loss
+from src.utils.losses import compute_jetformer_pca_loss
 
 
 def resolve_wandb_resume_by_name(cfg: Dict[str, Any]) -> None:
@@ -42,15 +41,25 @@ def resolve_wandb_resume_by_name(cfg: Dict[str, Any]) -> None:
 
 
 def init_wandb(cfg: Dict[str, Any], is_main_process: bool = True):
-    want_wandb = cfg.get("wandb")
-    offline = cfg.get("wandb_offline")
+    """Initialize W&B supporting both nested and flat config layouts.
+
+    Expected nested layout:
+      cfg['wandb'] = { 'enabled': bool, 'offline': bool, 'project': str,
+                       'run_name': str, 'run_id': str|None, 'tags': list }
+
+    Flat legacy keys are still accepted: 'wandb', 'wandb_offline', 'wandb_project',
+    'wandb_run_name', 'wandb_run_id', 'wandb_tags'.
+    """
+    wb_block = cfg.get('wandb', {}) if isinstance(cfg.get('wandb'), (dict,)) else {}
+    want_wandb = (bool(wb_block.get('enabled', True)) if wb_block else bool(cfg.get('wandb', True)))
+    offline = bool(wb_block.get('offline', cfg.get('wandb_offline', False)))
     if not want_wandb or not is_main_process:
         return None
-    project = cfg.get("wandb_project")
-    run_name = cfg.get("wandb_run_name")
-    run_id = cfg.get("wandb_run_id")
+    project = wb_block.get('project', cfg.get('wandb_project', None))
+    run_name = wb_block.get('run_name', cfg.get('wandb_run_name', None))
+    run_id = wb_block.get('run_id', cfg.get('wandb_run_id', None))
     resume_from = cfg.get("resume_from")
-    tags = cfg.get("wandb_tags")
+    tags = wb_block.get('tags', cfg.get('wandb_tags', None))
     try:
         if bool(offline):
             os.environ["WANDB_MODE"] = "offline"
@@ -74,27 +83,24 @@ def init_wandb(cfg: Dict[str, Any], is_main_process: bool = True):
 def count_model_parameters(model: torch.nn.Module) -> Tuple[int, int, int]:
     total_params = sum(p.numel() for p in model.parameters())
     flow_params = 0
-    # Count Jet once: if adaptor exists and model.jet aliases adaptor.flow, count adaptor only
+    
+    # Count Jet/Flow parameters
+    # Since model.jet is typically an alias to adaptor.flow, we prioritize counting
+    # the adaptor to avoid double-counting
     try:
         adaptor = getattr(model, 'adaptor', None)
-        jet = getattr(model, 'jet', None)
-        if adaptor is not None and hasattr(adaptor, 'flow') and (jet is getattr(adaptor, 'flow')):
-            flow_params += sum(p.numel() for p in adaptor.parameters())
+        if adaptor is not None and isinstance(adaptor, torch.nn.Module):
+            # The adaptor contains the flow/jet, so just count adaptor params
+            flow_params = sum(p.numel() for p in adaptor.parameters())
         else:
-            if isinstance(jet, torch.nn.Module):
-                flow_params += sum(p.numel() for p in jet.parameters())
-            if adaptor is not None and isinstance(adaptor, torch.nn.Module):
-                flow_params += sum(p.numel() for p in adaptor.parameters())
+            # No adaptor, check if there's a standalone jet
+            jet = getattr(model, 'jet', None)
+            if jet is not None and isinstance(jet, torch.nn.Module):
+                flow_params = sum(p.numel() for p in jet.parameters())
     except Exception:
-        # Fallback: count whatever is present
-        if hasattr(model, 'jet') and isinstance(model.jet, torch.nn.Module):
-            flow_params += sum(p.numel() for p in model.jet.parameters())
-        try:
-            adaptor = getattr(model, 'adaptor', None)
-            if adaptor is not None and isinstance(adaptor, torch.nn.Module):
-                flow_params += sum(p.numel() for p in adaptor.parameters())
-        except Exception:
-            pass
+        # If something goes wrong, default to 0
+        flow_params = 0
+    
     jet_params = flow_params
     transformer_params = total_params - jet_params
     return total_params, jet_params, transformer_params
@@ -145,7 +151,7 @@ def initialize_actnorm_if_needed(model: torch.nn.Module,
                 z_grid = z.transpose(1, 2).contiguous().view(x_nhwc.shape[0], D_full, H_patch, W_patch).permute(0, 2, 3, 1).contiguous()
                 base.jet.initialize_with_batch(z_grid)
             else:
-                # Legacy/pixel (or pre_factor) path
+                # Pre-factor path only; pixel-space flow initialization removed.
                 if getattr(base, 'pre_factor_dim', None) is not None:
                     H, W = base.input_size
                     ps = base.patch_size
@@ -158,8 +164,6 @@ def initialize_actnorm_if_needed(model: torch.nn.Module,
                     W_patch = W // ps
                     tokens_hat_grid = tokens_hat_in.transpose(1, 2).contiguous().view(x_nhwc.shape[0], d, H_patch, W_patch).permute(0, 2, 3, 1).contiguous()
                     base.jet.initialize_with_batch(tokens_hat_grid)
-                else:
-                    base.jet.initialize_with_batch(x_nhwc)
         except Exception as e:
             logger.debug("ActNorm init skipped due to exception: %r", e, exc_info=True)
 
@@ -211,7 +215,12 @@ def persist_wandb_run_id(cfg: Dict[str, Any], wb_run) -> None:
     if wb_run is None:
         return
     try:
-        rn = cfg.get('wandb_run_name', None)
+        # Support nested wandb block
+        rn = None
+        if isinstance(cfg.get('wandb'), dict):
+            rn = cfg['wandb'].get('run_name', None)
+        if rn is None:
+            rn = cfg.get('wandb_run_name', None)
         rid = getattr(wb_run, 'id', None)
         if rn and rid:
             safe_name = ''.join([c if (c.isalnum() or c in '-_.') else '_' for c in str(rn)])
@@ -230,112 +239,89 @@ def unwrap_model(model_or_ddp: torch.nn.Module) -> torch.nn.Module:
     return base
 
 
-def generate_flow_only_samples(base_model, device: torch.device, num_samples: int = 4):
-    """Generate samples from flow-only model with Gaussian prior."""
-    from src.utils.sampling import sample_flow_images
-    try:
-        H, W = base_model.input_size
-        logger.info(f"Sampling flow images with shape ({H}, {W}, 3)")
-        # Sample from Gaussian prior in latent space
-        pil_images = sample_flow_images(base_model.jet, device, num_samples, (H, W, 3))
-        logger.info(f"Successfully generated {len(pil_images)} flow-only images")
-        samples = [{'prompt': f'Flow-only sample {i+1}', 'image': img} for i, img in enumerate(pil_images)]
-        return samples
-    except Exception as e:
-        logger.error(f"Error generating flow-only samples: {e}", exc_info=True)
-        # Return placeholder images on error
-        from PIL import Image
-        placeholder = Image.new('RGB', (32, 32), color='red')
-        return [{'prompt': f'Error {i+1}', 'image': placeholder} for i in range(num_samples)]
-
-
 def generate_and_log_samples(base_model,
                              dataset,
                              device: torch.device,
+                             config: SimpleNamespace,
                              dataset_choice: str,
                              cfg_strength: float,
                              cfg_mode: str,
                              step: int,
                              stage_label: str,
                              num_samples: int,
-                             batch_idx: Optional[int] = None,
-                             flow_only_mode: bool = False) -> None:
+                             batch_idx: Optional[int] = None) -> None:
     # Check if wandb is available and initialized
     if wandb.run is None:
         logger.warning("W&B run not initialized, skipping sample logging")
         return
         
-    # Handle flow-only mode
     samples = []
     try:
-        if flow_only_mode:
-            logger.info(f"Generating {num_samples} flow-only samples")
-            samples = generate_flow_only_samples(base_model, device, num_samples)
-        else:
-            # Standard JetFormer generation
-            dataset_choice_l = str(dataset_choice).lower() if dataset_choice is not None else ''
-            if dataset_choice_l in ('imagenet64_tfds', 'imagenet21k_folder', 'cifar10', 'imagenet1k_hf'):
-                # Pick top-frequency classes actually present in the (possibly truncated) train subset
+        # Standard JetFormer generation
+        dataset_choice_l = str(dataset_choice).lower() if dataset_choice is not None else ''
+        if dataset_choice_l in ('imagenet64_tfds', 'imagenet21k_folder', 'cifar10', 'imagenet1k_hf'):
+            # Pick top-frequency classes actually present in the (possibly truncated) train subset
+            class_ids = None
+            try:
+                ds = dataset
+                # TFDSImagenetResized64 / ImageNet21kFolder expose `samples: List[(index_or_path, class_idx)]`
+                if hasattr(ds, 'samples') and isinstance(ds.samples, (list, tuple)) and len(ds.samples) > 0:
+                    from collections import Counter
+                    counts = Counter()
+                    for item in ds.samples:
+                        try:
+                            if isinstance(item, (tuple, list)) and len(item) >= 2:
+                                counts[int(item[1])] += 1
+                        except Exception:
+                            continue
+                    if len(counts) > 0:
+                        class_ids = [cid for cid, _ in counts.most_common(4)]
+                # Fallback: derive evenly spaced ids from available classes
+                if (not class_ids) and hasattr(ds, 'classes') and isinstance(ds.classes, list) and len(ds.classes) > 0:
+                    n = len(ds.classes)
+                    picks = [0, max(0, n // 3), max(0, (2 * n) // 3), n - 1]
+                    class_ids = sorted(set(int(p) for p in picks if 0 <= p < n))
+            except Exception:
                 class_ids = None
-                try:
-                    ds = dataset
-                    # TFDSImagenetResized64 / ImageNet21kFolder expose `samples: List[(index_or_path, class_idx)]`
-                    if hasattr(ds, 'samples') and isinstance(ds.samples, (list, tuple)) and len(ds.samples) > 0:
-                        from collections import Counter
-                        counts = Counter()
-                        for item in ds.samples:
-                            try:
-                                if isinstance(item, (tuple, list)) and len(item) >= 2:
-                                    counts[int(item[1])] += 1
-                            except Exception:
-                                continue
-                        if len(counts) > 0:
-                            class_ids = [cid for cid, _ in counts.most_common(4)]
-                    # Fallback: derive evenly spaced ids from available classes
-                    if (not class_ids) and hasattr(ds, 'classes') and isinstance(ds.classes, list) and len(ds.classes) > 0:
-                        n = len(ds.classes)
-                        picks = [0, max(0, n // 3), max(0, (2 * n) // 3), n - 1]
-                        class_ids = sorted(set(int(p) for p in picks if 0 <= p < n))
-                except Exception:
-                    class_ids = None
-                # Clamp to model's valid class table
-                try:
-                    max_cls = int(getattr(base_model, 'num_classes', 0))
-                except Exception:
-                    max_cls = 0
-                if isinstance(class_ids, (list, tuple)) and max_cls and max_cls > 0:
-                    class_ids = [int(c) for c in class_ids if 0 <= int(c) < max_cls]
-                if not class_ids or len(class_ids) == 0:
-                    # Final fallback: first few valid class ids
-                    if max_cls and max_cls > 0:
-                        class_ids = list(range(min(4, max_cls)))
-                    else:
-                        class_ids = [0, 1, 2, 3]
-                # Try to forward temperature controls when present in config
-                t_scales = None
-                t_probs = None
-                try:
-                    t_scales = float(getattr(dataset, 'temperature_scales'))  # unlikely
-                except Exception:
-                    t_scales = None
-                try:
-                    t_probs = float(getattr(dataset, 'temperature_probs'))
-                except Exception:
-                    t_probs = None
-                logger.info(f"Generating class-conditional samples for classes: {class_ids}")
-                samples = generate_class_conditional_samples(
-                    base_model, device, class_ids,
-                    cfg_strength=float(cfg_strength), cfg_mode=str(cfg_mode),
-                    dataset=dataset, temperature_scales=t_scales, temperature_probs=t_probs
-                )
-            else:
-                logger.info(f"Generating {num_samples} text-to-image samples")
-                samples = generate_text_to_image_samples_cfg(
-                    base_model, dataset, device,
-                    num_samples=num_samples,
-                    cfg_strength=float(cfg_strength),
-                    cfg_mode=str(cfg_mode)
-                )
+            # Clamp to model's valid class table
+            try:
+                max_cls = int(getattr(base_model, 'num_classes', 0))
+            except Exception:
+                max_cls = 0
+            if isinstance(class_ids, (list, tuple)) and max_cls and max_cls > 0:
+                class_ids = [int(c) for c in class_ids if 0 <= int(c) < max_cls]
+            if not class_ids or len(class_ids) == 0:
+                # Final fallback: first few valid class ids
+                if max_cls and max_cls > 0:
+                    class_ids = list(range(min(4, max_cls)))
+                else:
+                    class_ids = [0, 1, 2, 3]
+            # Get sampling temperature from config
+            sampling_cfg = getattr(config, 'sampling', SimpleNamespace())
+            temperature = getattr(sampling_cfg, 'temperature', 1.0)
+            temperature_probs = getattr(sampling_cfg, 'temperature_probs', 1.0)
+            logger.info(f"Generating class-conditional samples for classes: {class_ids}")
+            samples = generate_class_conditional_samples(
+                base_model, device, class_ids,
+                cfg_strength=float(cfg_strength), cfg_mode=str(cfg_mode),
+                dataset=dataset,
+                temperature_scales=temperature,
+                temperature_probs=temperature_probs
+            )
+        else:
+            logger.info(f"Generating {num_samples} text-to-image samples")
+            # Get sampling temperature from config
+            sampling_cfg = getattr(config, 'sampling', SimpleNamespace())
+            temperature = getattr(sampling_cfg, 'temperature', 1.0)
+            temperature_probs = getattr(sampling_cfg, 'temperature_probs', 1.0)
+            samples = generate_text_to_image_samples_cfg(
+                base_model, dataset, device,
+                num_samples=num_samples,
+                cfg_strength=float(cfg_strength),
+                cfg_mode=str(cfg_mode),
+                temperature_scales=temperature,
+                temperature_probs=temperature_probs,
+            )
         logger.info(f"Generated {len(samples)} samples")
     except Exception as e:
         logger.error(f"Failed to generate samples: {e}", exc_info=True)
@@ -427,29 +413,32 @@ def flow_encode_images01_to_tokens(model, images01: torch.Tensor) -> Tuple[torch
     H, W = model.input_size
     ps = model.patch_size
     B = images01.size(0)
-    x_nhwc = images01.permute(0, 2, 3, 1).contiguous()
 
-    if getattr(model, 'pre_factor_dim', None) is None:
-        pre_logdet = 0.0
-        if getattr(model, 'pre_latent_projection', None) is not None and getattr(model, 'pre_proj', None) is not None:
-            tokens_px = model._patchify(x_nhwc)
-            tokens_px, pre_logdet = model.pre_proj(tokens_px)
-            x_nhwc = model._unpatchify(tokens_px, H, W)
-        z_nhwc, log_det = model.jet(x_nhwc)
-        tokens = model._patchify(z_nhwc)
+    # Prefer latent PatchPCA+Adaptor path (paper path). Fall back to pre-factor path if configured.
+    if hasattr(model, 'patch_pca') and model.patch_pca is not None:
+        # Convert [0,1] -> [-1,1]
+        x11 = images01 * 2.0 - 1.0
+        mu, logvar = model.patch_pca.encode(x11, train=False)
+        z = model.patch_pca.reparametrize(mu, logvar, train=False)
+        D_full = z.shape[-1]
+        H_patch = H // ps
+        W_patch = W // ps
+        z_grid = z.transpose(1, 2).contiguous().view(B, D_full, H_patch, W_patch).permute(0, 2, 3, 1).contiguous()
+        if hasattr(model, 'adaptor') and model.adaptor is not None:
+            y_grid, log_det_flow = model.adaptor(z_grid)
+            tokens = y_grid.permute(0, 3, 1, 2).contiguous().view(B, D_full, -1).transpose(1, 2).contiguous()
+            log_det = log_det_flow
+        else:
+            tokens = z
+            log_det = torch.zeros(B, device=images01.device, dtype=images01.dtype)
         if getattr(model, 'latent_projection', None) is not None:
             tokens, proj_logdet = model.proj(tokens)
             N_patches = tokens.shape[1]
             log_det = log_det + proj_logdet.expand(B) * N_patches
-        if getattr(model, 'pre_latent_projection', None) is not None:
-            N_patches = tokens.shape[1]
-            log_det = log_det + torch.as_tensor(pre_logdet, device=log_det.device).expand(B) * N_patches
         return log_det, tokens
 
-    tokens_px = model._patchify(x_nhwc)
-    pre_logdet = 0.0
-    if getattr(model, 'pre_latent_projection', None) is not None and getattr(model, 'pre_proj', None) is not None:
-        tokens_px, pre_logdet = model.pre_proj(tokens_px)
+    # Pre-factor path (no PatchPCA), encode only the factored channel subset via flow.
+    tokens_px = model._patchify(images01.permute(0, 2, 3, 1).contiguous())
     d = int(model.pre_factor_dim)
     N = tokens_px.shape[1]
     tokens_hat_in = tokens_px[..., :d]
@@ -460,13 +449,10 @@ def flow_encode_images01_to_tokens(model, images01: torch.Tensor) -> Tuple[torch
     z_hat_grid, log_det_flow = model.jet(tokens_hat_grid)
     tokens_hat_latents = z_hat_grid.permute(0, 3, 1, 2).contiguous().view(B, d, N).transpose(1, 2).contiguous()
     tokens_full = torch.cat([tokens_hat_latents, tokens_tilde], dim=-1)
-
     log_det = log_det_flow
     if getattr(model, 'latent_projection', None) is not None:
         tokens_full, proj_logdet = model.proj(tokens_full)
         log_det = log_det + proj_logdet.expand(B) * N
-    if getattr(model, 'pre_latent_projection', None) is not None:
-        log_det = log_det + torch.as_tensor(pre_logdet, device=log_det.device).expand(B) * N
     return log_det, tokens_full
 
 def train_step(model: torch.nn.Module,
@@ -474,62 +460,115 @@ def train_step(model: torch.nn.Module,
                step: int,
                total_steps: int,
                config: SimpleNamespace) -> Dict[str, Any]:
-    eval_no_rgb_noise = bool(batch.get('no_rgb_noise'))
-    advanced_metrics = bool(getattr(config, 'advanced_metrics', False))
+    eval_no_rgb_noise = bool(batch.get('no_rgb_noise', False))
+    advanced_metrics = config.advanced_metrics
     
-    # Single path: PCA + adaptor Jet (paper path). Optional flow-only remains as PCA-variant below.
-    flow_only_mode = bool(getattr(config, 'flow_only_mode', False))
-    text_loss_weight = float(getattr(config, 'text_loss_weight', 0.0))
-    image_loss_weight = float(getattr(config, 'image_loss_weight', 1.0))
-    cfg_drop_prob = float(getattr(config, 'cfg_drop_prob', 0.0))
-
-    if flow_only_mode:
-        # Flow-only in PCA space: Gaussian prior over PatchPCA (and adaptor) latents
-        from src.utils.losses import compute_flow_only_pca_loss
-        out = compute_flow_only_pca_loss(
-            model,
-            batch,
-            step,
-            total_steps,
-            eval_no_rgb_noise=eval_no_rgb_noise,
-            advanced_metrics=advanced_metrics,
-        )
-        out["loss"] = out["image_bpd_total"]
-        return out
+    text_loss_weight = config.training.text_loss_weight
+    cfg_drop_prob = config.model.drop_labels_probability
 
     # PCA image latent training (paper path)
-    text_first_prob = float(getattr(config, 'text_prefix_prob', 0.5))
-    input_noise_std = float(getattr(config, 'input_noise_std', 0.0))
-    stop_grad_nvp_prefix = bool(getattr(config, 'stop_grad_nvp_prefix', False))
-    noise_scale = None
-    noise_min = None
-    try:
-        noise_scale = float(getattr(config, 'noise_scale')) if hasattr(config, 'noise_scale') else None
-    except Exception:
-        noise_scale = None
-    try:
-        noise_min = float(getattr(config, 'noise_min', 0.0))
-    except Exception:
-        noise_min = 0.0
-    rgb_noise_on_image_prefix = bool(getattr(config, 'rgb_noise_on_image_prefix', True))
     from src.utils.losses import compute_jetformer_pca_loss
     out = compute_jetformer_pca_loss(
         model,
         batch,
         step,
         total_steps,
-        text_first_prob=text_first_prob,
-        input_noise_std=input_noise_std,
+        text_first_prob=config.training.text_prefix_prob,
+        input_noise_std=config.training.input_noise_std,
         cfg_drop_prob=cfg_drop_prob,
-        loss_on_prefix=bool(getattr(config, 'loss_on_prefix', True)),
-        stop_grad_nvp_prefix=stop_grad_nvp_prefix,
+        loss_on_prefix=config.training.loss_on_prefix,
+        stop_grad_nvp_prefix=config.training.stop_grad_nvp_prefix,
         advanced_metrics=advanced_metrics,
-        noise_scale=noise_scale,
-        noise_min=noise_min,
-        rgb_noise_on_image_prefix=rgb_noise_on_image_prefix,
+        noise_scale=config.training.noise_scale,
+        noise_min=config.training.noise_min,
+        rgb_noise_on_image_prefix=config.training.rgb_noise_on_image_prefix,
+        eval_no_rgb_noise=eval_no_rgb_noise,
+        text_loss_weight=text_loss_weight,
     )
-    total = (text_loss_weight * out["text_loss"]) + (image_loss_weight * out["image_loss"])
-    out["loss"] = total
     
     return out
+
+@torch.no_grad()
+def rgb_cosine_sigma(
+    step_tensor: torch.Tensor,
+    total_steps_tensor: torch.Tensor,
+    sigma0: float,
+    sigma_final: float,
+    noise_total_steps: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Cosine annealed RGB noise schedule used during training.
+
+    Args:
+        step_tensor: Current global step as a tensor (any dtype/device).
+        total_steps_tensor: Total number of steps as a tensor (any dtype/device).
+        sigma0: Initial sigma value (float).
+        sigma_final: Minimum sigma clamp value (float).
+        noise_total_steps: Optional override for the denominator steps window.
+
+    Returns:
+        sigma_t: Per-step sigma (tensor on the same device as step_tensor).
+    """
+    step_val = step_tensor.to(dtype=torch.float32)
+    denom = total_steps_tensor.to(dtype=torch.float32)
+    if isinstance(noise_total_steps, torch.Tensor):
+        nts = noise_total_steps.to(dtype=torch.float32, device=step_val.device)
+        use_nts = (nts > 0.0).to(dtype=torch.float32)
+        denom = use_nts * nts + (1.0 - use_nts) * denom
+    t_prog = torch.clamp(step_val / denom.clamp_min(1.0), min=0.0, max=1.0)
+    sigma_t = torch.tensor(float(sigma0), device=step_val.device) * (1.0 + torch.cos(torch.tensor(math.pi, device=step_val.device) * t_prog)) * 0.5
+    sigma_t = torch.clamp_min(sigma_t, float(sigma_final))
+    return sigma_t
+
+class ExponentialMovingAverage:
+    def __init__(self, model, decay: float = 0.9999):
+        self.decay = float(decay)
+        self.shadow = {}
+        base = model
+        if hasattr(base, 'module'):
+            base = base.module
+        for name, param in base.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.detach().clone().float()
+
+    @torch.no_grad()
+    def update(self, model):
+        base = model
+        if hasattr(base, 'module'):
+            base = base.module
+        for name, param in base.named_parameters():
+            if not param.requires_grad:
+                continue
+            if name not in self.shadow:
+                self.shadow[name] = param.detach().clone().float()
+            else:
+                self.shadow[name].mul_(self.decay).add_(param.detach().float(), alpha=(1.0 - self.decay))
+
+    def state_dict(self):
+        return {k: v.cpu() for k, v in self.shadow.items()}
+
+    def load_state_dict(self, state):
+        self.shadow = {k: v.clone() for k, v in state.items()}
+
+    @torch.no_grad()
+    def apply_to(self, model):
+        base = model
+        if hasattr(base, 'module'):
+            base = base.module
+        self._backup = {}
+        for name, param in base.named_parameters():
+            if name in self.shadow:
+                self._backup[name] = param.detach().clone()
+                param.data.copy_(self.shadow[name].to(param.dtype).to(param.device))
+
+    @torch.no_grad()
+    def restore(self, model):
+        base = model
+        if hasattr(base, 'module'):
+            base = base.module
+        if not hasattr(self, '_backup'):
+            return
+        for name, param in base.named_parameters():
+            if name in self._backup:
+                param.data.copy_(self._backup[name])
+        self._backup = {}
 

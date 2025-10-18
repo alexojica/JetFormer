@@ -13,34 +13,62 @@ class WBLogger:
         self.cfg = config
         self.enabled = (self.wb is not None)
 
+    def _get(self, path: str, default=None):
+        """Dot-path getter supporting SimpleNamespace and dicts."""
+        cur = self.cfg
+        try:
+            for part in path.split('.'):
+                if isinstance(cur, dict):
+                    cur = cur.get(part)
+                else:
+                    cur = getattr(cur, part)
+                if cur is None:
+                    return default
+            return cur
+        except Exception:
+            return default
+
     def update_summary_config(self, param_counts: dict):
         if not self.enabled:
             return
         try:
-            # Derive a few stable config fields used across runs
-            ps_val = int(getattr(self.cfg, 'patch_size', 16))
+            # Derive a few stable config fields used across runs (nested-safe)
+            ps_val = int(self._get('patch_pca.model.patch_size', 16) or 16)
+            img_size = self._get('input.input_size', (256, 256))
+            img_size_val = int(img_size[0]) if isinstance(img_size, (list, tuple)) and len(img_size) > 0 else 256
+            mixtures_k = int(self._get('model.num_mixtures', 1024) or 1024)
+            img_ar_dim = int(self._get('patch_pca.model.codeword_dim', 128) or 128)
+            n_cls_tokens = int(self._get('input.class_token_length', 1) or 1)
+            jet_depth = int(self._get('adaptor.model.depth', self._get('jet_depth', 8)) or 8)
+            jet_width = int(self._get('adaptor.model.emb_dim', self._get('jet_emb_dim', 512)) or 512)
+            jet_block_depth = int(self._get('adaptor.model.block_depth', self._get('jet_block_depth', 2)) or 2)
+            jet_heads = int(self._get('adaptor.model.num_heads', self._get('jet_num_heads', 8)) or 8)
+            ar_depth = int(self._get('model.depth', self._get('n_layers', 12)) or 12)
+            ar_width = int(self._get('model.width', self._get('d_model', 768)) or 768)
+            ar_heads = int(self._get('model.num_heads', self._get('n_heads', 12)) or 12)
+            ar_kv_heads = int(self._get('model.num_kv_heads', self._get('n_kv_heads', 1)) or 1)
             self.wb.summary.update({
                 # Param counts
                 "model/total_params": param_counts.get('total', 0),
                 "model/jet_params": param_counts.get('jet', 0),
                 "model/transformer_params": param_counts.get('transformer', 0),
                 # Config snapshot
-                "config/image_size": int(getattr(self.cfg, 'input_size', (256, 256))[0]),
+                "config/image_size": img_size_val,
                 "config/patch_size": ps_val,
                 # Autoregressive token dimensionality (paper uses d)
-                "config/mixtures_k": int(getattr(self.cfg, 'num_mixtures', 1024)),
-                "config/image_ar_dim": int(getattr(self.cfg, 'image_ar_dim', 128)),
+                "config/mixtures_k": mixtures_k,
+                "config/image_ar_dim": img_ar_dim,
                 # Full token dimensionality per image token (3 * p^2)
                 "config/image_token_dim": int(3 * ps_val * ps_val),
-                "config/num_class_tokens": int(getattr(self.cfg, 'class_token_length', 16)),
-                "config/jet/num_blocks": int(getattr(self.cfg, 'jet_depth', 8)),
-                "config/jet/width": int(getattr(self.cfg, 'jet_emb_dim', 512)),
-                "config/jet/depth_per_block": int(getattr(self.cfg, 'jet_block_depth', 2)),
-                "config/jet/num_heads": int(getattr(self.cfg, 'jet_num_heads', 8)),
-                "config/ar/depth": int(getattr(self.cfg, 'n_layers', 12)),
-                "config/ar/width": int(getattr(self.cfg, 'd_model', 768)),
-                "config/ar/num_heads": int(getattr(self.cfg, 'n_heads', 12)),
-                "config/ar/n_kv_heads": int(getattr(self.cfg, 'n_kv_heads', 1)),
+                "config/num_class_tokens": n_cls_tokens,
+                "config/jet/num_blocks": jet_depth,
+                "config/jet/width": jet_width,
+                "config/jet/depth_per_block": jet_block_depth,
+                "config/jet/num_heads": jet_heads,
+                "config/ar/depth": ar_depth,
+                "config/ar/width": ar_width,
+                "config/ar/num_heads": ar_heads,
+                "config/ar/n_kv_heads": ar_kv_heads,
                 "config/rope": True,
             })
         except Exception:

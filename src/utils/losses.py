@@ -149,150 +149,9 @@ def gaussian_residual_nll(tilde_z: torch.Tensor) -> torch.Tensor:
     return nll
 
 
-def compute_flow_only_loss(model,
-                          batch,
-                          step: int,
-                          total_steps: int,
-                          *,
-                          rgb_sigma0: float,
-                          rgb_sigma_final: float,
-                          eval_no_rgb_noise: bool = False,
-                          advanced_metrics: bool = False):
-    """Flow-only training loss with Gaussian prior on all tokens.
-    
-    This function trains only the flow model with a simple Gaussian prior,
-    freezing the AR transformer completely.
-    """
-    device = next(model.parameters()).device
-    images = batch['image'].to(device, non_blocking=True)
-    
-    B = images.shape[0]
-    # Continuous RGB noise in [0,1] space for parity with FlowCore training_step
-    images_float = images.float()
-    # Default sigma_t when RGB noise is disabled
-    sigma_t = torch.tensor(0.0, device=device, dtype=images_float.dtype)
-    no_rgb_noise = bool(batch.get('no_rgb_noise', False) or eval_no_rgb_noise)
-    if no_rgb_noise:
-        images01_noisy = (images_float + torch.rand_like(images_float)) / 256.0
-    else:
-        from src.utils.schedules import rgb_cosine_sigma
-        step_tensor = torch.tensor(int(step), device=device, dtype=torch.float32)
-        total_steps_tensor = torch.tensor(int(max(1, total_steps)), device=device, dtype=torch.float32)
-        nts = getattr(model, 'noise_total_steps', None)
-        sigma_t = rgb_cosine_sigma(step_tensor, total_steps_tensor, float(rgb_sigma0), float(rgb_sigma_final), nts)
-        # Uniform dequant to [0,1]
-        images01_noisy = (images_float + torch.rand_like(images_float)) / 256.0
-        # Add Gaussian RGB noise scaled from 8-bit sigma into [0,1]
-        images01_noisy = images01_noisy + (torch.randn_like(images01_noisy) * (sigma_t / 255.0))
-    
-    # Flow encode
-    from src.utils.training_helpers import flow_encode_images01_to_tokens
-    log_det, tokens_full = flow_encode_images01_to_tokens(model, images01_noisy)
-    
-    # For flow-only: ALL tokens are modeled with Gaussian prior
-    # No AR, no factorization
-    gaussian_nll = gaussian_residual_nll(tokens_full)  # NLL for all tokens as Gaussian
-    
-    C, H, W = 3, model.input_size[0], model.input_size[1]
-    denom = (H * W * C) * math.log(2.0)
-    const = (H * W * C) * math.log(256.0)
-    total_nll = gaussian_nll - log_det + const
-    flow_bpd_per_sample = (-log_det) / denom
-    gaussian_bpd_per_sample = (gaussian_nll + const) / denom
-    image_bpd_per_sample = total_nll / denom
-    image_loss = image_bpd_per_sample.mean()
-    
-    with torch.no_grad():
-        total_log_px_nats = -total_nll.mean()
-        tokens_rms = torch.sqrt(torch.mean(tokens_full.float() * tokens_full.float()))
-        if advanced_metrics:
-            try:
-                N = tokens_full.shape[1]  # Number of patches
-                flow_logdet_per_patch = (log_det.mean() / float(N)) if N > 0 else torch.tensor(float('nan'), device=device)
-            except Exception:
-                flow_logdet_per_patch = torch.tensor(float('nan'), device=device)
-    
-    return {
-        # Differentiable components
-        "loss": image_loss,
-        "text_loss": torch.tensor(0.0, device=device),
-        "image_loss": image_loss,
-        # Raw per-sample bpd components
-        "image_bpd_total_raw": image_bpd_per_sample,
-        "flow_bpd_raw": flow_bpd_per_sample,
-        "gaussian_bpd_raw": gaussian_bpd_per_sample,
-        # Detached metrics for logging
-        "image_loss_masked": image_loss.detach(),
-        "text_loss_masked": torch.tensor(0.0, device=device),
-        "flow_bpd_component": flow_bpd_per_sample.mean().detach(),
-        "gaussian_bpd_component": gaussian_bpd_per_sample.mean().detach(),
-        "image_bpd_total": image_bpd_per_sample.mean().detach(),
-        "total_nll_nats": total_nll.mean().detach(),
-        "flow_neg_logdet_nats": (-log_det).mean().detach(),
-        "total_log_px_nats": total_log_px_nats.detach(),
-        "tokens_rms": tokens_rms.detach(),
-        "sigma_t": sigma_t.detach(),
-        "flow_logdet_per_patch": flow_logdet_per_patch.detach() if advanced_metrics else torch.tensor(0.0, device=device),
-    }
-
-
-def compute_flow_only_pca_loss(model,
-                               batch,
-                               step: int,
-                               total_steps: int,
-                               *,
-                               eval_no_rgb_noise: bool = False,
-                               advanced_metrics: bool = False):
-    """Flow-only training variant in PCA latent space with Gaussian prior.
-
-    Encodes images with PatchPCA (and optional adaptor), then treats all latent
-    tokens as standard normal.
-    """
-    device = next(model.parameters()).device
-    images = batch['image'].to(device, non_blocking=True)
-    B = images.shape[0]
-
-    # Convert to [-1,1] and encode via PatchPCA
-    x11 = (images.float() / 127.5) - 1.0
-    if not hasattr(model, 'patch_pca') or model.patch_pca is None:
-        raise RuntimeError("Flow-only PCA loss requires model.patch_pca")
-    mu, logvar = model.patch_pca.encode(x11, train=model.training)
-    z = model.patch_pca.reparametrize(mu, logvar, train=model.training)
-
-    # Optional adaptor flow
-    H, W = model.input_size
-    ps = model.patch_size
-    H_patch, W_patch = (H // ps), (W // ps)
-    D_full = z.shape[-1]
-    z_grid = z.transpose(1, 2).contiguous().view(B, D_full, H_patch, W_patch).permute(0, 2, 3, 1).contiguous()
-    if hasattr(model, 'adaptor') and model.adaptor is not None:
-        y_grid, logdet = model.adaptor(z_grid)
-        sum_log_det = logdet
-        y = y_grid.permute(0, 3, 1, 2).contiguous().view(B, D_full, -1).transpose(1, 2).contiguous()
-    else:
-        sum_log_det = torch.zeros(B, device=device, dtype=z.dtype)
-        y = z
-
-    # Gaussian prior on all latent dims
-    gaussian_nll = gaussian_residual_nll(y)
-
-    # Bits/dim per paper constants
-    num_subpix = H * W * 3
-    ln2 = math.log(2.0)
-    ln1275 = math.log(127.5)
-    total_nll = gaussian_nll
-    image_bpd_per_sample = ((total_nll / num_subpix) - (sum_log_det / num_subpix - ln1275)) / ln2
-    image_loss = image_bpd_per_sample.mean()
-
-    return {
-        "loss": image_loss,
-        "text_loss": torch.tensor(0.0, device=device),
-        "image_loss": image_loss,
-        "image_bpd_total": image_bpd_per_sample.mean().detach(),
-        "image_bpd_total_raw": image_bpd_per_sample,
-        "total_nll_nats": total_nll.mean().detach(),
-    }
-
+# ----------------------------
+# Unified JetFormer training loss and helpers
+# ----------------------------
 
 def _get_from_cfg_or_default(cfg, key: str, default_val):
     try:
@@ -317,7 +176,9 @@ def compute_jetformer_pca_loss(model,
                                advanced_metrics: bool = False,
                                noise_scale: float | None = None,
                                noise_min: float | None = None,
-                               rgb_noise_on_image_prefix: bool = True):
+                               rgb_noise_on_image_prefix: bool = True,
+                               eval_no_rgb_noise: bool = False,
+                               text_loss_weight: float = 1.0):
     """JetFormer loss over PatchPCA latents with optional Jet adaptor.
 
     Implements the paper's composition:
@@ -339,14 +200,14 @@ def compute_jetformer_pca_loss(model,
     # JAX-like RGB noise schedule in 8-bit space (cosine schedule)
     images_f = images.float()
     
-    # Cosine annealed noise schedule
-    progress = step / max(1, total_steps)
-    if noise_scale is not None and noise_min is not None:
-        base_sigma = (float(noise_scale) - float(noise_min)) * (1 + math.cos(math.pi * progress)) / 2 + float(noise_min)
-    elif noise_scale is not None:
-        base_sigma = float(noise_scale)
-    else:
-        base_sigma = 0.0
+    base_sigma = 0.0
+    if not bool(eval_no_rgb_noise):
+        # Cosine annealed noise schedule
+        progress = step / max(1, total_steps)
+        if noise_scale is not None and noise_min is not None:
+            base_sigma = (float(noise_scale) - float(noise_min)) * (1 + math.cos(math.pi * progress)) / 2 + float(noise_min)
+        elif noise_scale is not None:
+            base_sigma = float(noise_scale)
 
     if base_sigma > 0.0:
         sigma = torch.full((Bsz,), float(base_sigma), device=device)
@@ -424,36 +285,35 @@ def compute_jetformer_pca_loss(model,
             text_first_mask.view(-1, 1, 1), sampled_input_noise_std, torch.zeros_like(sampled_input_noise_std))
         img_in = img_in + (sampled_input_noise_std * torch.randn_like(img_in))
 
-    # CFG drop mask (applied only when text-first inside model)
+    # CFG drop: gate mask to text-first only (parity with JAX trainer)
     drop_mask = (torch.rand(B, device=device) < float(cfg_drop_prob))
+    drop_prefix = (drop_mask & text_first_mask)
 
     # Forward AR
-    text_logits, image_logits = model.forward(text_tokens, img_in, text_first_mask, text_mask, drop_text_cond_mask=drop_mask)
+    text_logits, image_logits = model.forward(
+        text_tokens, img_in, text_first_mask, text_mask,
+        drop_text_cond_mask=drop_prefix,
+    )
 
-    # Text loss (JAX parity: always compute CE over masked tokens; no gating by modality order)
-    repeats = int(getattr(model, 'num_vocab_repeats', 1))
-    if repeats > 1:
-        vocab_size = int(getattr(model, 'vocab_size', 0))
-        if bool(getattr(model, 'untie_output_vocab', False)):
-            tokens_for_loss = text_tokens.repeat(1, repeats)
-        else:
-            offsets = [i * vocab_size for i in range(repeats)]
-            tokens_for_loss = torch.cat([text_tokens + off for off in offsets], dim=1)
-        mask_for_loss = text_loss_mask.repeat(1, repeats)
-    else:
-        tokens_for_loss = text_tokens
-        mask_for_loss = text_loss_mask
+    # --- Text and Image Loss Calculation ---
 
-    if loss_on_prefix:
-        drop_prefix = (text_first_mask & drop_mask)
-        valid_txt = (text_first_mask & (~drop_prefix)) | (~text_first_mask)
-        text_loss = cross_entropy_masked(text_logits, tokens_for_loss, mask_for_loss, valid_txt)
-    else:
-        all_examples = torch.ones(B, dtype=torch.bool, device=device)
-        text_loss = cross_entropy_masked(text_logits, tokens_for_loss, mask_for_loss, all_examples)
+    # Per-sample text NLL for JAX parity loss composition
+    # Note: num_vocab_repeats affects the model's internal vocabulary representation,
+    # but the text_logits output shape remains [B, T, V] where T is the original sequence length
+    tokens_for_loss = text_tokens
+    mask_for_loss = text_loss_mask
+    
+    B_txt, T_txt, V_txt = text_logits.shape
+    ce_all = F.cross_entropy(
+        text_logits.reshape(B_txt * T_txt, V_txt),
+        tokens_for_loss.long().reshape(B_txt * T_txt),
+        reduction='none'
+    ).view(B_txt, T_txt)
+    masked_sum_per_sample = (ce_all * mask_for_loss.float()).sum(dim=1)
+    denom_per_sample = mask_for_loss.float().sum(dim=1).clamp_min(1.0)
+    nll_txt_per_sample = masked_sum_per_sample / denom_per_sample
 
     # Image NLL via GMM on hat_tokens
-    # Use model.scale_tol in gmm parameterization
     mix_logits, means, scales = gmm_params(
         image_logits,
         int(getattr(model, 'num_mixtures', 1024)),
@@ -465,11 +325,9 @@ def compute_jetformer_pca_loss(model,
     N = gmm_nll_flat.shape[0] // B
     gmm_nll = gmm_nll_flat.view(B, N).sum(dim=1)
 
-    # Residual dims (whitened) contribute Gaussian NLL if present
-    if residual_latent is not None:
-        residual_nll = gaussian_residual_nll(residual_latent)
-    else:
-        residual_nll = torch.zeros(B, device=device, dtype=y.dtype)
+    # JAX parity: do NOT add an auxiliary NLL term for residual latents.
+    # Only the explicitly appended `latent_noise_dim` contributes via noise_nll.
+    residual_nll = torch.zeros(B, device=device, dtype=y.dtype)
 
     # BPD composition per paper constants
     H, W = model.input_size
@@ -478,15 +336,34 @@ def compute_jetformer_pca_loss(model,
     ln1275 = math.log(127.5)
 
     total_nll = gmm_nll + residual_nll + noise_nll
-    # ((total_nll)/num_subpix - (sum_log_det/num_subpix - ln(127.5))) / ln 2
     image_bpd_per_sample = ((total_nll / num_subpix) - (sum_log_det / num_subpix - ln1275)) / ln2
+
+    # Final loss composition
     if loss_on_prefix:
         drop_prefix = (text_first_mask & drop_mask)
+        
+        valid_txt = (text_first_mask & (~drop_prefix)) | (~text_first_mask)
+        valid_txt_denom = valid_txt.float().sum().clamp_min(1.0)
+        text_loss = (nll_txt_per_sample * valid_txt.float()).sum() / valid_txt_denom
+        
         valid_img = ((~text_first_mask) & (~drop_prefix)) | (text_first_mask)
-        denom = valid_img.float().sum().clamp_min(1.0)
-        image_loss = (image_bpd_per_sample * valid_img.float()).sum() / denom
+        valid_img_denom = valid_img.float().sum().clamp_min(1.0)
+        image_loss = (image_bpd_per_sample * valid_img.float()).sum() / valid_img_denom
+        
+        final_loss = image_loss + text_loss * float(text_loss_weight)
     else:
-        image_loss = image_bpd_per_sample.mean()
+        # Per-example loss selection (JAX parity)
+        example_loss = torch.where(
+            ~text_first_mask,
+            nll_txt_per_sample * float(text_loss_weight),
+            image_bpd_per_sample
+        )
+        final_loss = example_loss.mean()
+        # For logging, report masked averages
+        where_text_suffix = ~text_first_mask
+        text_loss = nll_txt_per_sample[where_text_suffix].mean() if where_text_suffix.any() else torch.tensor(0.0, device=device)
+        where_image_suffix = text_first_mask
+        image_loss = image_bpd_per_sample[where_image_suffix].mean() if where_image_suffix.any() else torch.tensor(0.0, device=device)
 
     with torch.no_grad():
         tol = float(getattr(model, 'scale_tol', 1e-6))
@@ -497,24 +374,16 @@ def compute_jetformer_pca_loss(model,
     if advanced_metrics:
         with torch.no_grad():
             # Re-implement text loss logic to get per-sample nll for prefix/suffix breakdown
-            repeats = int(getattr(model, 'num_vocab_repeats', 1))
-            if repeats > 1:
-                vocab_size = int(getattr(model, 'vocab_size', 0))
-                if bool(getattr(model, 'untie_output_vocab', False)):
-                    tokens_for_loss = text_tokens.repeat(1, repeats)
-                else:
-                    offsets = [i * vocab_size for i in range(repeats)]
-                    tokens_for_loss = torch.cat([text_tokens + off for off in offsets], dim=1)
-                mask_for_loss = text_loss_mask.repeat(1, repeats)
-            else:
+            if nll_txt_per_sample.shape[0] != B:
+                # Recompute if not already available from loss_on_prefix=False path
                 tokens_for_loss = text_tokens
                 mask_for_loss = text_loss_mask
 
-            B_txt, T_txt, V_txt = text_logits.shape
-            ce_all = F.cross_entropy(text_logits.reshape(B_txt * T_txt, V_txt), tokens_for_loss.reshape(B_txt * T_txt), reduction='none').view(B_txt, T_txt)
-            masked_sum_per_sample = (ce_all * mask_for_loss.float()).sum(dim=1)
-            denom_per_sample = mask_for_loss.float().sum(dim=1).clamp_min(1.0)
-            nll_txt_per_sample = masked_sum_per_sample / denom_per_sample
+                B_txt, T_txt, V_txt = text_logits.shape
+                ce_all = F.cross_entropy(text_logits.reshape(B_txt * T_txt, V_txt), tokens_for_loss.long().reshape(B_txt * T_txt), reduction='none').view(B_txt, T_txt)
+                masked_sum_per_sample = (ce_all * mask_for_loss.float()).sum(dim=1)
+                denom_per_sample = mask_for_loss.float().sum(dim=1).clamp_min(1.0)
+                nll_txt_per_sample = masked_sum_per_sample / denom_per_sample
 
             drop_prefix = (text_first_mask & drop_mask)
             where_text_prefix = text_first_mask & ~drop_prefix
@@ -558,7 +427,7 @@ def compute_jetformer_pca_loss(model,
                 }
 
     return {
-        "loss": image_loss + 0.0 * text_loss,
+        "loss": final_loss,
         "text_loss": text_loss,
         "image_loss": image_loss,
         # BPD components

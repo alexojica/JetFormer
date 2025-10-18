@@ -1,7 +1,6 @@
 # General
 num_epochs: 50
 torch_compile: false
-jetformer_training_mode: pca
 advanced_metrics: true
 batch_size: 56
 grad_accum_steps: 1
@@ -17,8 +16,7 @@ input:
   dataloader_prefetch_factor: 4
   max_samples: null
   random_flip_prob: 0.5
-  class_token_length: 16
-  ignore_pad: false
+  class_token_length: 1
 
 # Model Configuration
 model:
@@ -27,6 +25,7 @@ model:
   mlp_dim: 4096
   num_heads: 16
   num_kv_heads: 1
+  head_dim: 64
   vocab_size: 53
   bos_id: 50
   boi_id: 51
@@ -35,27 +34,17 @@ model:
   dropout: 0.1
   drop_labels_probability: 0.1
   head_dtype: 'bfloat16'
-  remat_policy: 'none'
+  remat_policy: 'nothing_saveable'
   num_vocab_repeats: 16
-  per_modality_final_norm: false
-  right_align_inputs: true
-  strict_special_ids: true
-  use_boi_token: true
-  max_seq_len: 64
-  rope_skip_pad: true
 
 # Patch PCA
 patch_pca:
   model:
     depth_to_seq: 1
-    input_size: [256, 256]
     patch_size: 16
     codeword_dim: 128
-    noise_std: 0.0
     add_dequant_noise: true
     skip_pca: true
-    whiten: true
-    pca_init_file: null
 
 # Adaptor/Jet
 use_adaptor: true
@@ -65,17 +54,12 @@ adaptor:
     block_depth: 4
     emb_dim: 512
     num_heads: 8
-    actnorm: false
-    invertible_dense: false
-    flow_grad_checkpoint: false
   latent_noise_dim: 640
-  kind: 'jet'
 
 # Optimizer & Schedule
 optimizer:
   lr: 0.0001
   wd: 0.0001
-  b1: 0.9
   b2: 0.95
   grad_clip_norm: 1.0
 
@@ -83,47 +67,38 @@ ema_decay: 0.0
 
 schedule:
   warmup_percent: 0.1
-  decay_type: 'cosine'
 
 # Training Curriculum
 training:
   input_noise_std: 0.3
   noise_scale: 64.0
-  noise_min: 0.0
   text_prefix_prob: 1.0
   loss_on_prefix: false
   stop_grad_nvp_prefix: true
   rgb_noise_on_image_prefix: true
-  text_loss_weight: 1.0
+  text_loss_weight: 0.0
   image_loss_weight: 1.0
-  latent_noise_std: 0.3
 
 # Sampling & Evaluation
 sampling:
-  cfg_strength: 4.0
+  cfg_inference_weight: 3.0
+  temperature: 0.94
+  temperature_probs: 1.0
   cfg_mode: "interp"
 
 eval:
-  sample_every_epochs: 5
   val_every_epochs: 5
-  sample_every_batches: 0
   eval_no_rgb_noise: true
-  fid_every_epochs: 0
-  is_every_epochs: 0
-  fid_is_num_samples: 0
 
 # W&B
 wandb:
   enabled: true
-  offline: false
   project: "jetformer-imagenet-256"
   run_name: "B-256-first100"
   tags: ["imagenet", "256x256", "B", "first100"]
 
 # Accelerator
 accelerator:
-  name: auto
-  device: auto
   precision: bf16
 
 

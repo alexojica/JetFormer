@@ -39,7 +39,7 @@ def generate_text_to_image_samples_cfg(
     device,
     num_samples: int = 3,
     cfg_strength: float = 4.0,
-    cfg_mode: str = "interp",
+    cfg_mode: str = "density",
     prompts: list | None = None,
     fast_mixture_first: bool = False,
     temperature_scales: float | None = None,
@@ -90,28 +90,18 @@ def generate_text_to_image_samples_cfg(
                     torch.empty(1, 0, model.image_ar_dim, device=device), # No image tokens in prefix
                     text_first_mask, 
                     text_mask, 
-                    drop_text_cond_mask=drop_mask
+                    drop_text_cond_mask=drop_mask,
+                    shift=False
                 )
                 
-                # The returned sequence from embed_sequence is shifted left. For prefill, we need the full prefix.
-                if model.use_boi_token:
-                    boi_emb = model.lookup_token(model.boi_id, 1)
-                    x = torch.cat([x, boi_emb], dim=1)
-                    padding_mask = torch.cat([padding_mask, torch.ones(1, 1, dtype=torch.bool, device=device)], dim=1)
-
-                seq_len = x.shape[1]
-                causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=device, dtype=torch.bool))
-                attn_mask = causal_mask.unsqueeze(0).expand(1, -1, -1)
-                attn_mask = torch.logical_and(attn_mask, padding_mask.unsqueeze(1))
-                attn_mask = attn_mask.unsqueeze(1)
-
                 return x, attn_mask, padding_mask
             
             prefix_c, attn_mask_c, input_mask_c = get_prefix(is_unconditional=False)
             prefix_u, attn_mask_u, input_mask_u = get_prefix(is_unconditional=True)
 
-            prefix_len = prefix_c.shape[1]
-            cache_size = prefix_len + model.image_seq_len
+            # JAX parity: cache_size = prefix_len + decode_len - 1
+            decode_len = int(getattr(model, 'image_seq_len'))
+            cache_size = int(prefix_c.shape[1] + decode_len - 1)
 
             last_prelogits_c, cache_c = model.prefill_cache(prefix_c, attn_mask_c, input_mask_c, cache_size=cache_size)
             last_prelogits_u, cache_u = model.prefill_cache(prefix_u, attn_mask_u, input_mask_u, cache_size=cache_size)
@@ -186,7 +176,7 @@ def generate_class_conditional_samples(base,
                                        device: torch.device,
                                        class_ids: List[int],
                                        cfg_strength: float = 4.0,
-                                       cfg_mode: str = "interp",
+                                       cfg_mode: str = "density",
                                        fast_mixture_first: bool = False,
                                        dataset: Any | None = None,
                                        temperature_scales: float | None = None,
@@ -250,28 +240,19 @@ def generate_class_conditional_samples(base,
                     torch.empty(1, 0, base.image_ar_dim, device=device), # No image tokens
                     text_first_mask,
                     text_mask,
-                    drop_text_cond_mask=drop_mask
+                    drop_text_cond_mask=drop_mask,
+                    shift=False
                 )
-                
-                if base.use_boi_token:
-                    boi_emb = base.lookup_token(base.boi_id, 1)
-                    x = torch.cat([x, boi_emb], dim=1)
-                    padding_mask = torch.cat([padding_mask, torch.ones(1, 1, dtype=torch.bool, device=device)], dim=1)
-
-                seq_len = x.shape[1]
-                causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=device, dtype=torch.bool))
-                attn_mask = causal_mask.unsqueeze(0).expand(1, -1, -1)
-                attn_mask = torch.logical_and(attn_mask, padding_mask.unsqueeze(1))
-                attn_mask = attn_mask.unsqueeze(1)
                 
                 return x, attn_mask, padding_mask
 
             prefix_c, attn_mask_c, input_mask_c = get_prefix(is_unconditional=False)
             prefix_u, attn_mask_u, input_mask_u = get_prefix(is_unconditional=True)
-            
-            prefix_len = prefix_c.shape[1]
-            cache_size = prefix_len + base.image_seq_len
-            
+
+            # JAX parity: cache_size = prefix_len + decode_len - 1
+            decode_len = int(getattr(base, 'image_seq_len'))
+            cache_size = int(prefix_c.shape[1] + decode_len - 1)
+
             last_prelogits_c, cache_c = base.prefill_cache(prefix_c, attn_mask_c, input_mask_c, cache_size=cache_size)
             last_prelogits_u, cache_u = base.prefill_cache(prefix_u, attn_mask_u, input_mask_u, cache_size=cache_size)
             
@@ -334,18 +315,6 @@ def generate_class_conditional_samples(base,
     if was_training:
         base.train()
     return samples
-
-
-@torch.no_grad()
-def sample_flow_images(flow_model, device: torch.device, num_images: int, image_shape_hwc: tuple):
-    """Sample images from a flow-only model (NHWC [0,1]) and return list of PIL images."""
-    z_samples = torch.randn(int(num_images), *image_shape_hwc, device=device)
-    x_gen, _ = flow_model.inverse(z_samples)
-    x_uint8 = (x_gen * 255.0).clamp(0, 255).to(torch.uint8).cpu()  # (B,H,W,C)
-    pil_images = []
-    for img in x_uint8:
-        pil_images.append(Image.fromarray(img.numpy()))
-    return pil_images
 
 
 def build_sentencepiece_tokenizer_dataset(max_length: int = 64):

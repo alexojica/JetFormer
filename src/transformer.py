@@ -176,23 +176,13 @@ class MultiQueryAttention(nn.Module):
             K = self.pos_encoding.apply_rope(K, k_position_ids)
         
         # Optional pre-attn normalization on queries (Gemma: rsqrt_head_dim)
+        score_scale = 1.0 / math.sqrt(self.d_k)
         if self.query_pre_attn_norm == "rsqrt_head_dim":
-            scale = 1.0 / math.sqrt(self.d_k)
-            Q = Q * scale
+            Q = Q * score_scale
+            score_scale = 1.0  # Already applied to Q, avoid double-scaling
         
-        # Decode-mode KV cache
+        # Decode-mode KV cache: concatenate cached keys/values; rely solely on explicit masks
         if kv_cache is not None:
-            # When a mask is provided during prefill, zero-out K/V for disallowed key positions
-            # so that cached keys correspond only to valid tokens after right-alignment.
-            if mask is not None and K.shape[2] > 1:
-                # mask is [B,1,L,S], allowed=True means attend allowed; derive per-key validity
-                S = K.shape[2]
-                # Expand to [B,H,L,S] then reduce over query length L to get [B,H,S]
-                allowed = mask.expand(B, self.n_heads, L, S)
-                key_allowed = allowed.any(dim=2).to(K.dtype)  # [B,H,S]
-                K = K * key_allowed.unsqueeze(-1)
-                V = V * key_allowed.unsqueeze(-1)
-            
             k_cat = torch.cat([kv_cache[0], K], dim=2)
             v_cat = torch.cat([kv_cache[1], V], dim=2)
             # Store detatched to avoid backprop through history
@@ -202,7 +192,7 @@ class MultiQueryAttention(nn.Module):
             K_use, V_use = K, V
             new_kv_cache = None
 
-        scores = torch.matmul(Q, K_use.transpose(-2, -1)) / math.sqrt(self.d_k)
+        scores = torch.matmul(Q, K_use.transpose(-2, -1)) * score_scale
 
         if self.attn_logits_softcap is not None:
             cap = float(self.attn_logits_softcap)
