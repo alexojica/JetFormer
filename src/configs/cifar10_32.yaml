@@ -48,8 +48,8 @@ patch_pca:
     depth_to_seq: 1
     patch_size: 4
     codeword_dim: 48
-    noise_std: 0.01
-    add_dequant_noise: false
+    noise_std: 0.0
+    add_dequant_noise: true
     skip_pca: true
     whiten: true
 
@@ -69,7 +69,7 @@ adaptor:
 
 # Optimizer & Schedule
 optimizer:
-  lr: 0.0001
+  lr: 0.001
   wd: 0.0001
   b2: 0.95
   grad_clip_norm: 1.0
@@ -82,25 +82,26 @@ schedule:
 
 # Training Curriculum
 training:
-  input_noise_std: 0.3
+  input_noise_std: 0.0
   noise_scale: 16.0
   noise_min: 0.0
   text_prefix_prob: 1.0
   loss_on_prefix: false
-  stop_grad_nvp_prefix: true
+  stop_grad_nvp_prefix: false
   rgb_noise_on_image_prefix: true
   text_loss_weight: 1.0
   image_loss_weight: 1.0
 
 # Sampling & Evaluation
 sampling:
-  cfg_inference_weight: 4.0
+  cfg_inference_weight: 3.0
   cfg_mode: "interp"
-  temperature: 1.0
+  temperature: 0.94
   temperature_probs: 1.0
 
 eval:
   val_every_epochs: 2
+  sample_every_epochs: 2
   eval_no_rgb_noise: true
   fid_every_epochs: 0
   is_every_epochs: 0
