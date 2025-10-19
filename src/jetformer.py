@@ -613,60 +613,63 @@ class JetFormer(nn.Module):
         return h[:, -1:, :], cache_state
 
     @torch.no_grad()
-    def extend_cache(self, x_next: torch.Tensor, cache: dict, position_ids: torch.Tensor, cache_size: int | None = None) -> Tuple[torch.Tensor, dict]:
-        """Extend decode cache with one more embedded token and return last prelogits.
-        Uses per-layer KV caches and supports JAX-style sliding window.
+    def extend_cache(self, x_next: torch.Tensor, cache: dict, position_ids: torch.Tensor | None, cache_size: int | None = None) -> Tuple[torch.Tensor, dict]:
+        """Extend decode cache with one token and return its prelogits.
+
+        JAX parity: derive the current position from the cached window (seq_len)
+        and ignore externally passed ``position_ids``. The caller should not
+        manage decode positions once the cache has been initialized.
+
         Args:
-            x_next: [B,1,D] next-step embedding
-            cache: dict containing 'kv' list and optional 'begin'/'end' tensors
-            position_ids: [B,1] tensor of current positions
-            cache_size: optional total KV cache window length (defaults to max_seq_len)
+            x_next: [B, 1, D] next-step embedding
+            cache: dict with 'kv' list and optional 'begin'/'end' tensors
+            position_ids: ignored; kept for API compatibility
+            cache_size: optional total KV cache window length
         Returns:
             last_prelogits: [B,1,D]
             new_cache: updated cache dictionary
         """
         h = x_next
-        # Build per-step attention mask [B,1,1,S] allowing attend up to current position
+
+        # Build per-step attention mask [B,1,1,S] from cache state
+        step_mask = None
         try:
             B = x_next.size(0)
-            cs = int(cache_size) if isinstance(cache_size, int) and cache_size > 0 else int(getattr(self, 'max_seq_len', h.shape[1]))
+            cs = int(cache_size) if isinstance(cache_size, int) and cache_size > 0 else int(getattr(self, 'max_seq_len', 0) or (h.shape[1]))
             keys = torch.arange(cs, device=x_next.device).view(1, 1, 1, cs)
-            
-            # Default to causal mask up to current position
-            cur_pos = position_ids.view(B, 1, 1, 1)
-            mask_keys = (keys <= cur_pos)
 
-            # JAX parity: apply sliding window if cache state is present
             if isinstance(cache, dict) and 'begin' in cache and 'end' in cache:
                 cache_begin = cache['begin'].view(B, 1, 1, 1)
-                cache_end = (cache['end'] + 1).view(B, 1, 1, 1)
-                window_mask = (keys >= cache_begin) & (keys < cache_end)
-                mask_keys = window_mask
-            
-            step_mask = mask_keys  # [B,1,1,S]
+                # Current token will occupy cache position == cache['end']
+                cache_end_inclusive = cache['end'].view(B, 1, 1, 1)
+                window_mask = (keys >= cache_begin) & (keys <= cache_end_inclusive)
+                step_mask = window_mask
+            else:
+                # Fallback: strictly causal up to the next position inferred from history
+                # When no cache window is present, allow attend to all previous slots.
+                step_mask = keys <= keys.max()
         except Exception:
             step_mask = None
-        
+
         new_caches = []
         kv_list = cache.get('kv', []) if isinstance(cache, dict) else cache
         if isinstance(self.transformer, nn.ModuleList):
             for i, layer in enumerate(self.transformer):
                 layer_cache = kv_list[i] if kv_list and i < len(kv_list) else None
-                # Provide explicit mask to avoid relying on implicit causal flag
-                # For single-token decoding, mask can be None
-                h, new_cache = layer(h, mask=step_mask, position_ids=position_ids, cache=layer_cache)
+                # Position ids are handled internally by attention via mask; pass None.
+                h, new_cache = layer(h, mask=step_mask, position_ids=None, cache=layer_cache)
                 new_caches.append(new_cache)
             if not self.per_modality_final_norm:
                 h = self.final_norm(h)
         else:
-            h, _ = self.transformer(h, attn_mask=step_mask, position_ids=position_ids)
+            h, _ = self.transformer(h, attn_mask=step_mask, position_ids=None)
 
-        # Return updated cache state
+        # Update cache window (advance end by one)
         new_cache_state = {'kv': new_caches}
         if isinstance(cache, dict) and 'begin' in cache and 'end' in cache:
             new_cache_state['begin'] = cache['begin']
             new_cache_state['end'] = cache['end'] + 1
-        
+
         return h[:, -1:, :], new_cache_state
         
     # ==== JAX-parity APIs for sampling distribution ====

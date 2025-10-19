@@ -140,10 +140,9 @@ def generate_text_to_image_samples_cfg(
 
                 # Embed the new token and extend cache for next step
                 new_token_emb = model.image_emb(sampled_token)
-                position_ids = torch.tensor([[current_pos + pos]], device=device, dtype=torch.long)
-                
-                last_prelogits_c, cache_c = model.extend_cache(new_token_emb, cache_c, position_ids, cache_size=cache_size)
-                last_prelogits_u, cache_u = model.extend_cache(new_token_emb, cache_u, position_ids, cache_size=cache_size)
+                # JAX parity: let the model derive positions from cache state
+                last_prelogits_c, cache_c = model.extend_cache(new_token_emb, cache_c, position_ids=None, cache_size=cache_size)
+                last_prelogits_u, cache_u = model.extend_cache(new_token_emb, cache_u, position_ids=None, cache_size=cache_size)
 
             # --- 4. Decode final image ---
             full_dim = model.image_token_dim
@@ -286,10 +285,9 @@ def generate_class_conditional_samples(base,
                     break
                 
                 new_token_emb = base.image_emb(sampled)
-                position_ids = torch.tensor([[current_pos + pos]], device=device, dtype=torch.long)
-                
-                last_prelogits_c, cache_c = base.extend_cache(new_token_emb, cache_c, position_ids, cache_size=cache_size)
-                last_prelogits_u, cache_u = base.extend_cache(new_token_emb, cache_u, position_ids, cache_size=cache_size)
+                # JAX parity: let the model derive positions from cache state
+                last_prelogits_c, cache_c = base.extend_cache(new_token_emb, cache_c, position_ids=None, cache_size=cache_size)
+                last_prelogits_u, cache_u = base.extend_cache(new_token_emb, cache_u, position_ids=None, cache_size=cache_size)
 
             # --- 4. Decode final image ---
             res_dim = max(0, base.image_token_dim - base.image_ar_dim)
