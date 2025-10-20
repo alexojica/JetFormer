@@ -31,7 +31,7 @@ model:
   drop_labels_probability: 0.1
   head_dtype: 'bfloat16'
   remat_policy: 'nothing_saveable'
-  num_vocab_repeats: 16
+  num_vocab_repeats: 1
   scale_tol: 1e-6
   causal_mask_on_prefix: true
   untie_output_vocab: false
@@ -82,10 +82,10 @@ schedule:
 
 # Training Curriculum
 training:
-  input_noise_std: 0.0
-  noise_scale: 1.0
+  input_noise_std: 0.05
+  noise_scale: 8.0
   noise_min: 0.0
-  text_prefix_prob: 0.5
+  text_prefix_prob: 1.0
   loss_on_prefix: true
   stop_grad_nvp_prefix: true
   rgb_noise_on_image_prefix: true
@@ -94,7 +94,7 @@ training:
 
 # Sampling & Evaluation
 sampling:
-  cfg_inference_weight: 3.0
+  cfg_inference_weight: 0.0
   cfg_mode: "density"
   temperature: 0.94
   temperature_probs: 1.0
