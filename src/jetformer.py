@@ -604,12 +604,14 @@ class JetFormer(nn.Module):
             # This path is for non-Gemma transformer, which doesn't have caching implemented
             h, _ = self.transformer(h, attn_mask, position_ids)
 
-        # JAX parity: track cache window for sliding-window attention during decode
+        # JAX parity: track cache window and current decode position per-sample
         cache_state = {'kv': new_caches}
         if isinstance(cache_size, int) and cache_size > 0 and input_mask is not None:
             seq_len = torch.sum(input_mask.to(torch.long), dim=-1)
             cache_state['begin'] = x_aligned.shape[1] - seq_len
             cache_state['end'] = torch.full_like(seq_len, x_aligned.shape[1])
+            # Track logical decode position (number of valid tokens); used for RoPE
+            cache_state['seq_len'] = seq_len.clone()
         return h[:, -1:, :], cache_state
 
     @torch.no_grad()
@@ -641,13 +643,14 @@ class JetFormer(nn.Module):
 
             if isinstance(cache, dict) and 'begin' in cache and 'end' in cache:
                 cache_begin = cache['begin'].view(B, 1, 1, 1)
-                # Big Vision semantics: new token index equals current 'end'.
-                # Attention window should include self; implement via end-exclusive mask with end+1.
                 cache_end = cache['end'].view(B, 1, 1, 1)
                 end_exclusive = cache_end + 1
                 step_mask = (keys >= cache_begin) & (keys < end_exclusive)
-                # Explicit per-sample positions for RoPE: current token position == cache['end'].
-                step_positions = cache['end'].view(B, 1).to(dtype=torch.long, device=x_next.device)
+                # Explicit per-sample positions for RoPE: use current logical seq_len (JAX parity)
+                if 'seq_len' in cache:
+                    step_positions = cache['seq_len'].view(B, 1).to(dtype=torch.long, device=x_next.device)
+                else:
+                    step_positions = cache['end'].view(B, 1).to(dtype=torch.long, device=x_next.device)
             else:
                 # Fallback: strictly causal up to current length (no explicit window info)
                 step_mask = keys <= keys.max()
@@ -674,6 +677,8 @@ class JetFormer(nn.Module):
         if isinstance(cache, dict) and 'begin' in cache and 'end' in cache:
             new_cache_state['begin'] = cache['begin']
             new_cache_state['end'] = cache['end'] + 1
+            if 'seq_len' in cache:
+                new_cache_state['seq_len'] = cache['seq_len'] + 1
 
         return h[:, -1:, :], new_cache_state
         

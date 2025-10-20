@@ -115,9 +115,15 @@ def generate_text_to_image_samples_cfg(
             for pos in range(model.image_seq_len):
                 # Convert hidden prelogits to image head logits before building PDFs
                 def get_img_logits(prelogits):
+                    feats = prelogits
+                    if getattr(model, 'per_modality_final_norm', False):
+                        try:
+                            feats = model.img_norm(feats)
+                        except Exception:
+                            pass
                     if getattr(model, 'use_bfloat16_img_head', False):
-                        return model.img_head(prelogits.to(torch.bfloat16)).float()
-                    return model.img_head(prelogits)
+                        return model.img_head(feats.to(torch.bfloat16)).float()
+                    return model.img_head(feats)
 
                 image_logits_c = get_img_logits(last_prelogits_c)
                 image_logits_u = get_img_logits(last_prelogits_u)
@@ -262,9 +268,15 @@ def generate_class_conditional_samples(base,
             for pos in range(base.image_seq_len):
                 # Convert hidden prelogits to image head logits before building PDFs
                 def get_img_logits(prelogits):
+                    feats = prelogits
+                    if getattr(base, 'per_modality_final_norm', False):
+                        try:
+                            feats = base.img_norm(feats)
+                        except Exception:
+                            pass
                     if getattr(base, 'use_bfloat16_img_head', False):
-                        return base.img_head(prelogits.to(torch.bfloat16)).float()
-                    return base.img_head(prelogits)
+                        return base.img_head(feats.to(torch.bfloat16)).float()
+                    return base.img_head(feats)
 
                 image_logits_c = get_img_logits(last_prelogits_c)
                 image_logits_u = get_img_logits(last_prelogits_u)
