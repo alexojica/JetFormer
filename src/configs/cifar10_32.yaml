@@ -57,7 +57,7 @@ patch_pca:
 use_adaptor: true
 adaptor:
   model:
-    depth: 16
+    depth: 20
     block_depth: 4
     emb_dim: 256
     num_heads: 8
