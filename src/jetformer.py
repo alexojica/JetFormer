@@ -631,8 +631,9 @@ class JetFormer(nn.Module):
         """
         h = x_next
 
-        # Build per-step attention mask [B,1,1,S] from cache state
+        # Build per-step attention mask [B,1,1,S] and explicit RoPE positions
         step_mask = None
+        step_positions = None
         try:
             B = x_next.size(0)
             cs = int(cache_size) if isinstance(cache_size, int) and cache_size > 0 else int(getattr(self, 'max_seq_len', 0) or (h.shape[1]))
@@ -640,29 +641,33 @@ class JetFormer(nn.Module):
 
             if isinstance(cache, dict) and 'begin' in cache and 'end' in cache:
                 cache_begin = cache['begin'].view(B, 1, 1, 1)
-                # Current token will occupy cache position == cache['end']
-                cache_end_inclusive = cache['end'].view(B, 1, 1, 1)
-                window_mask = (keys >= cache_begin) & (keys <= cache_end_inclusive)
-                step_mask = window_mask
+                # Big Vision semantics: new token index equals current 'end'.
+                # Attention window should include self; implement via end-exclusive mask with end+1.
+                cache_end = cache['end'].view(B, 1, 1, 1)
+                end_exclusive = cache_end + 1
+                step_mask = (keys >= cache_begin) & (keys < end_exclusive)
+                # Explicit per-sample positions for RoPE: current token position == cache['end'].
+                step_positions = cache['end'].view(B, 1).to(dtype=torch.long, device=x_next.device)
             else:
-                # Fallback: strictly causal up to the next position inferred from history
-                # When no cache window is present, allow attend to all previous slots.
+                # Fallback: strictly causal up to current length (no explicit window info)
                 step_mask = keys <= keys.max()
+                step_positions = None
         except Exception:
             step_mask = None
+            step_positions = None
 
         new_caches = []
         kv_list = cache.get('kv', []) if isinstance(cache, dict) else cache
         if isinstance(self.transformer, nn.ModuleList):
             for i, layer in enumerate(self.transformer):
                 layer_cache = kv_list[i] if kv_list and i < len(kv_list) else None
-                # Position ids are handled internally by attention via mask; pass None.
-                h, new_cache = layer(h, mask=step_mask, position_ids=None, cache=layer_cache)
+                # Pass explicit positions for RoPE to match Big Vision decoding.
+                h, new_cache = layer(h, mask=step_mask, position_ids=step_positions, cache=layer_cache)
                 new_caches.append(new_cache)
             if not self.per_modality_final_norm:
                 h = self.final_norm(h)
         else:
-            h, _ = self.transformer(h, attn_mask=step_mask, position_ids=None)
+            h, _ = self.transformer(h, attn_mask=step_mask, position_ids=step_positions)
 
         # Update cache window (advance end by one)
         new_cache_state = {'kv': new_caches}

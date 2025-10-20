@@ -182,15 +182,16 @@ class MultiQueryAttention(nn.Module):
             score_scale = 1.0  # Already applied to Q, avoid double-scaling
         
         # Decode-mode KV cache: concatenate cached keys/values; rely solely on explicit masks
+        # Build/extend KV-cache: during prefill, kv_cache is None and we should
+        # still return a full-cache for subsequent decoding steps.
         if kv_cache is not None:
             k_cat = torch.cat([kv_cache[0], K], dim=2)
             v_cat = torch.cat([kv_cache[1], V], dim=2)
-            # Store detatched to avoid backprop through history
-            new_kv_cache = (k_cat.detach(), v_cat.detach())
-            K_use, V_use = k_cat, v_cat
         else:
-            K_use, V_use = K, V
-            new_kv_cache = None
+            k_cat, v_cat = K, V
+        # Store detached cache (no backprop through history during decode)
+        new_kv_cache = (k_cat.detach(), v_cat.detach())
+        K_use, V_use = k_cat, v_cat
 
         scores = torch.matmul(Q, K_use.transpose(-2, -1)) * score_scale
 

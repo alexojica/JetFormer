@@ -18,7 +18,7 @@ input:
 model:
   width: 512
   depth: 12
-  mlp_dim: 2048
+  mlp_dim: 3072
   num_heads: 8
   num_kv_heads: 1
   head_dim: 64
@@ -28,7 +28,7 @@ model:
   nolabel_id: 12
   num_mixtures: 256
   dropout: 0.1
-  drop_labels_probability: 0.1
+  drop_labels_probability: 0.0
   head_dtype: 'bfloat16'
   remat_policy: 'nothing_saveable'
   num_vocab_repeats: 16
@@ -74,7 +74,7 @@ optimizer:
   b2: 0.95
   grad_clip_norm: 1.0
 
-ema_decay: 0.0
+ema_decay: 0.999
 
 schedule:
   warmup_percent: 0.1
@@ -82,7 +82,7 @@ schedule:
 
 # Training Curriculum
 training:
-  input_noise_std: 0.3
+  input_noise_std: 0.05
   noise_scale: 16.0
   noise_min: 0.0
   text_prefix_prob: 1.0
