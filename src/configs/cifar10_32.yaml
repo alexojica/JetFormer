@@ -28,8 +28,8 @@ model:
   nolabel_id: 12
   num_mixtures: 512
   dropout: 0.0
-  drop_labels_probability: 0.0
-  head_dtype: 'float32'
+  drop_labels_probability: 0.1
+  head_dtype: 'bfloat16'
   remat_policy: 'nothing_saveable'
   num_vocab_repeats: 16
   scale_tol: 1e-6
@@ -83,13 +83,13 @@ schedule:
 # Training Curriculum
 training:
   input_noise_std: 0.0
-  noise_scale: 0.0
+  noise_scale: 1.0
   noise_min: 0.0
-  text_prefix_prob: 1.0
-  loss_on_prefix: false
+  text_prefix_prob: 0.5
+  loss_on_prefix: true
   stop_grad_nvp_prefix: true
   rgb_noise_on_image_prefix: true
-  text_loss_weight: 0.0
+  text_loss_weight: 0.1
   image_loss_weight: 1.0
 
 # Sampling & Evaluation

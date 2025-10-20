@@ -638,22 +638,20 @@ class JetFormer(nn.Module):
         step_positions = None
         try:
             B = x_next.size(0)
-            cs = int(cache_size) if isinstance(cache_size, int) and cache_size > 0 else int(getattr(self, 'max_seq_len', 0) or (h.shape[1]))
-            keys = torch.arange(cs, device=x_next.device).view(1, 1, 1, cs)
-
-            if isinstance(cache, dict) and 'begin' in cache and 'end' in cache:
-                cache_begin = cache['begin'].view(B, 1, 1, 1)
-                cache_end = cache['end'].view(B, 1, 1, 1)
-                end_exclusive = cache_end + 1
-                step_mask = (keys >= cache_begin) & (keys < end_exclusive)
-                # Explicit per-sample positions for RoPE: use current logical seq_len (JAX parity)
-                if 'seq_len' in cache:
-                    step_positions = cache['seq_len'].view(B, 1).to(dtype=torch.long, device=x_next.device)
-                else:
-                    step_positions = cache['end'].view(B, 1).to(dtype=torch.long, device=x_next.device)
+            # Align per-step mask to the actual KV cache length instead of global cache_size
+            kv_list = cache.get('kv', []) if isinstance(cache, dict) else cache
+            if kv_list and isinstance(kv_list, (list, tuple)) and kv_list[0] is not None and isinstance(kv_list[0], (tuple, list)) and kv_list[0][0] is not None:
+                prev_len = int(kv_list[0][0].shape[2])
             else:
-                # Fallback: strictly causal up to current length (no explicit window info)
-                step_mask = keys <= keys.max()
+                prev_len = 0
+            s_len = prev_len + 1  # include the new token
+            step_mask = torch.ones((B, 1, 1, s_len), dtype=torch.bool, device=x_next.device)
+            # Explicit per-sample positions for RoPE: use current logical seq_len (JAX parity)
+            if isinstance(cache, dict) and 'seq_len' in cache:
+                step_positions = cache['seq_len'].view(B, 1).to(dtype=torch.long, device=x_next.device)
+            elif isinstance(cache, dict) and 'end' in cache:
+                step_positions = cache['end'].view(B, 1).to(dtype=torch.long, device=x_next.device)
+            else:
                 step_positions = None
         except Exception:
             step_mask = None

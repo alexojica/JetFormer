@@ -265,9 +265,15 @@ def train_from_config(config: SimpleNamespace):
     if os.environ.get('DEBUG') is not None:
         torch.autograd.set_detect_anomaly(True)
 
-    # If wandb is active, it owns the config. Rebuild SNS from it.
+    # Freeze training config: ensure W&B mirrors our YAML/CLI config, but do not
+    # pull values back from wandb.config (which could silently override local
+    # settings). This avoids unintended overrides of keys like noise_scale,
+    # text_prefix_prob, etc.
     if wb_run:
-        config = get_config_from_yaml_and_cli(None, SimpleNamespace(**wandb.config))
+        try:
+            wandb.config.update(wb_cfg, allow_val_change=True)
+        except Exception:
+            pass
 
     print(f"Using device: {device_obj}")
     
