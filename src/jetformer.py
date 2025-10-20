@@ -548,11 +548,11 @@ class JetFormer(nn.Module):
             weight = self.text_emb.weight  # [V_total, D]
             text_logits = torch.matmul(text_feats, weight.t())  # [B, L_txt, V_total]
 
-        # Compute image head logits in a numerically stable way even when the
-        # head parameters are stored in bfloat16: upcast inputs and weights to
-        # float32 for the matmul, then return float32 logits. This mirrors the
-        # stability of the JAX reference while keeping bf16 storage benefits.
-        image_logits = self.img_logits(image_feats)
+        if self.use_bfloat16_img_head:
+            image_logits_bf16 = image_feats.to(torch.bfloat16)
+            image_logits = self.img_head(image_logits_bf16).float()
+        else:
+            image_logits = self.img_head(image_feats)
         
         return text_logits, image_logits
 
