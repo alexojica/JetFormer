@@ -26,7 +26,7 @@ model:
   bos_id: 10
   boi_id: 11
   nolabel_id: 12
-  num_mixtures: 256
+  num_mixtures: 128
   dropout: 0.1
   drop_labels_probability: 0.0
   head_dtype: 'bfloat16'
@@ -35,7 +35,7 @@ model:
   scale_tol: 1e-6
   causal_mask_on_prefix: true
   untie_output_vocab: false
-  per_modality_final_norm: false
+  per_modality_final_norm: true
   right_align_inputs: true
   strict_special_ids: true
   use_boi_token: true
@@ -82,7 +82,7 @@ schedule:
 
 # Training Curriculum
 training:
-  input_noise_std: 0.05
+  input_noise_std: 0.0
   noise_scale: 16.0
   noise_min: 0.0
   text_prefix_prob: 1.0
