@@ -63,101 +63,103 @@ def generate_text_to_image_samples_cfg(
 
     for i, prompt_text in enumerate(prompt_texts[:num_samples]):
         try:
-            # --- 1. Tokenize prompt and prepare unconditional inputs ---
+            # --- 1) Tokenize prompt and build (possibly doubled) batch ---
             if is_class_conditional and not hasattr(dataset, 'tokenize_text'):
                 max_cls = int(getattr(model, 'num_classes', 0))
                 class_id = int(i % max(1, max_cls)) if max_cls else 0
-                text_tokens = torch.full((1, 1), class_id, dtype=torch.long, device=device)
-                text_mask = torch.ones(1, 1, dtype=torch.bool, device=device)
+                base_text = torch.full((1, 1), class_id, dtype=torch.long, device=device)
+                base_mask = torch.ones(1, 1, dtype=torch.bool, device=device)
                 prompt_label = None
                 if hasattr(dataset, 'classes') and class_id < len(getattr(dataset, 'classes', [])):
                     prompt_label = dataset.classes[class_id]
                 prompt_value = prompt_label if prompt_label is not None else f'class_{class_id}'
             else:
                 tok = dataset.tokenize_text(prompt_text)
-                text_tokens = tok['tokens'].unsqueeze(0).to(device)
-                text_mask = tok['text_mask'].unsqueeze(0).to(device)
+                base_text = tok['tokens'].unsqueeze(0).to(device)
+                base_mask = tok['text_mask'].unsqueeze(0).to(device)
                 prompt_value = prompt_text
 
-            # --- 2. Prefill KV cache for conditional and unconditional passes ---
-            def get_prefix(is_unconditional):
-                drop_mask = torch.tensor([is_unconditional], device=device, dtype=torch.bool)
-                # We are always text-first for sampling
-                text_first_mask = torch.tensor([True], device=device, dtype=torch.bool)
-                
-                x, attn_mask, _, padding_mask = model.embed_sequence(
-                    text_tokens, 
-                    torch.empty(1, 0, model.image_ar_dim, device=device), # No image tokens in prefix
-                    text_first_mask, 
-                    text_mask, 
-                    drop_text_cond_mask=drop_mask,
-                    shift=False
-                )
-                
-                return x, attn_mask, padding_mask
-            
-            prefix_c, attn_mask_c, input_mask_c = get_prefix(is_unconditional=False)
-            prefix_u, attn_mask_u, input_mask_u = get_prefix(is_unconditional=True)
+            do_cfg = bool(cfg_strength) and (str(cfg_mode).lower() in {"density", "interp"})
+            if do_cfg:
+                text_tokens = torch.cat([base_text, base_text], dim=0)  # [2, T]
+                text_mask = torch.cat([base_mask, base_mask], dim=0)    # [2, T]
+                drop_prefix = torch.tensor([False, True], device=device, dtype=torch.bool)  # [2]
+            else:
+                text_tokens = base_text
+                text_mask = base_mask
+                drop_prefix = torch.tensor([False], device=device, dtype=torch.bool)
 
-            # JAX parity: cache_size = prefix_len + decode_len - 1
+            # --- 2) Prefill with a single (possibly doubled) batch ---
+            text_first_mask = torch.full((text_tokens.shape[0],), True, device=device, dtype=torch.bool)
+            empty_img = torch.empty(text_tokens.shape[0], 0, model.image_ar_dim, device=device)
+            x, attn_mask, _, input_mask = model.embed_sequence(
+                text_tokens,
+                empty_img,
+                text_first_mask,
+                text_mask,
+                drop_text_cond_mask=drop_prefix,
+                shift=False,
+            )
+
             decode_len = int(getattr(model, 'image_seq_len'))
-            cache_size = int(prefix_c.shape[1] + decode_len - 1)
+            cache_size = int(x.shape[1] + decode_len - 1)
+            last_prelogits, cache = model.prefill_cache(x, attn_mask, input_mask, cache_size=cache_size)
 
-            last_prelogits_c, cache_c = model.prefill_cache(prefix_c, attn_mask_c, input_mask_c, cache_size=cache_size)
-            last_prelogits_u, cache_u = model.prefill_cache(prefix_u, attn_mask_u, input_mask_u, cache_size=cache_size)
-
-            # --- 3. Autoregressive decoding loop ---
+            # --- 3) Autoregressive decoding loop (paired cache when do_cfg) ---
             ar_dim = getattr(model, 'image_ar_dim', model.image_token_dim)
-            image_tokens = torch.zeros(1, model.image_seq_len, ar_dim, device=device)
-            
-            current_pos = prefix_c.shape[1]
+            out_len = int(getattr(model, 'image_seq_len'))
+            image_tokens_shared = torch.zeros(1, out_len, ar_dim, device=device)
 
-            for pos in range(model.image_seq_len):
-                # Convert hidden prelogits to image head logits before building PDFs
-                def get_img_logits(prelogits):
-                    feats = prelogits
-                    if getattr(model, 'per_modality_final_norm', False):
-                        try:
-                            feats = model.img_norm(feats)
-                        except Exception:
-                            pass
-                    if getattr(model, 'use_bfloat16_img_head', False):
-                        return model.img_head(feats.to(torch.bfloat16)).float()
-                    return model.img_head(feats)
+            def img_head_logits(prelogits: torch.Tensor) -> torch.Tensor:
+                feats = prelogits
+                if getattr(model, 'per_modality_final_norm', False):
+                    try:
+                        feats = model.img_norm(feats)
+                    except Exception:
+                        pass
+                if getattr(model, 'use_bfloat16_img_head', False):
+                    return model.img_head(feats.to(torch.bfloat16)).float()
+                return model.img_head(feats)
 
-                image_logits_c = get_img_logits(last_prelogits_c)
-                image_logits_u = get_img_logits(last_prelogits_u)
+            for pos in range(out_len):
+                logits_all = img_head_logits(last_prelogits)  # [B{1 or 2}, 1, *]
 
-                if cfg_mode == "density":
-                    # Build distribution-level CFG from conditional and unconditional densities
-                    pdf_c = model.get_pdf(image_logits_c, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
-                    pdf_u = model.get_pdf(image_logits_u, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
-                    pdf = CFGDensity(pdf_c, pdf_u, w=cfg_strength)
-                    sampled_token = pdf.sample()
+                if do_cfg:
+                    # Split cond/uncond from doubled batch
+                    logits_c = logits_all[0:1]
+                    logits_u = logits_all[1:2]
+                    if str(cfg_mode).lower() == "density":
+                        pdf_c = model.get_pdf(logits_c, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
+                        pdf_u = model.get_pdf(logits_u, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
+                        guided = CFGDensity(pdf_c, pdf_u, w=float(cfg_strength))
+                        sampled_shared = guided.sample()  # [1,1,D]
+                    else:
+                        guided_logits = logits_u + float(cfg_strength) * (logits_c - logits_u)
+                        pdf = model.get_pdf(guided_logits, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
+                        sampled_shared = pdf.sample()  # [1,1,D]
+                    # Repeat to feed both sequences identically
+                    sampled_token = sampled_shared.repeat(2, 1, 1)  # [2,1,D]
                 else:
-                    # Pre-logit interpolation (legacy)
-                    guided_logits = image_logits_u + cfg_strength * (image_logits_c - image_logits_u)
-                    pdf = model.get_pdf(guided_logits, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
-                    sampled_token = pdf.sample() # Shape: [B, 1, D_ar]
-                image_tokens[:, pos, :] = sampled_token.squeeze(1)
+                    pdf = model.get_pdf(logits_all, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
+                    sampled_token = pdf.sample()  # [1,1,D]
 
-                if pos == model.image_seq_len - 1:
+                if pos < out_len:
+                    image_tokens_shared[:, pos, :] = sampled_token[0:1].squeeze(1)
+
+                if pos == out_len - 1:
                     break
 
-                # Embed the new token and extend cache for next step
                 new_token_emb = model.image_emb(sampled_token)
-                # JAX parity: let the model derive positions from cache state
-                last_prelogits_c, cache_c = model.extend_cache(new_token_emb, cache_c, position_ids=None, cache_size=cache_size)
-                last_prelogits_u, cache_u = model.extend_cache(new_token_emb, cache_u, position_ids=None, cache_size=cache_size)
+                last_prelogits, cache = model.extend_cache(new_token_emb, cache, position_ids=None, cache_size=cache_size)
 
             # --- 4. Decode final image ---
             full_dim = model.image_token_dim
             res_dim = max(0, full_dim - ar_dim)
             if res_dim > 0:
-                residual = torch.randn(1, model.image_seq_len, res_dim, device=device)
-                tokens_full = torch.cat([image_tokens, residual], dim=-1)
+                residual = torch.randn(1, out_len, res_dim, device=device)
+                tokens_full = torch.cat([image_tokens_shared, residual], dim=-1)
             else:
-                tokens_full = image_tokens
+                tokens_full = image_tokens_shared
                 
             image01_bchw = model.decode_tokens_to_image01(tokens_full)
             image01 = image01_bchw[0]
@@ -231,75 +233,75 @@ def generate_class_conditional_samples(base,
 
     for cls in safe_ids:
         try:
-            # --- 1. Tokenize prompt and prepare unconditional inputs ---
-            text_tokens = torch.full((1, 1), int(cls), dtype=torch.long, device=device)
-            text_mask = torch.ones(1, 1, dtype=torch.bool, device=device)
+            # --- 1) Build text batch (maybe doubled for CFG) ---
+            base_text = torch.full((1, 1), int(cls), dtype=torch.long, device=device)
+            base_mask = torch.ones(1, 1, dtype=torch.bool, device=device)
+            do_cfg = bool(cfg_strength) and (str(cfg_mode).lower() in {"density", "interp"})
+            if do_cfg:
+                text_tokens = torch.cat([base_text, base_text], dim=0)
+                text_mask = torch.cat([base_mask, base_mask], dim=0)
+                drop_prefix = torch.tensor([False, True], device=device, dtype=torch.bool)
+            else:
+                text_tokens = base_text
+                text_mask = base_mask
+                drop_prefix = torch.tensor([False], device=device, dtype=torch.bool)
 
-            # --- 2. Prefill KV cache for conditional and unconditional passes ---
-            def get_prefix(is_unconditional):
-                drop_mask = torch.tensor([is_unconditional], device=device, dtype=torch.bool)
-                text_first_mask = torch.tensor([True], device=device)
-                
-                x, attn_mask, _, padding_mask = base.embed_sequence(
-                    text_tokens,
-                    torch.empty(1, 0, base.image_ar_dim, device=device), # No image tokens
-                    text_first_mask,
-                    text_mask,
-                    drop_text_cond_mask=drop_mask,
-                    shift=False
-                )
-                
-                return x, attn_mask, padding_mask
+            # --- 2) Single prefill for both cond/uncond sequences ---
+            text_first_mask = torch.full((text_tokens.shape[0],), True, device=device, dtype=torch.bool)
+            empty_img = torch.empty(text_tokens.shape[0], 0, base.image_ar_dim, device=device)
+            x, attn_mask, _, input_mask = base.embed_sequence(
+                text_tokens,
+                empty_img,
+                text_first_mask,
+                text_mask,
+                drop_text_cond_mask=drop_prefix,
+                shift=False,
+            )
 
-            prefix_c, attn_mask_c, input_mask_c = get_prefix(is_unconditional=False)
-            prefix_u, attn_mask_u, input_mask_u = get_prefix(is_unconditional=True)
-
-            # JAX parity: cache_size = prefix_len + decode_len - 1
             decode_len = int(getattr(base, 'image_seq_len'))
-            cache_size = int(prefix_c.shape[1] + decode_len - 1)
+            cache_size = int(x.shape[1] + decode_len - 1)
+            last_prelogits, cache = base.prefill_cache(x, attn_mask, input_mask, cache_size=cache_size)
 
-            last_prelogits_c, cache_c = base.prefill_cache(prefix_c, attn_mask_c, input_mask_c, cache_size=cache_size)
-            last_prelogits_u, cache_u = base.prefill_cache(prefix_u, attn_mask_u, input_mask_u, cache_size=cache_size)
-            
-            # --- 3. Autoregressive decoding loop ---
+            # --- 3) Autoregressive decoding with paired cache ---
             img_tokens = torch.zeros(1, base.image_seq_len, base.image_ar_dim, device=device)
-            current_pos = prefix_c.shape[1]
+
+            def img_head_logits(prelogits: torch.Tensor) -> torch.Tensor:
+                feats = prelogits
+                if getattr(base, 'per_modality_final_norm', False):
+                    try:
+                        feats = base.img_norm(feats)
+                    except Exception:
+                        pass
+                if getattr(base, 'use_bfloat16_img_head', False):
+                    return base.img_head(feats.to(torch.bfloat16)).float()
+                return base.img_head(feats)
 
             for pos in range(base.image_seq_len):
-                # Convert hidden prelogits to image head logits before building PDFs
-                def get_img_logits(prelogits):
-                    feats = prelogits
-                    if getattr(base, 'per_modality_final_norm', False):
-                        try:
-                            feats = base.img_norm(feats)
-                        except Exception:
-                            pass
-                    if getattr(base, 'use_bfloat16_img_head', False):
-                        return base.img_head(feats.to(torch.bfloat16)).float()
-                    return base.img_head(feats)
-
-                image_logits_c = get_img_logits(last_prelogits_c)
-                image_logits_u = get_img_logits(last_prelogits_u)
-
-                if cfg_mode == "density":
-                    pdf_c = base.get_pdf(image_logits_c, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
-                    pdf_u = base.get_pdf(image_logits_u, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
-                    pdf = CFGDensity(pdf_c, pdf_u, w=cfg_strength)
+                logits_all = img_head_logits(last_prelogits)
+                if do_cfg:
+                    logits_c = logits_all[0:1]
+                    logits_u = logits_all[1:2]
+                    if str(cfg_mode).lower() == "density":
+                        pdf_c = base.get_pdf(logits_c, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
+                        pdf_u = base.get_pdf(logits_u, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
+                        guided = CFGDensity(pdf_c, pdf_u, w=float(cfg_strength))
+                        sampled_shared = guided.sample()  # [1,1,D]
+                    else:
+                        guided_logits = logits_u + float(cfg_strength) * (logits_c - logits_u)
+                        pdf = base.get_pdf(guided_logits, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
+                        sampled_shared = pdf.sample()
+                    sampled = sampled_shared.repeat(2, 1, 1)  # feed both sequences
+                else:
+                    pdf = base.get_pdf(logits_all, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
                     sampled = pdf.sample()
-                else:  # Default to "interp" mode (logit interpolation)
-                    guided_logits = image_logits_u + cfg_strength * (image_logits_c - image_logits_u)
-                    pdf = base.get_pdf(guided_logits, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
-                    sampled = pdf.sample()  # [B, 1, D_ar]
-                
-                img_tokens[:, pos] = sampled.squeeze(1)
+
+                img_tokens[:, pos] = sampled[0:1].squeeze(1)
 
                 if pos == base.image_seq_len - 1:
                     break
-                
+
                 new_token_emb = base.image_emb(sampled)
-                # JAX parity: let the model derive positions from cache state
-                last_prelogits_c, cache_c = base.extend_cache(new_token_emb, cache_c, position_ids=None, cache_size=cache_size)
-                last_prelogits_u, cache_u = base.extend_cache(new_token_emb, cache_u, position_ids=None, cache_size=cache_size)
+                last_prelogits, cache = base.extend_cache(new_token_emb, cache, position_ids=None, cache_size=cache_size)
 
             # --- 4. Decode final image ---
             res_dim = max(0, base.image_token_dim - base.image_ar_dim)

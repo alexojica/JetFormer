@@ -432,10 +432,15 @@ def compute_jetformer_pca_loss(model,
         "image_loss": image_loss,
         # BPD components
         "image_bpd_total": image_bpd_per_sample.mean().detach(),
-        "ar_bpd_component": ((gmm_nll + residual_nll) / num_subpix / ln2).mean().detach(),
-        "flow_bpd_component": ((-sum_log_det / num_subpix + ln1275) / ln2).mean().detach(),
+        # Match JAX decomposition exactly: total = ar - flow,
+        # where ar = (gmm_nll + residual_nll + noise_nll)/num_subpix/ln2
+        # and flow = (sum_log_det/num_subpix - ln(127.5))/ln2 (positive quantity)
+        "ar_bpd_component": (((gmm_nll + residual_nll + noise_nll) / num_subpix) / ln2).mean().detach(),
+        "flow_bpd_component": (((sum_log_det / num_subpix) - ln1275) / ln2).mean().detach(),
         # Sanity check metrics
         "gmm_small_scales_rate": small_scales_rate.detach(),
         "sigma_rgb": torch.as_tensor(base_sigma).detach(),
+        # Optional denominator metric for CE logging to avoid NaNs in dashboards
+        "text_ce_denom": denom_per_sample.mean().detach(),
         **diagnostics,
     }
