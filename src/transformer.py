@@ -40,35 +40,38 @@ class RotaryEncoding(nn.Module):
         return op(emb).unsqueeze(0).unsqueeze(0)
 
     def apply_rope(self, x: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
+        """Apply RoPE to queries/keys using standard rotate_half formulation.
+
+        This matches the JAX Gemma implementation where RoPE is applied as:
+            x_rot = x * cos + rotate_half(x) * sin
+        with rotate_half(x) = concat(-x[..., d/2:], x[..., :d/2]).
+        """
         head_dim = x.shape[-1]
-        
+
         # Clamp position_ids to be within the cache size for stability
         position_ids = torch.clamp(position_ids, 0, self.max_seq_len - 1)
 
-        # Get the cos and sin embeddings for the given positions
+        # Gather cos/sin for these positions and broadcast to x's shape
         cos = self.cos_cached.squeeze(0).squeeze(0)[position_ids]
         sin = self.sin_cached.squeeze(0).squeeze(0)[position_ids]
-        
+
         if position_ids.dim() == 1:
+            # [L, D] -> [1, 1, L, D]
             cos = cos.unsqueeze(0).unsqueeze(0)
             sin = sin.unsqueeze(0).unsqueeze(0)
         else:
+            # [B, L, D] -> [B, 1, L, D]
             cos = cos.unsqueeze(1)
             sin = sin.unsqueeze(1)
 
-        # Split the input tensor into two halves
+        # rotate_half(x) = [-x2, x1] where x = [x1, x2]
         x1 = x[..., : head_dim // 2]
         x2 = x[..., head_dim // 2 :]
-        
-        # Select the first half of cos and sin
-        cos_half = cos[..., : head_dim // 2]
-        sin_half = sin[..., : head_dim // 2]
+        rot = torch.cat([-x2, x1], dim=-1)
 
-        # Apply the rotation
-        rotated_x1 = x1 * cos_half - x2 * sin_half
-        rotated_x2 = x1 * sin_half + x2 * cos_half
-        
-        return torch.cat([rotated_x1, rotated_x2], dim=-1)
+        # Broadcast cos/sin if needed and apply
+        x_out = (x * cos) + (rot * sin)
+        return x_out
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, d_model, n_heads, dropout=0.1, max_seq_len=2048):

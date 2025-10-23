@@ -612,7 +612,11 @@ class JetFormer(nn.Module):
             cache_state['end'] = torch.full_like(seq_len, x_aligned.shape[1])
             # Track logical decode position (number of valid tokens); used for RoPE
             cache_state['seq_len'] = seq_len.clone()
-        return h[:, -1:, :], cache_state
+        # After right-aligning, the last sequence position is the last valid token.
+        # Match JAX: return prelogits at the final (right-aligned) position.
+        last_prelogits = h[:, -1:, :]
+
+        return last_prelogits, cache_state
 
     @torch.no_grad()
     def extend_cache(self, x_next: torch.Tensor, cache: dict, position_ids: torch.Tensor | None, cache_size: int | None = None) -> Tuple[torch.Tensor, dict]:
