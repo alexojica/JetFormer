@@ -218,8 +218,6 @@ class JetFormer(nn.Module):
             if int(self.num_vocab_repeats) != 1:
                 raise ValueError("untie_output_vocab=True requires num_vocab_repeats==1 for JAX parity")
             self.text_head = nn.Linear(d_model, vocab_size, bias=False)
-        else:
-            self.text_head = nn.Linear(d_model, vocab_size, bias=False)
         # Image head output dimension depends on multivariate setting
         if self.multivariate:
             img_out = (self.out_dim * self.out_dim) + self.out_dim
