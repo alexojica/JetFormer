@@ -28,10 +28,10 @@ model:
   nolabel_id: 12
   num_mixtures: 128
   dropout: 0.0
-  drop_labels_probability: 0.1
-  head_dtype: 'bfloat16'
+  drop_labels_probability: 0.0
+  head_dtype: 'fp32'
   remat_policy: 'nothing_saveable'
-  num_vocab_repeats: 16
+  num_vocab_repeats: 1
   scale_tol: 1e-6
   causal_mask_on_prefix: true
   untie_output_vocab: false
