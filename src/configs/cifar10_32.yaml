@@ -17,7 +17,7 @@ input:
 # Model Configuration
 model:
   width: 512
-  depth: 12
+  depth: 16
   mlp_dim: 3072
   num_heads: 8
   num_kv_heads: 1
@@ -27,14 +27,14 @@ model:
   boi_id: 11
   nolabel_id: 12
   num_mixtures: 128
-  dropout: 0.1
+  dropout: 0.01
   drop_labels_probability: 0.1
   head_dtype: 'fp32'
   remat_policy: 'nothing_saveable'
-  num_vocab_repeats: 16
+  num_vocab_repeats: 1
   scale_tol: 1e-3
   causal_mask_on_prefix: true
-  untie_output_vocab: false
+  untie_output_vocab: true
   per_modality_final_norm: false
   right_align_inputs: true
   strict_special_ids: true
