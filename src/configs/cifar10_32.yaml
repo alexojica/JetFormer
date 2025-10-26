@@ -27,12 +27,12 @@ model:
   boi_id: 11
   nolabel_id: 12
   num_mixtures: 128
-  dropout: 0.0
-  drop_labels_probability: 0.0
+  dropout: 0.1
+  drop_labels_probability: 0.1
   head_dtype: 'fp32'
   remat_policy: 'nothing_saveable'
-  num_vocab_repeats: 1
-  scale_tol: 1e-6
+  num_vocab_repeats: 16
+  scale_tol: 1e-3
   causal_mask_on_prefix: true
   untie_output_vocab: false
   per_modality_final_norm: false
@@ -57,7 +57,7 @@ patch_pca:
 use_adaptor: true
 adaptor:
   model:
-    depth: 20
+    depth: 26
     block_depth: 4
     emb_dim: 256
     num_heads: 8
@@ -77,13 +77,13 @@ optimizer:
 ema_decay: 0.999
 
 schedule:
-  warmup_percent: 0.1
+  warmup_percent: 0.05
   decay_type: 'cosine'
 
 # Training Curriculum
 training:
   input_noise_std: 0.05
-  noise_scale: 8.0
+  noise_scale: 0.0
   noise_min: 0.0
   text_prefix_prob: 1.0
   loss_on_prefix: true
