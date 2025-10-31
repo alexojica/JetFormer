@@ -16,7 +16,7 @@ input:
   dataloader_prefetch_factor: 4
   max_samples: null
   random_flip_prob: 0.5
-  class_token_length: 16
+  class_token_length: 1
 
 # Model Configuration
 model:
@@ -45,6 +45,7 @@ patch_pca:
     patch_size: 16
     codeword_dim: 128
     add_dequant_noise: true
+    noise_std: 0.0
     skip_pca: true
 
 # Adaptor/Jet
@@ -58,7 +59,6 @@ adaptor:
     ps: 1
     kinds: ["channels"]
     channels_coupling_projs: ["random"]
-    spatial_coupling_projs: ["checkerboard", "checkerboard-inv"]
   latent_noise_dim: 640
 
 # Optimizer & Schedule
@@ -80,10 +80,10 @@ training:
   noise_scale: 64.0
   noise_min: 0.0
   text_prefix_prob: 1.0
-  loss_on_prefix: true
-  stop_grad_nvp_prefix: true
+  loss_on_prefix: false
+  text_loss_weight: 1.0
+  stop_grad_nvp_prefix: false
   rgb_noise_on_image_prefix: true
-  text_loss_weight: 0.0025
   image_loss_weight: 1.0
 
 # Sampling & Evaluation
