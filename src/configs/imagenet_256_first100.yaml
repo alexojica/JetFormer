@@ -1,5 +1,5 @@
 # General
-num_epochs: 50
+num_epochs: 100
 torch_compile: false
 advanced_metrics: true
 batch_size: 56
@@ -80,10 +80,10 @@ training:
   noise_scale: 64.0
   noise_min: 0.0
   text_prefix_prob: 1.0
-  loss_on_prefix: false
+  loss_on_prefix: true
   stop_grad_nvp_prefix: true
   rgb_noise_on_image_prefix: true
-  text_loss_weight: 0.0
+  text_loss_weight: 0.0025
   image_loss_weight: 1.0
 
 # Sampling & Evaluation
