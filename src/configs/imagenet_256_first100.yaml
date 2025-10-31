@@ -16,7 +16,7 @@ input:
   dataloader_prefetch_factor: 4
   max_samples: null
   random_flip_prob: 0.5
-  class_token_length: 1
+  class_token_length: 16
 
 # Model Configuration
 model:
@@ -36,6 +36,7 @@ model:
   head_dtype: 'bfloat16'
   remat_policy: 'nothing_saveable'
   num_vocab_repeats: 16
+  scale_tol: 1e-6
 
 # Patch PCA
 patch_pca:
@@ -54,11 +55,15 @@ adaptor:
     block_depth: 4
     emb_dim: 512
     num_heads: 8
+    ps: 1
+    kinds: ["channels"]
+    channels_coupling_projs: ["random"]
+    spatial_coupling_projs: ["checkerboard", "checkerboard-inv"]
   latent_noise_dim: 640
 
 # Optimizer & Schedule
 optimizer:
-  lr: 0.0001
+  lr: 0.001
   wd: 0.0001
   b2: 0.95
   grad_clip_norm: 1.0
@@ -67,11 +72,13 @@ ema_decay: 0.0
 
 schedule:
   warmup_percent: 0.1
+  decay_type: cosine
 
 # Training Curriculum
 training:
   input_noise_std: 0.3
   noise_scale: 64.0
+  noise_min: 0.0
   text_prefix_prob: 1.0
   loss_on_prefix: false
   stop_grad_nvp_prefix: true
@@ -84,7 +91,7 @@ sampling:
   cfg_inference_weight: 3.0
   temperature: 0.94
   temperature_probs: 1.0
-  cfg_mode: "interp"
+  cfg_mode: "density"
 
 eval:
   val_every_epochs: 5
