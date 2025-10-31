@@ -95,6 +95,7 @@ sampling:
 
 eval:
   val_every_epochs: 5
+  sample_every_epochs: 5
   eval_no_rgb_noise: true
 
 # W&B
