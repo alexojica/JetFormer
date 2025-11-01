@@ -34,7 +34,7 @@ model:
   num_vocab_repeats: 1
   scale_tol: 1e-3
   causal_mask_on_prefix: true
-  untie_output_vocab: true
+  untie_output_vocab: false
   per_modality_final_norm: false
   right_align_inputs: true
   strict_special_ids: true
@@ -51,7 +51,7 @@ patch_pca:
     noise_std: 0.0
     add_dequant_noise: true
     skip_pca: true
-    whiten: true
+    whiten: false
 
 # Adaptor/Jet
 use_adaptor: true
@@ -64,6 +64,10 @@ adaptor:
     actnorm: false
     invertible_dense: false
     flow_grad_checkpoint: false
+    ps: 1
+    kinds: ["channels"]
+    channels_coupling_projs: ["random"]
+    spatial_coupling_projs: ["checkerboard", "checkerboard-inv"]
   latent_noise_dim: 0
   kind: 'jet'
 
@@ -71,6 +75,7 @@ adaptor:
 optimizer:
   lr: 0.0005
   wd: 0.0001
+  b1: 0.9
   b2: 0.95
   grad_clip_norm: 1.0
 
@@ -86,7 +91,7 @@ training:
   noise_scale: 0.0
   noise_min: 0.0
   text_prefix_prob: 1.0
-  loss_on_prefix: true
+  loss_on_prefix: false  # Only compute loss on suffix (images), not on class token prefix
   stop_grad_nvp_prefix: false
   rgb_noise_on_image_prefix: true
   text_loss_weight: 1.0
