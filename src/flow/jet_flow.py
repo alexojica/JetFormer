@@ -229,7 +229,12 @@ class ViTEncoder(nn.Module):
 
 
 class DNN(nn.Module):
-    """A DNN predictor using a ViT encoder to produce affine coupling parameters (bias, scale)."""
+    """A DNN predictor using a ViT encoder to produce affine coupling parameters (bias, scale).
+
+    Each instance owns its positional embedding tensor, sized to the per-coupling
+    token sequence length, mirroring the JAX implementation where every coupling
+    has an independent posemb parameter.
+    """
 
     def __init__(self,
                  dnn_io_dim: int,
@@ -237,6 +242,7 @@ class DNN(nn.Module):
                  num_heads: int,
                  vit_depth: int,
                  scale_factor: float,
+                 seq_len: int,
                  use_grad_checkpoint: bool = False):
         super().__init__()
         self.dnn_io_dim = dnn_io_dim
@@ -244,6 +250,7 @@ class DNN(nn.Module):
         self.num_heads = num_heads
         self.vit_depth = vit_depth
         self.scale_factor = scale_factor
+        self.seq_len = int(seq_len)
 
         self.init_proj = nn.Linear(dnn_io_dim, vit_hidden_dim)
         # JAX parity: Xavier-uniform weights and Normal(1e-6) biases
@@ -251,7 +258,9 @@ class DNN(nn.Module):
         if self.init_proj.bias is not None:
             nn.init.normal_(self.init_proj.bias, std=1e-6)
 
-        self.posemb = None
+        # Per-coupling positional embedding (1, N, D)
+        self.posemb = nn.Parameter(torch.empty(1, self.seq_len, vit_hidden_dim))
+        nn.init.normal_(self.posemb, std=1.0 / math.sqrt(vit_hidden_dim))
 
         self.vit_encoder = ViTEncoder(
             depth=vit_depth,
@@ -283,8 +292,8 @@ class DNN(nn.Module):
 
         x_proj = self.init_proj(x_in)
 
-        if self.posemb is None or self.posemb.shape[1] != N:
-            raise ValueError(f"Positional embedding is not set or has wrong length (found {self.posemb.shape} vs expected B×{N}×d).")
+        if self.posemb.shape[1] != N:
+            raise ValueError(f"DNN.posemb length mismatch: have {self.posemb.shape[1]} but input has N={N} tokens.")
         x_with_pos = x_proj + self.posemb
 
         # Residual cross-attention on context when available
@@ -438,13 +447,21 @@ class Coupling(nn.Module):
             self.invconv = Invertible1x1Conv(C)
 
         if self.backbone == 'vit':
+            # Compute transformer token length for this coupling's DNN.
+            grid_h, grid_w = (H // ps), (W // ps)
+            N_tokens = grid_h * grid_w
+            if (not kind_is_channel) and (self.masking_mode == 'pairing'):
+                dnn_seq_len = N_tokens // 2
+            else:
+                dnn_seq_len = N_tokens
             self.dnn = DNN(
                 dnn_io_dim=dnn_io_dim,
                 vit_hidden_dim=emb_dim,
                 num_heads=num_heads,
                 vit_depth=block_depth,
                 scale_factor=scale_factor,
-                use_grad_checkpoint=use_grad_checkpoint
+                seq_len=dnn_seq_len,
+                use_grad_checkpoint=use_grad_checkpoint,
             )
         elif self.backbone == 'cnn':
             # CNN backbone does not support spatial modes cleanly for pairing/masking due to token reshaping.
@@ -836,12 +853,7 @@ class FlowCore(nn.Module):
                 P_spatial = torch.zeros((N, N))
             self.spatial_proj_matrices.append(P_spatial)
 
-        # For ViT, create positional embeddings for full and half token sequences.
-        if self.backbone == 'vit':
-            self.pos_emb_full = nn.Parameter(torch.empty(1, N, emb_dim))
-            nn.init.normal_(self.pos_emb_full, std=1.0 / math.sqrt(emb_dim))
-            self.pos_emb_half = nn.Parameter(torch.empty(1, N // 2, emb_dim))
-            nn.init.normal_(self.pos_emb_half, std=1.0 / math.sqrt(emb_dim))
+        # For ViT, each coupling owns its posemb; no shared embeddings here (JAX parity).
 
         self.couplings = nn.ModuleList()
         for i in range(self.depth):
@@ -862,12 +874,6 @@ class FlowCore(nn.Module):
                 use_actnorm=actnorm,
                 use_invertible_dense=invertible_dense
             )
-            if self.backbone == 'vit':
-                # Assign appropriate positional embedding length per coupling
-                if cd == "spatial" and self.masking_mode == 'pairing':
-                    coupling.dnn.posemb = self.pos_emb_half
-                else:
-                    coupling.dnn.posemb = self.pos_emb_full
             self.couplings.append(coupling)
 
     def forward(self, x: torch.Tensor, context: torch.Tensor = None):
