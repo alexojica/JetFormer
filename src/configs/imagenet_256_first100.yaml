@@ -63,15 +63,16 @@ adaptor:
 
 # Optimizer & Schedule
 optimizer:
-  lr: 0.001
+  lr: 0.0001
   wd: 0.0001
+  b1: 0.9
   b2: 0.95
   grad_clip_norm: 1.0
 
 ema_decay: 0.0
 
 schedule:
-  warmup_percent: 0.1
+  warmup_percent: 0.23
   decay_type: cosine
 
 # Training Curriculum
