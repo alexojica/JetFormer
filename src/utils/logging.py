@@ -99,7 +99,26 @@ class WBLogger:
         if not self.enabled:
             return
         text_ce = float(out.get('text_loss', 0.0))
-        text_ppl = float(math.exp(min(30.0, text_ce))) if text_ce > 0 else 0.0
+        # Prefer a stable CE source for PPL even when text CE isn't optimized.
+        # Use prefix CE when available (common when loss_on_prefix is False),
+        # otherwise fall back to suffix CE, then to the training text loss.
+        ce_prefix = out.get('nll_text_prefix', None)
+        ce_suffix = out.get('nll_text_suffix', None)
+
+        def _ppl_from_ce(val):
+            try:
+                v = float(val)
+                if math.isfinite(v) and v > 0.0:
+                    return float(math.exp(min(30.0, v)))
+            except Exception:
+                pass
+            return 0.0
+
+        text_ppl = _ppl_from_ce(ce_prefix)
+        if text_ppl == 0.0:
+            text_ppl = _ppl_from_ce(ce_suffix)
+        if text_ppl == 0.0:
+            text_ppl = _ppl_from_ce(text_ce)
         # Resolve base module for submodule-specific grad norms (computed only when requested)
         grad_metrics = {}
         grad_hists = {}
