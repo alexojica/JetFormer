@@ -123,7 +123,24 @@ class JetFormer(nn.Module):
         self.causal_mask_on_prefix = bool(causal_mask_on_prefix)
         self.untie_output_vocab = bool(untie_output_vocab)
         self.per_modality_final_norm = bool(per_modality_final_norm)
-        self.num_vocab_repeats = int(max(1, num_vocab_repeats))
+        _num_vocab_repeats = num_vocab_repeats
+        if isinstance(_num_vocab_repeats, str):
+            try:
+                _num_vocab_repeats = int(float(_num_vocab_repeats))
+            except Exception:
+                _num_vocab_repeats = 1
+        elif isinstance(_num_vocab_repeats, float):
+            try:
+                _num_vocab_repeats = int(_num_vocab_repeats)
+            except Exception:
+                _num_vocab_repeats = 1
+        if _num_vocab_repeats is None:
+            _num_vocab_repeats = 1
+        try:
+            _num_vocab_repeats = int(_num_vocab_repeats)
+        except Exception:
+            _num_vocab_repeats = 1
+        self.num_vocab_repeats = int(max(1, _num_vocab_repeats))
         self.scale_tol = float(scale_tol)
         self.bos_id = int(bos_id) if bos_id is not None else None
         self.boi_id = int(boi_id) if boi_id is not None else None
