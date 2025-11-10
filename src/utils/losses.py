@@ -299,11 +299,23 @@ def compute_jetformer_pca_loss(model,
 
     # Per-sample text NLL for JAX parity loss composition
     # Note: num_vocab_repeats affects the model's internal vocabulary representation,
-    # but the text_logits output shape remains [B, T, V] where T is the original sequence length
+    # but the text head may expose an expanded vocabulary of size V * repeats. When repeats>1,
+    # group repeated vocabulary slices by summing their probabilities (log-sum-exp on logits)
+    # so supervision uses the original base vocabulary indices.
     tokens_for_loss = text_tokens
     mask_for_loss = text_loss_mask
     
     B_txt, T_txt, V_txt = text_logits.shape
+    repeats = int(getattr(model, 'num_vocab_repeats', 1))
+    base_vocab_size = int(getattr(model, 'vocab_size', V_txt))
+    if repeats > 1 and (base_vocab_size * repeats == V_txt):
+        # text_logits: [B, T, V_total] -> [B, T, V, repeats]
+        logits_grouped = text_logits.reshape(B_txt, T_txt, base_vocab_size, repeats)
+        # CE over base vocab by aggregating repeated copies with log-sum-exp
+        text_logits = torch.logsumexp(logits_grouped, dim=-1)
+        V_txt = base_vocab_size
+    # else: head already matches base vocab (untied head or repeats==1)
+
     ce_all = F.cross_entropy(
         text_logits.reshape(B_txt * T_txt, V_txt),
         tokens_for_loss.long().reshape(B_txt * T_txt),
