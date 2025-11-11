@@ -1,6 +1,8 @@
 import math
 from typing import Any, Dict, List
+
 import torch
+import torch.nn.functional as F
 from PIL import Image
 
 from src.utils.losses import gmm_params
@@ -12,20 +14,92 @@ from src.utils.losses import gmm_params
 class CFGDensity:
     """Distribution-level CFG wrapper for two PDFs with weight w.
 
-    This class wraps two distribution-like objects (with sample() and log_prob())
-    and exposes a guided density. For sampling, we use the conditional PDF's
-    sampler. For scoring, we interpolate log-probabilities:
-      log p_guided(x) = log p_u(x) + w * (log p_c(x) - log p_u(x)).
+    Mirrors the JAX implementation by applying rejection sampling when the PDFs
+    expose diagonal-Gaussian mixture parameters. Falls back to the plain
+    conditional sampler when mixture metadata is unavailable.
     """
 
-    def __init__(self, pdf_cond, pdf_uncond, w: float):
+    def __init__(self, pdf_cond, pdf_uncond, w: float, *, max_rejection_samples: int = 1024):
         self.pdf_c = pdf_cond
         self.pdf_u = pdf_uncond
         self.w = float(w)
+        self.max_rejection_samples = max(1, int(max_rejection_samples))
+
+        self._supports_rejection = all(
+            hasattr(pdf_cond, attr) and hasattr(pdf_uncond, attr)
+            for attr in ("mix", "mu", "sigma")
+        )
+        self._supports_rejection = self._supports_rejection and self.w != 0.0
+
+        if not self._supports_rejection:
+            return
+
+        mix_logits = self.pdf_c.mix
+        device = mix_logits.device
+        dtype = mix_logits.dtype
+        B, L, K = mix_logits.shape
+
+        if K == 1:
+            idx = torch.zeros(B, L, dtype=torch.long, device=device)
+        else:
+            cat = torch.distributions.Categorical(logits=mix_logits.view(-1, K))
+            idx = cat.sample().view(B, L)
+
+        one_hot = F.one_hot(idx, num_classes=K).to(dtype=mix_logits.dtype)
+
+        self.loc_c = torch.sum(self.pdf_c.mu * one_hot[..., None], dim=-2)
+        self.scale_c = torch.sum(self.pdf_c.sigma * one_hot[..., None], dim=-2)
+        self.loc_u = torch.sum(self.pdf_u.mu * one_hot[..., None], dim=-2)
+        self.scale_u = torch.sum(self.pdf_u.sigma * one_hot[..., None], dim=-2)
+
+        scale_tol = float(getattr(self.pdf_c, "scale_tol", 1e-6))
+        self.scale_c = self.scale_c.clamp_min(scale_tol)
+        self.scale_u = self.scale_u.clamp_min(scale_tol)
+
+        self.normal_c = torch.distributions.Normal(self.loc_c, self.scale_c)
+        self.normal_u = torch.distributions.Normal(self.loc_u, self.scale_u)
+
+        scale_simple = torch.stack([self.scale_c, self.scale_u], dim=-1).amax(dim=-1)
+        scale_simple = (scale_simple * 2.0).clamp_min(scale_tol)
+        self.normal_simple = torch.distributions.Normal(self.loc_c, scale_simple)
+
+        grid = torch.linspace(-10.0, 10.0, steps=1001, device=device, dtype=dtype)
+        view = (grid.shape[0],) + (1,) * self.loc_c.ndim
+        points = self.loc_c.unsqueeze(0) + grid.view(view)
+
+        log_ratio = self._unnormalized_logprob(points) - self.normal_simple.log_prob(points)
+        self.max_log_ratio = torch.max(log_ratio, dim=0).values
+
+    def _unnormalized_logprob(self, x: torch.Tensor) -> torch.Tensor:
+        logp_c = self.normal_c.log_prob(x)
+        logp_u = self.normal_u.log_prob(x)
+        return (1.0 + self.w) * logp_c - self.w * logp_u
+
+    def _rejection_sample(self) -> torch.Tensor:
+        samples = self.normal_simple.sample((self.max_rejection_samples,))
+        log_simple = self.normal_simple.log_prob(samples)
+        log_facq = self.max_log_ratio + log_simple
+
+        uniform = torch.rand_like(log_simple).clamp_min(1e-12)
+        log_y = torch.log(uniform) + log_facq
+        log_p = self._unnormalized_logprob(samples)
+
+        mask = log_y <= log_p
+        cmask = mask.long().cumsum(dim=0)
+        keep = mask & (cmask == 1)
+
+        kept = torch.where(keep, samples, torch.zeros_like(samples))
+        sample = kept.sum(dim=0)
+
+        accepted = mask.any(dim=0)
+        fallback = self.normal_c.sample()
+        sample = torch.where(accepted, sample, fallback)
+        return sample
 
     def sample(self):
-        # Use conditional sampler for guided sampling
-        return self.pdf_c.sample()
+        if not self._supports_rejection:
+            return self.pdf_c.sample()
+        return self._rejection_sample()
 
     def log_prob(self, x: torch.Tensor):
         logp_u = self.pdf_u.log_prob(x)
