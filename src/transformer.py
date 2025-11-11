@@ -40,11 +40,9 @@ class RotaryEncoding(nn.Module):
         return op(emb).unsqueeze(0).unsqueeze(0)
 
     def apply_rope(self, x: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
-        """Apply RoPE to queries/keys using standard rotate_half formulation.
-
-        This matches the JAX Gemma implementation where RoPE is applied as:
+        """Apply RoPE to queries/keys using the standard rotate_half formulation:
             x_rot = x * cos + rotate_half(x) * sin
-        with rotate_half(x) = concat(-x[..., d/2:], x[..., :d/2]).
+        where rotate_half(x) = concat(-x[..., d/2:], x[..., :d/2]).
         """
         head_dim = x.shape[-1]
 
@@ -123,7 +121,7 @@ class MultiQueryAttention(nn.Module):
         self.n_kv_heads = n_kv_heads
         self.d_k = d_model // n_heads
         self.pe_type = pe_type
-        # Parity knobs (JAX Gemma): optional query pre-attn scaling and softcap on logits
+        # Optional attention knobs: query pre-attn scaling and softcap on logits
         self.query_pre_attn_norm = (str(query_pre_attn_norm).lower() if query_pre_attn_norm is not None else None)
         self.attn_logits_softcap = float(attn_logits_softcap) if attn_logits_softcap is not None else None
         

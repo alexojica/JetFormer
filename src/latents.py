@@ -216,11 +216,7 @@ class PatchPCA(nn.Module):
 
         Returns shape [B, N, D], [B, N, D].
         """
-        # JAX parity: apply dequantization noise in image space before patchify.
-        # In JAX:
-        #   if self.add_dequant_noise:
-        #       x += uniform(0, 1/127.5)
-        # where x is the image in [-1,1].
+        # Optionally apply dequantization noise in image space before patchify.
         if self.add_dequant_noise:
             images_bchw = images_bchw + (torch.rand_like(images_bchw) / 127.5)
 

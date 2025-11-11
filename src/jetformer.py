@@ -48,7 +48,7 @@ class JetFormer(nn.Module):
         # Gradient checkpointing toggles
         grad_checkpoint_transformer: bool = False,
         flow_grad_checkpoint: bool = False,
-        # JAX parity flags
+        # Decoder behavior flags
         use_boi_token: bool = True,
         causal_mask_on_prefix: bool = True,
         untie_output_vocab: bool = False,
@@ -65,7 +65,7 @@ class JetFormer(nn.Module):
         multivariate_out_dim: int | None = None,
         # RoPE positions behavior
         rope_skip_pad: bool = False,
-        # Optional: enforce special token IDs (paper/JAX parity)
+        # Optional: enforce special token IDs aligned with paper defaults
         strict_special_ids: bool = False,
         # Input alignment/parity flags
         right_align_inputs: bool = False,
@@ -116,8 +116,8 @@ class JetFormer(nn.Module):
         head_dim = d_model // n_heads
         assert head_dim % 2 == 0, "Head dimension must be even for RoPE"
         
-        # JAX parity flags
-        # BOI usage is gated strictly by the presence of boi_id (parity with JAX).
+        # Decoder behavior toggles
+        # BOI usage is gated strictly by the presence of boi_id.
         # The incoming use_boi_token flag is ignored for behavior.
         self.use_boi_token = bool(use_boi_token)
         self.causal_mask_on_prefix = bool(causal_mask_on_prefix)
@@ -147,12 +147,12 @@ class JetFormer(nn.Module):
         self.nolabel_id = int(nolabel_id) if nolabel_id is not None else None
         # Enforce BOI gating solely by id presence
         self.use_boi_token = (self.boi_id is not None)
-        # Position id / alignment controls (default absolute positions; JAX uses absolute in training)
+        # Position id / alignment controls (default absolute positions)
         self.rope_skip_pad = bool(rope_skip_pad)
         self.strict_special_ids = bool(strict_special_ids)
         self.right_align_inputs = bool(right_align_inputs)  # when True, right-align tokens by input mask
         # Note: rope_skip_pad is a no-op in this implementation because positions
-        # are derived from the input mask (pads are naturally skipped), matching JAX behavior.
+        # are derived from the input mask (pads are naturally skipped).
         # BOI usage is already gated by id presence; no additional enforcement needed here
         # Fallback learned special embeddings when ids are not provided
         self._use_learned_specials = not (isinstance(self.bos_id, int) and isinstance(self.nolabel_id, int))
@@ -163,17 +163,17 @@ class JetFormer(nn.Module):
             self.boi_emb = nn.Parameter(torch.randn(1, 1, d_model) * (1.0 / math.sqrt(d_model)))
             self.nolabel_emb = nn.Parameter(torch.randn(1, 1, d_model) * (1.0 / math.sqrt(d_model)))
         
-        # Note: In the JAX implementation, the normalizing flow operates as a separate
-        # adaptor over PatchPCA latents (ps=1 over the patch grid). We do NOT
-        # instantiate a flow inside the decoder model. The adaptor is attached
-        # externally in the factory and can be accessed via `self.adaptor`.
+        # The normalizing flow operates as a separate adaptor over PatchPCA latents
+        # (ps=1 over the patch grid). We do NOT instantiate a flow inside the decoder
+        # model. The adaptor is attached externally in the factory and can be
+        # accessed via `self.adaptor`.
         
         # Multivariate head controls
         self.multivariate = bool(multivariate)
         # Default out_dim equals AR image dimension if not provided
         self.out_dim = int(multivariate_out_dim) if (multivariate_out_dim is not None) else int(image_ar_dim)
 
-        # Parity with JAX: multivariate mode requires exactly one mixture
+        # Multivariate mode requires exactly one mixture to remain well-defined
         if self.multivariate and int(self.num_mixtures) != 1:
             raise ValueError("Cannot do multivariate GMM: num_mixtures must be 1 in multivariate mode")
 
@@ -231,9 +231,9 @@ class JetFormer(nn.Module):
 
         # Text head (untied option); default is tied via embedding weight
         if bool(untie_output_vocab):
-            # JAX constraint: untied head only supported when repeats==1
+            # Untied head only supported when repeats==1 to keep projections consistent
             if int(self.num_vocab_repeats) != 1:
-                raise ValueError("untie_output_vocab=True requires num_vocab_repeats==1 for JAX parity")
+                raise ValueError("untie_output_vocab=True requires num_vocab_repeats==1 when repeats are expanded")
             self.text_head = nn.Linear(d_model, vocab_size, bias=False)
         # Image head output dimension depends on multivariate setting
         if self.multivariate:
@@ -298,8 +298,8 @@ class JetFormer(nn.Module):
                                         text_seq_len: int,
                                         image_seq_len: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Split transformer outputs into (text_first/text_second, image_first/image_second) views.
-        Mirrors JAX split logic and centralizes indexing to avoid subtle drift
-        across BOI and repeated-vocab configurations.
+        Centralizes indexing to avoid subtle drift across BOI and repeated-vocab
+        configurations.
         Returns:
             text_out_when_first, text_out_when_second, image_out_when_second, image_out_when_first
         """
@@ -310,8 +310,8 @@ class JetFormer(nn.Module):
             # Sequence layout before shift:
             #  - Text-first:  [BOS, text(T*rep), BOI, image(I)]
             #  - Image-first: [BOI, image(I), BOS, text(T*rep)]
-            # After shift we removed the last token; JAX implementation slices only
-            # the first `text_seq_len` logits for text loss calculation.
+            # After shift we removed the last token; keep only the first `text_seq_len`
+            # logits for text loss calculation.
             a_txt = x[:, :text_seq_len]
             a_img = x[:, text_len_rep + 1:]
             b_img = x[:, :image_seq_len]
@@ -327,7 +327,7 @@ class JetFormer(nn.Module):
         return a_txt, b_txt, a_img, b_img
 
     def _right_align(self, x: torch.Tensor, attn_mask_l_s: torch.Tensor, input_mask_l: torch.Tensor):
-        """Right-align tokens and masks per-sample to match JAX helper.
+        """Right-align tokens and masks per-sample.
 
         x: [B, L, D], attn_mask_l_s: [B, L, S], input_mask_l: [B, L] (bool)
         Returns aligned (x, attn_mask_l_s, input_mask_l).
@@ -402,7 +402,7 @@ class JetFormer(nn.Module):
         else:
             text_emb = self.text_emb(text_tokens)
             x_txt_m = input_mask
-        # Special tokens: prefer embedding lookup like JAX; fallback learned only if ids missing
+        # Special tokens: prefer embedding lookup when ids are provided; fall back to learned parameters otherwise
         if not self._use_learned_specials:
             bos_emb = self.lookup_token(self.bos_id, batch_size)
             boi_emb = self.lookup_token(self.boi_id if self.use_boi_token else -1, batch_size)
@@ -423,7 +423,7 @@ class JetFormer(nn.Module):
             nolabel_single = self.nolabel_emb.expand(batch_size, 1, -1)
         # Image embeddings (computed before any optional drop so we can override if needed)
         image_emb = self.image_emb(image_tokens)
-        # CFG drop parity with JAX: drop text when text-first, drop image when image-first.
+        # CFG drop: drop text when text-first, drop image when image-first.
         if drop_text_cond_mask is not None:
             drop_b = drop_text_cond_mask.view(-1).bool()  # [B]
 
@@ -439,13 +439,13 @@ class JetFormer(nn.Module):
                 else:
                     nolabel_txt = nolabel_single.expand(batch_size, text_emb.shape[1], -1)
                 text_emb = torch.where(drop_txt.view(-1, 1, 1).expand_as(text_emb), nolabel_txt, text_emb)
-                # Force text mask to full True when dropped (parity with JAX)
+                # Force text mask to full True when dropped so loss terms stay aligned
                 x_txt_m = torch.where(drop_txt.view(-1, 1), torch.ones_like(x_txt_m), x_txt_m)
 
             # Drop image embeddings when image-first
             drop_img = ((~text_first_mask) & drop_b)
             if drop_img.any():
-                # Use a single nolabel token embedding expanded across image sequence (JAX behavior)
+                # Use a single nolabel token embedding expanded across the image sequence
                 nolabel_img = nolabel_single.expand(batch_size, image_emb.shape[1], -1)
                 image_emb = torch.where(drop_img.view(-1, 1, 1).expand_as(image_emb), nolabel_img, image_emb)
 
@@ -496,13 +496,13 @@ class JetFormer(nn.Module):
         attn_mask = torch.logical_and(attn_mask, padding_mask.unsqueeze(1))  # [B,L,S]
         attn_mask = attn_mask.unsqueeze(1)  # [B,1,L,S]
 
-        # Positions derived from input mask (JAX parity): always cumsum
+        # Positions derived from input mask: always cumsum
         position_ids = torch.cumsum(padding_mask.to(torch.long), dim=1) - 1
         position_ids = torch.clamp(position_ids, min=0)
 
         # When pre-filling the decode KV cache with right-aligned sequences,
         # pass an explicit attention mask and rely on it during decode rather than
-        # is_causal. This mirrors the JAX behavior which pads attn mask to cache size.
+        # is_causal. The attention mask is padded to the cache size.
 
         return x, attn_mask, position_ids, padding_mask
     
@@ -513,7 +513,7 @@ class JetFormer(nn.Module):
         
         x, attn_mask, position_ids, padding_mask = self.embed_sequence(text_tokens, image_tokens, text_first_mask, input_mask, drop_text_cond_mask)
         
-        # Cast hidden states to embed dtype for parity with JAX decoder
+        # Cast hidden states to embed dtype for consistency with the embedding tables
         if self._embed_dtype is not None:
             try:
                 x = x.to(self._embed_dtype)
@@ -598,7 +598,7 @@ class JetFormer(nn.Module):
         else:
             position_ids = torch.arange(seq_len, device=x_aligned.device).unsqueeze(0).expand(x_aligned.size(0), -1)
 
-        # JAX parity: pad attention mask along cache (key) dimension up to cache_size
+        # Pad attention mask along cache (key) dimension up to cache_size
         # before filling the cache, so mask shape matches the target cache window.
         if attn_mask is not None and isinstance(cache_size, int) and cache_size > 0:
             pad_needed = int(cache_size) - int(attn_mask.shape[-1])
@@ -619,7 +619,7 @@ class JetFormer(nn.Module):
             # This path is for non-Gemma transformer, which doesn't have caching implemented
             h, _ = self.transformer(h, attn_mask, position_ids)
 
-        # JAX parity: track cache window and current decode position per-sample
+        # Track cache window and current decode position per-sample
         cache_state = {'kv': new_caches}
         if isinstance(cache_size, int) and cache_size > 0 and input_mask is not None:
             seq_len = torch.sum(input_mask.to(torch.long), dim=-1)
@@ -628,7 +628,7 @@ class JetFormer(nn.Module):
             # Track logical decode position (number of valid tokens); used for RoPE
             cache_state['seq_len'] = seq_len.clone()
         # After right-aligning, the last sequence position is the last valid token.
-        # Match JAX: return prelogits at the final (right-aligned) position.
+        # Return prelogits at the final (right-aligned) position.
         last_prelogits = h[:, -1:, :]
 
         return last_prelogits, cache_state
@@ -637,9 +637,9 @@ class JetFormer(nn.Module):
     def extend_cache(self, x_next: torch.Tensor, cache: dict, position_ids: torch.Tensor | None, cache_size: int | None = None) -> Tuple[torch.Tensor, dict]:
         """Extend decode cache with one token and return its prelogits.
 
-        JAX parity: derive the current position from the cached window (seq_len)
-        and ignore externally passed ``position_ids``. The caller should not
-        manage decode positions once the cache has been initialized.
+        Derive the current position from the cached window (seq_len) and ignore
+        externally passed ``position_ids``. The caller should not manage decode
+        positions once the cache has been initialized.
 
         Args:
             x_next: [B, 1, D] next-step embedding
@@ -665,7 +665,7 @@ class JetFormer(nn.Module):
                 prev_len = 0
             s_len = prev_len + 1  # include the new token
             step_mask = torch.ones((B, 1, 1, s_len), dtype=torch.bool, device=x_next.device)
-            # Explicit per-sample positions for RoPE: use current logical seq_len (JAX parity)
+            # Explicit per-sample positions for RoPE: use current logical seq_len
             if isinstance(cache, dict) and 'seq_len' in cache:
                 step_positions = cache['seq_len'].view(B, 1).to(dtype=torch.long, device=x_next.device)
             elif isinstance(cache, dict) and 'end' in cache:
@@ -699,7 +699,7 @@ class JetFormer(nn.Module):
 
         return h[:, -1:, :], new_cache_state
         
-    # ==== JAX-parity APIs for sampling distribution ====
+    # ==== Sampling distribution helper APIs ====
     @torch.no_grad()
     def get_pmf(self, logits: torch.Tensor) -> torch.distributions.Categorical:
         """Return categorical over vocabulary for text logits."""
@@ -805,7 +805,7 @@ class JetFormer(nn.Module):
 
         text_seq_len = text_tokens.shape[1]
         image_seq_len = image_tokens.shape[1]
-        # Match JAX split logic, including support for repeated vocab segments.
+        # Maintain split logic that supports repeated vocab segments.
         repeats = int(self.num_vocab_repeats)
         if self.use_boi_token:
             # [BOS, text(repeats*L_txt), BOI, image(L_img)] when text-first (image second)
@@ -822,16 +822,16 @@ class JetFormer(nn.Module):
             image_out_when_second,
             image_out_when_first
         )
-        # JAX parity: return prelogits-equivalent for image positions.
-        # When per-modality norms are enabled, the modality-specific norm is
-        # applied only at logits computation time, not here.
+        # Return prelogits-equivalent features for image positions. When
+        # per-modality norms are enabled, the modality-specific norm is applied
+        # only at logits computation time, not here.
         return image_hidden
 
     @torch.no_grad()
     def sample_from_hidden_mixture_first(self, hidden_pos: torch.Tensor) -> torch.Tensor:
         """Mixture-first sampling via GMM params. hidden_pos: [B,1,D] -> [B,1,image_ar_dim]."""
         # Compute logits for this single position
-        # JAX parity: apply per-modality final norm before logits when enabled
+        # Apply per-modality final norm before logits when enabled
         feats = hidden_pos
         if self.per_modality_final_norm:
             feats = self.img_norm(feats)

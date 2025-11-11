@@ -50,7 +50,7 @@ def _deep_update(d: dict, u: Mapping) -> dict:
     return d
 
 def get_default_config() -> dict:
-    """Provides a default configuration inspired by the JAX implementation."""
+    """Provides a default configuration aligned with the paper's reference setup."""
     # Defaults primarily based on the 350M model configuration for ImageNet 256.
     return {
         'num_epochs': 100,
@@ -129,15 +129,15 @@ def get_default_config() -> dict:
             'decay_type': 'cosine',
         },
         'training': {
-            # JAX defaults
+            # Default training hyperparameters
             'input_noise_std': 0.0,
             'noise_scale': 0.0,
             'noise_min': 0.0,
             'text_prefix_prob': 0.5,
             'loss_on_prefix': True,
-            'stop_grad_nvp_prefix': False,  # JAX default
+            'stop_grad_nvp_prefix': False,  # default behaviour
             'rgb_noise_on_image_prefix': True,
-            'text_loss_weight': 1.0, # JAX default; configs may override per task
+            'text_loss_weight': 1.0, # configs may override per task
         },
         'sampling': {
             'cfg_inference_weight': 3.0,

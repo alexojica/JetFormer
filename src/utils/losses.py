@@ -185,7 +185,7 @@ def compute_jetformer_pca_loss(model,
       image_bpd = ((nll_image_tokens + noise_nll)/num_subpix - (sum_log_det/num_subpix - ln(127.5))) / ln(2)
 
     Notes:
-      - Images are treated in 8-bit space with optional Gaussian noise schedule (JAX parity).
+      - Images are treated in 8-bit space with optional Gaussian noise schedule.
       - Optional extra Gaussian latent dims are accounted for via noise_nll.
     """
     device = next(model.parameters()).device
@@ -197,7 +197,7 @@ def compute_jetformer_pca_loss(model,
     Bsz = B
     text_first_mask = torch.bernoulli(torch.full((Bsz,), float(text_first_prob), device=device)).bool()
 
-    # JAX-like RGB noise schedule in 8-bit space (cosine schedule)
+    # RGB noise schedule in 8-bit space (cosine schedule)
     images_f = images.float()
     
     base_sigma = 0.0
@@ -216,8 +216,8 @@ def compute_jetformer_pca_loss(model,
             sigma = torch.where(text_first_mask, sigma, torch.zeros_like(sigma))
         sigma = sigma.view(Bsz, 1, 1, 1)  # [B,1,1,1]
         # images are uint8 CHW; images_f is float [0,255]
-        # JAX path: image [-1,1] -> r [0,255] -> noisy [0,255] -> x11 [-1,1] -> patch_pca.encode.
-        # PyTorch images are uint8 [0,255], so images_f is float [0,255].
+        # Map [-1,1] targets through uint8 space, add noise, then return to [-1,1]
+        # before feeding PatchPCA.
         r = images_f
         noisy = r + sigma * torch.randn_like(r)
         noisy = torch.round(noisy)
@@ -270,7 +270,7 @@ def compute_jetformer_pca_loss(model,
     # Teacher forcing: AR input tokens
     img_in = hat_tokens
 
-    # Stop gradients to NVP/adaptor when image is used as prefix (JAX parity)
+    # Stop gradients to NVP/adaptor when image is used as prefix
     if stop_grad_nvp_prefix:
         img_in = torch.where(
             text_first_mask.view(-1, 1, 1),
@@ -278,14 +278,14 @@ def compute_jetformer_pca_loss(model,
             img_in.detach()
         )
 
-    # Optional AR input noise when text is first - sample std uniformly at random per example (JAX parity)
+    # Optional AR input noise when text is first - sample std uniformly at random per example
     if float(input_noise_std) > 0.0:
         sampled_input_noise_std = torch.rand(B, 1, 1, device=device) * float(input_noise_std)
         sampled_input_noise_std = torch.where(
             text_first_mask.view(-1, 1, 1), sampled_input_noise_std, torch.zeros_like(sampled_input_noise_std))
         img_in = img_in + (sampled_input_noise_std * torch.randn_like(img_in))
 
-    # CFG drop: gate mask to text-first only (parity with JAX trainer)
+    # CFG drop: gate mask to text-first only
     drop_mask = (torch.rand(B, device=device) < float(cfg_drop_prob))
     drop_prefix = (drop_mask & text_first_mask)
 
@@ -297,7 +297,7 @@ def compute_jetformer_pca_loss(model,
 
     # --- Text and Image Loss Calculation ---
 
-    # Per-sample text NLL for JAX parity loss composition
+    # Per-sample text NLL for the loss composition
     # Note: num_vocab_repeats affects the model's internal vocabulary representation,
     # but the text head may expose an expanded vocabulary of size V * repeats. When repeats>1,
     # group repeated vocabulary slices by summing their probabilities (log-sum-exp on logits)
@@ -337,7 +337,7 @@ def compute_jetformer_pca_loss(model,
     N = gmm_nll_flat.shape[0] // B
     gmm_nll = gmm_nll_flat.view(B, N).sum(dim=1)
 
-    # JAX parity: do NOT add an auxiliary NLL term for residual latents.
+    # Do NOT add an auxiliary NLL term for residual latents.
     # Only the explicitly appended `latent_noise_dim` contributes via noise_nll.
     residual_nll = torch.zeros(B, device=device, dtype=y.dtype)
 
@@ -364,7 +364,7 @@ def compute_jetformer_pca_loss(model,
         
         final_loss = image_loss + text_loss * float(text_loss_weight)
     else:
-        # Per-example loss selection (JAX parity)
+        # Per-example loss selection
         example_loss = torch.where(
             ~text_first_mask,
             nll_txt_per_sample * float(text_loss_weight),
@@ -444,7 +444,7 @@ def compute_jetformer_pca_loss(model,
         "image_loss": image_loss,
         # BPD components
         "image_bpd_total": image_bpd_per_sample.mean().detach(),
-        # Match JAX decomposition exactly: total = ar - flow,
+        # Decompose total BPD as: total = ar - flow,
         # where ar = (gmm_nll + residual_nll + noise_nll)/num_subpix/ln2
         # and flow = (sum_log_det/num_subpix - ln(127.5))/ln2 (positive quantity)
         "ar_bpd_component": (((gmm_nll + residual_nll + noise_nll) / num_subpix) / ln2).mean().detach(),

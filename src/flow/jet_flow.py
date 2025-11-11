@@ -140,7 +140,7 @@ class MlpBlock(nn.Module):
         super().__init__()
         self.mlp_dim = mlp_dim or 4 * in_dim
         self.fc1 = nn.Linear(in_dim, self.mlp_dim)
-        # JAX parity: Xavier-uniform weights and Normal(1e-6) biases
+        # Initialize with Xavier-uniform weights and Normal(1e-6) biases
         nn.init.xavier_uniform_(self.fc1.weight)
         if self.fc1.bias is not None:
             nn.init.normal_(self.fc1.bias, std=1e-6)
@@ -151,7 +151,7 @@ class MlpBlock(nn.Module):
         else:
             raise ValueError(f"Unsupported activation: {activation}")
         self.fc2 = nn.Linear(self.mlp_dim, in_dim)
-        # JAX parity: Xavier-uniform weights and Normal(1e-6) biases
+        # Initialize with Xavier-uniform weights and Normal(1e-6) biases
         nn.init.xavier_uniform_(self.fc2.weight)
         if self.fc2.bias is not None:
             nn.init.normal_(self.fc2.bias, std=1e-6)
@@ -170,7 +170,7 @@ class ViTEncoderBlock(nn.Module):
         super().__init__()
         self.norm1 = nn.LayerNorm(emb_dim)
         self.attn = nn.MultiheadAttention(embed_dim=emb_dim, num_heads=num_heads, dropout=dropout, batch_first=True)
-        # JAX parity: Xavier-uniform weights and Normal(1e-6) biases for attention projections
+        # Initialize attention projections with Xavier-uniform weights and Normal(1e-6) biases
         if hasattr(self.attn, 'in_proj_weight') and self.attn.in_proj_weight is not None:
             nn.init.xavier_uniform_(self.attn.in_proj_weight)
         if hasattr(self.attn, 'in_proj_bias') and self.attn.in_proj_bias is not None:
@@ -232,8 +232,7 @@ class DNN(nn.Module):
     """A DNN predictor using a ViT encoder to produce affine coupling parameters (bias, scale).
 
     Each instance owns its positional embedding tensor, sized to the per-coupling
-    token sequence length, mirroring the JAX implementation where every coupling
-    has an independent posemb parameter.
+    token sequence length, ensuring every coupling has an independent posemb parameter.
     """
 
     def __init__(self,
@@ -253,7 +252,7 @@ class DNN(nn.Module):
         self.seq_len = int(seq_len)
 
         self.init_proj = nn.Linear(dnn_io_dim, vit_hidden_dim)
-        # JAX parity: Xavier-uniform weights and Normal(1e-6) biases
+        # Initialize with Xavier-uniform weights and Normal(1e-6) biases
         nn.init.xavier_uniform_(self.init_proj.weight)
         if self.init_proj.bias is not None:
             nn.init.normal_(self.init_proj.bias, std=1e-6)
@@ -269,14 +268,14 @@ class DNN(nn.Module):
             use_grad_checkpoint=use_grad_checkpoint
         )
 
-        # Optional cross-attention on context to match JAX DNN behavior when provided
+        # Optional cross-attention on context so each DNN can condition on external signals
         self.cross_attn = nn.MultiheadAttention(
             embed_dim=vit_hidden_dim,
             num_heads=num_heads,
             dropout=0.0,
             batch_first=True,
         )
-        # Zero-init output of cross attention as in JAX (out_kernel_init=zeros)
+        # Zero-init output of cross attention (out_kernel_init=zeros)
         nn.init.zeros_(self.cross_attn.out_proj.weight)
         if self.cross_attn.out_proj.bias is not None:
             nn.init.zeros_(self.cross_attn.out_proj.bias)
@@ -311,7 +310,7 @@ class DNN(nn.Module):
         bias, raw_scale = torch.chunk(bias_scale, 2, dim=-1)
 
         # --- Numerical stability guard ---
-        # --- JAX parity for numerical stability ---
+        # --- Numerical stability ---
         scale = torch.sigmoid(raw_scale) * self.scale_factor
 
         # log|det| contribution per element
@@ -335,7 +334,7 @@ def get_spatial_coupling_masks_torch(depth, num_tokens, proj_kinds, grid_h, grid
         if kind.startswith("checkerboard"):
             if n % 2 != 0:
                 raise ValueError("checkerboard requires an even number of tokens.")
-            # Row-aware parity like JAX: alternate by row and column.
+            # Alternate by row and column to build a checkerboard partition.
             vals = torch.arange(n, device=device).view(grid_h, grid_w) + torch.arange(grid_h, device=device).view(grid_h, 1)
             vals = vals.flatten()
             mask_even = (vals % 2) == 0
@@ -550,7 +549,7 @@ class Coupling(nn.Module):
                 x2_prime = (x2 + bias) * scale
                 x_unproj = torch.cat([x1, x2_prime], dim=-1) # Re-merge channels
 
-            else: # Spatial masking with einops-style rearrange to match JAX
+            else: # Spatial masking with einops-style rearrange
                 # This mode is only supported for ViT, checked in __init__
                 
                 # Project, then split tokens into two halves for processing
@@ -558,9 +557,9 @@ class Coupling(nn.Module):
                     P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
                     x_proj = torch.einsum("b n c, n m -> b m c", x_patched, P_spatial)
                 
-                # Depth-to-space: reshape to introduce a new sequence dimension for spatial ops
-                # The goal is to match JAX's `einops.rearrange(a, "... n (s c) -> ... (n s) c", s=2)`
-                # which effectively halves the channel dim and doubles the sequence length.
+                # Depth-to-space: reshape to introduce a new sequence dimension for spatial ops.
+                # This mirrors `einops.rearrange(a, "... n (s c) -> ... (n s) c", s=2)`,
+                # halving the channel dim and doubling the sequence length.
                 B, N, C_patched = x_proj.shape
                 x_rearranged = x_proj.view(B, N, 2, C_patched // 2).transpose(1, 2).reshape(B, N * 2, C_patched // 2)
 
@@ -668,7 +667,7 @@ class Coupling(nn.Module):
                 x2 = (y2 / scale) - bias
                 x_unproj = torch.cat([y1, x2], dim=-1)
 
-            else: # Spatial masking with einops-style rearrange to match JAX
+            else: # Spatial masking with einops-style rearrange
                 with _NoAmpAutocast():
                     P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
                     y_proj = torch.einsum("b n c, n m -> b m c", x_patched, P_spatial)
@@ -784,7 +783,7 @@ class FlowCore(nn.Module):
             kinds_sequence = [str(k).lower() for k in kinds]
             if any(k not in {"channels", "spatial"} for k in kinds_sequence):
                 raise ValueError(f"Unsupported coupling kind in {kinds_sequence}; expected 'channels' or 'spatial'.")
-            # Cycle or truncate to match depth like JAX
+            # Cycle or truncate the pattern to match the required depth
             if len(kinds_sequence) < depth:
                 import itertools as _it
                 kinds_sequence = list(_it.islice(_it.cycle(kinds_sequence), depth))
@@ -795,7 +794,7 @@ class FlowCore(nn.Module):
             if channel_repeat == -1:
                 kinds_sequence = ["spatial"] * depth
             elif channel_repeat == 0:
-                # Default mixed coupling pattern matching JAX Jet defaults:
+                # Default mixed coupling pattern:
                 # ("channels", "channels", "spatial") repeated across depth.
                 pattern = ["channels", "channels", "spatial"]
                 while len(kinds_sequence) < depth:
@@ -853,7 +852,7 @@ class FlowCore(nn.Module):
                 P_spatial = torch.zeros((N, N))
             self.spatial_proj_matrices.append(P_spatial)
 
-        # For ViT, each coupling owns its posemb; no shared embeddings here (JAX parity).
+        # For ViT, each coupling owns its posemb; no shared embeddings here.
 
         self.couplings = nn.ModuleList()
         for i in range(self.depth):

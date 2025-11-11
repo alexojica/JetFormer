@@ -14,9 +14,8 @@ from src.utils.losses import gmm_params
 class CFGDensity:
     """Distribution-level CFG wrapper for two PDFs with weight w.
 
-    Mirrors the JAX implementation by applying rejection sampling when the PDFs
-    expose diagonal-Gaussian mixture parameters. Falls back to the plain
-    conditional sampler when mixture metadata is unavailable.
+    Uses rejection sampling when the PDFs expose diagonal-Gaussian mixture
+    parameters and falls back to the plain conditional sampler otherwise.
     """
 
     def __init__(self, pdf_cond, pdf_uncond, w: float, *, max_rejection_samples: int = 1024):
