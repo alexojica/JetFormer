@@ -261,26 +261,3 @@ class GemmaBlock(nn.Module):
         x = x + self.dropout(ff_out)
 
         return x, new_cache
-
-class GemmaTransformer(nn.Module):
-    def __init__(self, d_model, n_heads, n_kv_heads, n_layers, d_ff, dropout=0.1, max_seq_len=2048, pe_type="rope", activation="gelu", vocab_size=32000, attn_logits_softcap: float | None = None):
-        super().__init__()
-        self.d_model = d_model
-        self.vocab_size = vocab_size
-        
-        self.embedding = nn.Embedding(vocab_size, d_model)
-        torch.nn.init.normal_(self.embedding.weight, mean=0.0, std=1.0)
-        
-        self.layers = nn.ModuleList([
-            GemmaBlock(d_model, n_heads, n_kv_heads, d_ff, dropout, max_seq_len, pe_type, activation, attn_logits_softcap=attn_logits_softcap) 
-            for _ in range(n_layers)
-        ])
-        self.norm = nn.RMSNorm(d_model, eps=1e-6)
-        self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
-        
-    def forward(self, x, mask=None, position_ids=None):
-        x = self.embedding(x)
-        for layer in self.layers:
-            x = layer(x, mask, position_ids)
-        x = self.norm(x)
-        return self.lm_head(x)
