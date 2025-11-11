@@ -230,7 +230,7 @@ class TinyStoriesDataset(Dataset):
             if getattr(self, 'ignore_pad', False):
                 text_loss.extend([0] * padding_len)
             else:
-                text_loss.extend([0] * padding_len)
+                text_loss.extend([1] * padding_len)
         
         return {
             'tokens': torch.tensor(tokens, dtype=torch.long),
