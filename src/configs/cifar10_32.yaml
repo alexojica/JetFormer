@@ -29,7 +29,7 @@ model:
   num_mixtures: 128
   dropout: 0.1
   drop_labels_probability: 0.1
-  head_dtype: 'fp32'
+  head_dtype: 'bf16'
   remat_policy: 'nothing_saveable'
   num_vocab_repeats: 4
   scale_tol: 1e-3
@@ -46,8 +46,8 @@ model:
 patch_pca:
   model:
     depth_to_seq: 1
-    patch_size: 4
-    codeword_dim: 48
+    patch_size: 2
+    codeword_dim: 12
     noise_std: 0.0
     add_dequant_noise: true
     skip_pca: true
@@ -118,7 +118,7 @@ wandb:
   offline: false
   project: "jetformer-cifar10-32"
   run_name: "CIFAR10-32-p4-AR512x12"
-  tags: ["cifar10", "32x32", "p4", "small"]
+  tags: ["cifar10", "32x32", "p2", "small"]
 
 # Accelerator
 accelerator:
