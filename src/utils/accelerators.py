@@ -256,8 +256,20 @@ class TPUAccelerator:
     def build_samplers(self, train_dataset, val_dataset):
         from torch.utils.data.distributed import DistributedSampler
         if self.ddp_enabled:
-            train_sampler = DistributedSampler(train_dataset, num_replicas=self.world_size, rank=self.rank, shuffle=True)
-            val_sampler = DistributedSampler(val_dataset, num_replicas=self.world_size, rank=self.rank, shuffle=False) if val_dataset is not None else None
+            train_sampler = DistributedSampler(
+                train_dataset,
+                num_replicas=self.world_size,
+                rank=self.rank,
+                shuffle=True,
+                drop_last=True,
+            )
+            val_sampler = DistributedSampler(
+                val_dataset,
+                num_replicas=self.world_size,
+                rank=self.rank,
+                shuffle=False,
+                drop_last=False,
+            ) if val_dataset is not None else None
         else:
             train_sampler = None
             val_sampler = None
