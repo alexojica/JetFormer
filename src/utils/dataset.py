@@ -894,13 +894,15 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
     train_sampler, val_sampler = accelerator.build_samplers(dataset, val_dataset)
     pin_mem = True if accelerator.device.type == 'cuda' else False
 
+    prefetch_factor = int(getattr(input_cfg, 'dataloader_prefetch_factor', 2))
+
     dataloader = DataLoader(
         dataset,
         batch_size=config.batch_size,
         shuffle=(train_sampler is None),
         sampler=train_sampler,
         num_workers=int(getattr(input_cfg, 'num_workers')),
-        prefetch_factor=4,
+        prefetch_factor=prefetch_factor,
         persistent_workers=True,
         drop_last=True,
         pin_memory=pin_mem
@@ -912,7 +914,7 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
         shuffle=False,
         sampler=val_sampler,
         num_workers=int(getattr(input_cfg, 'num_workers')),
-        prefetch_factor=4,
+        prefetch_factor=prefetch_factor,
         persistent_workers=True,
         drop_last=False,
         pin_memory=pin_mem
