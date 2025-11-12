@@ -1,0 +1,102 @@
+# General
+num_epochs: 100
+torch_compile: false
+advanced_metrics: true
+batch_size: 2048
+grad_accum_steps: 1
+
+# Input/Dataset
+input:
+  dataset: imagenet1k_hf
+  hf_safe_image_decode: true
+  input_size: [256, 256]
+  num_classes: 1000
+  num_workers: 16
+  max_samples: null
+  random_flip_prob: 0.5
+  class_token_length: 1
+
+# Model Configuration
+model:
+  width: 1024
+  depth: 24
+  mlp_dim: 4096
+  num_heads: 16
+  num_kv_heads: 1
+  head_dim: 64
+  vocab_size: 1003
+  bos_id: 1000
+  boi_id: 1001
+  nolabel_id: 1002
+  num_mixtures: 1024
+  dropout: 0.1
+  drop_labels_probability: 0.1
+  head_dtype: 'bfloat16'
+  remat_policy: 'nothing_saveable'
+  num_vocab_repeats: 16
+
+# Patch PCA
+patch_pca:
+  model:
+    depth_to_seq: 1
+    patch_size: 16
+    codeword_dim: 128
+    add_dequant_noise: true
+    skip_pca: true
+
+# Adaptor/Jet
+use_adaptor: true
+adaptor:
+  model:
+    depth: 32
+    block_depth: 4
+    emb_dim: 512
+    num_heads: 8
+  latent_noise_dim: 640
+
+# Optimizer & Schedule
+optimizer:
+  lr: 0.001
+  wd: 0.0001
+  b2: 0.95
+  grad_clip_norm: 1.0
+
+ema_decay: 0.0
+
+schedule:
+  warmup_percent: 0.1
+
+# Training Curriculum
+training:
+  input_noise_std: 0.3
+  noise_scale: 64.0
+  text_prefix_prob: 1.0
+  loss_on_prefix: false
+  stop_grad_nvp_prefix: true
+  rgb_noise_on_image_prefix: true
+  text_loss_weight: 0.0
+  image_loss_weight: 1.0
+
+# Sampling & Evaluation
+sampling:
+  cfg_inference_weight: 3.0
+  temperature: 0.94
+  temperature_probs: 1.0
+  cfg_mode: "interp"
+
+eval:
+  val_every_epochs: 5
+  eval_no_rgb_noise: true
+
+# W&B
+wandb:
+  enabled: true
+  project: "jetformer-imagenet-256"
+  run_name: "B-256"
+  tags: ["imagenet", "256x256", "B"]
+
+# Accelerator
+accelerator:
+  precision: bf16
+
+

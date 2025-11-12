@@ -3,11 +3,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import itertools
-import einops
 import math
 from typing import Sequence, Tuple, Optional, Callable
 import torch.utils.checkpoint as checkpoint
-from .nn_modules import ActNorm, Invertible1x1Conv
+from src.utils.losses import bits_per_dim_flow
+from src.transformer import GatedMLP
+from src.utils.logging import get_logger
+
+_logger = get_logger(__name__)
 
 
 def xavier_uniform_init(tensor):
@@ -24,29 +27,142 @@ def zeros_init(tensor):
     """Initializes a tensor with zeros."""
     nn.init.zeros_(tensor)
 
+class ActNorm(nn.Module):
+    """An activation normalization layer that normalizes inputs using data-dependent initialization of scale and bias."""
+    def __init__(self, num_features: int, eps: float = 1e-6):
+        super().__init__()
+        self.num_features = num_features
+        self.eps = eps
+        self.log_scale = nn.Parameter(torch.zeros(1, 1, 1, num_features), requires_grad=True)
+        self.bias = nn.Parameter(torch.zeros(1, 1, 1, num_features), requires_grad=True)
+        self.initialized = False
+
+    def _initialize(self, x: torch.Tensor):
+        """Initializes scale and bias based on the first batch of data.
+
+        Note: Must be called during training via `initialize_with_batch` before
+        evaluation, otherwise running eval() first will skip initialization.
+        """
+        if self.initialized:
+            return
+        
+        with torch.no_grad():
+            # (B, H, W, C) -> mean/std over B, H, W
+            mean = torch.mean(x, dim=(0, 1, 2))
+            std = torch.std(x, dim=(0, 1, 2))
+            
+            self.log_scale.data.copy_(-torch.log(std + self.eps))
+            self.bias.data.copy_(-mean)
+            self.initialized = True
+            _logger.info(f"ActNorm initialized for {self.num_features} features.")
+
+    def forward(self, x: torch.Tensor):
+        """Applies activation normalization and returns the transformed output and log-determinant."""
+        if not self.initialized:
+            self._initialize(x)
+
+        z = (x + self.bias) * torch.exp(self.log_scale)
+        
+        B, H, W, C = x.shape
+        logdet = H * W * torch.sum(self.log_scale)
+        
+        return z, logdet.expand(B).clone()
+
+    def inverse(self, z: torch.Tensor):
+        """Applies the inverse of activation normalization."""
+        x = z * torch.exp(-self.log_scale) - self.bias
+        
+        B, H, W, C = z.shape
+        inv_logdet = -H * W * torch.sum(self.log_scale)
+
+        return x, inv_logdet.expand(B).clone()
+
+
+class Invertible1x1Conv(nn.Module):
+    """An invertible 1x1 convolution layer using LU decomposition for efficient determinant calculation."""
+    def __init__(self, num_channels: int):
+        super().__init__()
+        self.num_channels = num_channels
+
+        # Initialize with a random orthogonal matrix, then LU-decompose
+        W, _ = torch.linalg.qr(torch.randn(num_channels, num_channels))
+        P, L, U = torch.linalg.lu(W)
+
+        self.register_buffer('P', P)
+        self.L = nn.Parameter(L)
+        self.U = nn.Parameter(U)
+
+        # Masks must follow device/dtype of parameters
+        self.register_buffer('L_mask', torch.tril(torch.ones_like(self.L), diagonal=-1), persistent=False)
+        self.register_buffer('U_mask', torch.triu(torch.ones_like(self.U), diagonal=0), persistent=False)
+
+    def _get_weight(self):
+        """Computes the convolutional weight matrix from its LU decomposition."""
+        eye = torch.eye(self.num_channels, device=self.L.device, dtype=self.L.dtype)
+        L = self.L * self.L_mask + eye
+        U = self.U * self.U_mask
+        W = self.P @ L @ U
+        return W.view(self.num_channels, self.num_channels, 1, 1)
+
+    def forward(self, x: torch.Tensor):
+        """Applies the 1x1 convolution and returns the output and log-determinant."""
+        B, Hs, Ws, C = x.shape
+        Wmat = self._get_weight()
+
+        # permute to (B, C, H, W) for conv2d
+        x_perm = x.permute(0, 3, 1, 2)
+        z_perm = F.conv2d(x_perm, Wmat)
+        z = z_perm.permute(0, 2, 3, 1)
+
+        # log|det(W)| per spatial location times H*W
+        logdet_W = torch.sum(torch.log(torch.abs(torch.diagonal(self.U))))
+        logdet = Hs * Ws * logdet_W
+        return z, logdet.expand(B).clone()
+
+    def inverse(self, z: torch.Tensor):
+        """Applies the inverse 1x1 convolution."""
+        B, Hs, Ws, C = z.shape
+        Wmat = self._get_weight()
+        W_inv = torch.inverse(Wmat.squeeze()).view(self.num_channels, self.num_channels, 1, 1)
+
+        z_perm = z.permute(0, 3, 1, 2)
+        x_perm = F.conv2d(z_perm, W_inv)
+        x = x_perm.permute(0, 2, 3, 1)
+
+        logdet_W = torch.sum(torch.log(torch.abs(torch.diagonal(self.U))))
+        inv_logdet = -Hs * Ws * logdet_W
+        return x, inv_logdet.expand(B).clone()
+
+
 class MlpBlock(nn.Module):
-    """A standard Transformer MLP block with two linear layers, GELU activation, and dropout."""
-    def __init__(self, in_dim, mlp_dim=None, dropout=0.0):
+    """A standard ViT-style MLP block."""
+    def __init__(self, in_dim, mlp_dim=None, dropout=0.0, activation="gelu"):
         super().__init__()
         self.mlp_dim = mlp_dim or 4 * in_dim
         self.fc1 = nn.Linear(in_dim, self.mlp_dim)
-        self.gelu = nn.GELU()
-        self.dropout1 = nn.Dropout(dropout)
+        # Initialize with Xavier-uniform weights and Normal(1e-6) biases
+        nn.init.xavier_uniform_(self.fc1.weight)
+        if self.fc1.bias is not None:
+            nn.init.normal_(self.fc1.bias, std=1e-6)
+        if activation == "gelu":
+            self.activation_fn = nn.GELU()
+        elif activation == "silu":
+            self.activation_fn = nn.SiLU()
+        else:
+            raise ValueError(f"Unsupported activation: {activation}")
         self.fc2 = nn.Linear(self.mlp_dim, in_dim)
-        self.dropout2 = nn.Dropout(dropout)
-
-        xavier_uniform_init(self.fc1.weight)
-        normal_init(1e-6)(self.fc1.bias)
-        xavier_uniform_init(self.fc2.weight)
-        normal_init(1e-6)(self.fc2.bias)
+        # Initialize with Xavier-uniform weights and Normal(1e-6) biases
+        nn.init.xavier_uniform_(self.fc2.weight)
+        if self.fc2.bias is not None:
+            nn.init.normal_(self.fc2.bias, std=1e-6)
+        self.dropout = nn.Dropout(dropout)
         
     def forward(self, x):
         x = self.fc1(x)
-        x = self.gelu(x)
-        x = self.dropout1(x)
+        x = self.activation_fn(x)
         x = self.fc2(x)
-        x = self.dropout2(x)
-        return x
+        return self.dropout(x)
+
 
 class ViTEncoderBlock(nn.Module):
     """A single Transformer encoder block with Multi-Head Self-Attention and an MLP block."""
@@ -54,10 +170,19 @@ class ViTEncoderBlock(nn.Module):
         super().__init__()
         self.norm1 = nn.LayerNorm(emb_dim)
         self.attn = nn.MultiheadAttention(embed_dim=emb_dim, num_heads=num_heads, dropout=dropout, batch_first=True)
+        # Initialize attention projections with Xavier-uniform weights and Normal(1e-6) biases
+        if hasattr(self.attn, 'in_proj_weight') and self.attn.in_proj_weight is not None:
+            nn.init.xavier_uniform_(self.attn.in_proj_weight)
+        if hasattr(self.attn, 'in_proj_bias') and self.attn.in_proj_bias is not None:
+            nn.init.normal_(self.attn.in_proj_bias, std=1e-6)
+        if hasattr(self.attn, 'out_proj') and self.attn.out_proj is not None:
+            nn.init.xavier_uniform_(self.attn.out_proj.weight)
+            if self.attn.out_proj.bias is not None:
+                nn.init.normal_(self.attn.out_proj.bias, std=1e-6)
         self.dropout_attn = nn.Dropout(dropout)
 
         self.norm2 = nn.LayerNorm(emb_dim)
-        self.mlp = MlpBlock(in_dim=emb_dim, mlp_dim=mlp_dim, dropout=dropout)
+        self.mlp = MlpBlock(in_dim=emb_dim, mlp_dim=mlp_dim, dropout=dropout, activation="gelu")
 
     def forward(self, x, src_key_padding_mask=None):
         residual = x
@@ -72,38 +197,14 @@ class ViTEncoderBlock(nn.Module):
         return x
     
 class _NoAmpAutocast:
-    """A context manager to temporarily disable Automatic Mixed Precision (AMP)."""
+    """Local autocast-off context without global backend toggles."""
     def __enter__(self):
-        self.prev = torch.is_autocast_enabled()
-        torch.set_autocast_enabled(False)
-
-        # Force highest-precision matmuls for splitting/merging as per paper's numerical precision note
-        # Save and override float32 matmul precision (PyTorch 2.0+)
-        self._prev_matmul_precision = None
-        try:
-            self._prev_matmul_precision = torch.get_float32_matmul_precision()
-            torch.set_float32_matmul_precision("highest")
-        except Exception:
-            self._prev_matmul_precision = None
-
-        # Save and override TF32 flags on CUDA backends (Ampere+ GPUs)
-        self._has_cuda_backend = hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul")
-        if self._has_cuda_backend:
-            self._prev_allow_tf32_matmul = torch.backends.cuda.matmul.allow_tf32
-            self._prev_allow_tf32_cudnn = torch.backends.cudnn.allow_tf32
-            torch.backends.cuda.matmul.allow_tf32 = False
-            torch.backends.cudnn.allow_tf32 = False
+        self.ctx = torch.amp.autocast(device_type=torch.device('cuda' if torch.cuda.is_available() else 'cpu').type, enabled=False)
+        self.ctx.__enter__()
+        return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        torch.set_autocast_enabled(self.prev)
-        try:
-            if self._prev_matmul_precision is not None:
-                torch.set_float32_matmul_precision(self._prev_matmul_precision)
-        except Exception:
-            pass
-        if self._has_cuda_backend:
-            torch.backends.cuda.matmul.allow_tf32 = self._prev_allow_tf32_matmul
-            torch.backends.cudnn.allow_tf32 = self._prev_allow_tf32_cudnn
+        self.ctx.__exit__(exc_type, exc_val, exc_tb)
 
 class ViTEncoder(nn.Module):
     """A stack of Transformer encoder blocks, forming a complete ViT encoder."""
@@ -128,7 +229,11 @@ class ViTEncoder(nn.Module):
 
 
 class DNN(nn.Module):
-    """A DNN predictor using a ViT encoder to produce affine coupling parameters (bias, scale)."""
+    """A DNN predictor using a ViT encoder to produce affine coupling parameters (bias, scale).
+
+    Each instance owns its positional embedding tensor, sized to the per-coupling
+    token sequence length, ensuring every coupling has an independent posemb parameter.
+    """
 
     def __init__(self,
                  dnn_io_dim: int,
@@ -136,6 +241,7 @@ class DNN(nn.Module):
                  num_heads: int,
                  vit_depth: int,
                  scale_factor: float,
+                 seq_len: int,
                  use_grad_checkpoint: bool = False):
         super().__init__()
         self.dnn_io_dim = dnn_io_dim
@@ -143,13 +249,17 @@ class DNN(nn.Module):
         self.num_heads = num_heads
         self.vit_depth = vit_depth
         self.scale_factor = scale_factor
+        self.seq_len = int(seq_len)
 
         self.init_proj = nn.Linear(dnn_io_dim, vit_hidden_dim)
+        # Initialize with Xavier-uniform weights and Normal(1e-6) biases
         nn.init.xavier_uniform_(self.init_proj.weight)
         if self.init_proj.bias is not None:
-            nn.init.zeros_(self.init_proj.bias)
+            nn.init.normal_(self.init_proj.bias, std=1e-6)
 
-        self.posemb = None
+        # Per-coupling positional embedding (1, N, D)
+        self.posemb = nn.Parameter(torch.empty(1, self.seq_len, vit_hidden_dim))
+        nn.init.normal_(self.posemb, std=1.0 / math.sqrt(vit_hidden_dim))
 
         self.vit_encoder = ViTEncoder(
             depth=vit_depth,
@@ -157,6 +267,18 @@ class DNN(nn.Module):
             num_heads=num_heads,
             use_grad_checkpoint=use_grad_checkpoint
         )
+
+        # Optional cross-attention on context so each DNN can condition on external signals
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=vit_hidden_dim,
+            num_heads=num_heads,
+            dropout=0.0,
+            batch_first=True,
+        )
+        # Zero-init output of cross attention (out_kernel_init=zeros)
+        nn.init.zeros_(self.cross_attn.out_proj.weight)
+        if self.cross_attn.out_proj.bias is not None:
+            nn.init.zeros_(self.cross_attn.out_proj.bias)
 
         self.final_proj = nn.Linear(vit_hidden_dim, 2 * dnn_io_dim)
         nn.init.zeros_(self.final_proj.weight)
@@ -169,9 +291,18 @@ class DNN(nn.Module):
 
         x_proj = self.init_proj(x_in)
 
-        if self.posemb is None or self.posemb.shape[1] != N:
-            raise ValueError(f"Positional embedding is not set or has wrong length (found {self.posemb.shape} vs expected B×{N}×d).")
+        if self.posemb.shape[1] != N:
+            raise ValueError(f"DNN.posemb length mismatch: have {self.posemb.shape[1]} but input has N={N} tokens.")
         x_with_pos = x_proj + self.posemb
+
+        # Residual cross-attention on context when available
+        if context is not None:
+            if context.dim() != 3 or context.shape[0] != B:
+                raise ValueError("DNN context must be shaped [B, N_ctx, D_ctx].")
+            if context.shape[-1] != self.vit_hidden_dim:
+                raise ValueError(f"DNN context last dim must equal vit_hidden_dim={self.vit_hidden_dim}.")
+            y, _ = self.cross_attn(query=x_with_pos, key=context, value=context, need_weights=False)
+            x_with_pos = x_with_pos + y
 
         vit_out = self.vit_encoder(x_with_pos)
 
@@ -179,14 +310,11 @@ class DNN(nn.Module):
         bias, raw_scale = torch.chunk(bias_scale, 2, dim=-1)
 
         # --- Numerical stability guard ---
-        sigma = torch.sigmoid(raw_scale)
-        # Clamp to avoid exactly 0 or 1 which would yield log(0) = -inf and blow up training
-        sigma = sigma.clamp(min=1e-4, max=1.0 - 1e-4)
-
-        scale = sigma * self.scale_factor
+        # --- Numerical stability ---
+        scale = torch.sigmoid(raw_scale) * self.scale_factor
 
         # log|det| contribution per element
-        logdet_per_element = torch.log(sigma) + math.log(self.scale_factor)
+        logdet_per_element = F.logsigmoid(raw_scale) + math.log(self.scale_factor)
         logdet = logdet_per_element.view(B, -1).sum(dim=1)
 
         return bias, scale, logdet
@@ -206,8 +334,13 @@ def get_spatial_coupling_masks_torch(depth, num_tokens, proj_kinds, grid_h, grid
         if kind.startswith("checkerboard"):
             if n % 2 != 0:
                 raise ValueError("checkerboard requires an even number of tokens.")
-            idx1 = torch.arange(0, n, 2, device=device)
-            idx2 = torch.arange(1, n, 2, device=device)
+            # Alternate by row and column to build a checkerboard partition.
+            vals = torch.arange(n, device=device).view(grid_h, grid_w) + torch.arange(grid_h, device=device).view(grid_h, 1)
+            vals = vals.flatten()
+            mask_even = (vals % 2) == 0
+            idx_all = torch.arange(n, device=device)
+            idx1 = idx_all[mask_even]
+            idx2 = idx_all[~mask_even]
 
         elif kind.startswith("hstripes"): # horizontal stripes = rows
             if grid_h % 2 != 0:
@@ -305,19 +438,29 @@ class Coupling(nn.Module):
 
         self.use_actnorm = use_actnorm
         self.use_invertible_dense = use_invertible_dense
+        # ActNorm and 1x1 invertible conv operate on channel dimension of the input x (B,H,W,C),
+        # prior to patchification. Therefore they must be parameterized by C, not C*ps*ps.
         if use_actnorm:
-            self.actnorm = ActNorm(C_patchedup)
+            self.actnorm = ActNorm(C)
         if use_invertible_dense:
-            self.invconv = Invertible1x1Conv(C_patchedup)
+            self.invconv = Invertible1x1Conv(C)
 
         if self.backbone == 'vit':
+            # Compute transformer token length for this coupling's DNN.
+            grid_h, grid_w = (H // ps), (W // ps)
+            N_tokens = grid_h * grid_w
+            if (not kind_is_channel) and (self.masking_mode == 'pairing'):
+                dnn_seq_len = N_tokens // 2
+            else:
+                dnn_seq_len = N_tokens
             self.dnn = DNN(
                 dnn_io_dim=dnn_io_dim,
                 vit_hidden_dim=emb_dim,
                 num_heads=num_heads,
                 vit_depth=block_depth,
                 scale_factor=scale_factor,
-                use_grad_checkpoint=use_grad_checkpoint
+                seq_len=dnn_seq_len,
+                use_grad_checkpoint=use_grad_checkpoint,
             )
         elif self.backbone == 'cnn':
             # CNN backbone does not support spatial modes cleanly for pairing/masking due to token reshaping.
@@ -344,10 +487,10 @@ class Coupling(nn.Module):
 
         if self.use_actnorm:
             x, ld = self.actnorm(x)
-            logdet += ld
+            logdet = logdet + ld
         if self.use_invertible_dense:
             x, ld = self.invconv(x)
-            logdet += ld
+            logdet = logdet + ld
 
         # Patchify the input: (B, H, W, C) -> (B, N, C_patched)
         x_reshaped = x.permute(0, 3, 1, 2).contiguous()
@@ -358,7 +501,8 @@ class Coupling(nn.Module):
         if self.masking_mode == 'pairing':
             if self.kind_is_channel:
                 with _NoAmpAutocast():
-                    x_proj = x_patched @ self.P_chan
+                    P_chan = self.P_chan.to(dtype=x_patched.dtype, device=x_patched.device)
+                    x_proj = x_patched @ P_chan
                 # Split features into halves
                 x1, x2 = torch.chunk(x_proj, 2, dim=-1)
                 # Get bias and scale from the first half (full token count)
@@ -366,25 +510,28 @@ class Coupling(nn.Module):
                     bias, scale, logdet_dnn = self.dnn(x1, H_patch=H//self.ps, W_patch=W//self.ps, context=context)
                 else:
                     bias, scale, logdet_dnn = self.dnn(x1, context=context)
-                logdet += logdet_dnn
+                logdet = logdet + logdet_dnn
                 # Apply affine transform to the second half of features
                 x2_prime = (x2 + bias) * scale
                 x_merged = torch.cat([x1, x2_prime], dim=-1)
                 with _NoAmpAutocast():
-                    x_unproj = x_merged @ self.P_chan.t()
+                    P_chan = self.P_chan.to(dtype=x_patched.dtype, device=x_patched.device)
+                    x_unproj = x_merged @ P_chan.t()
             else:
                 # Spatial pairing: reorder tokens, split along token dimension
                 with _NoAmpAutocast():
-                    x_proj = torch.einsum("b n c, n m -> b m c", x_patched, self.P_spatial)
+                    P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
+                    x_proj = torch.einsum("b n c, n m -> b m c", x_patched, P_spatial)
                 x1_tokens, x2_tokens = torch.chunk(x_proj, 2, dim=1)
                 # Predict on x1 tokens only; DNN is configured with full feature dim
                 bias, scale, logdet_dnn = self.dnn(x1_tokens, context=context)
-                logdet += logdet_dnn
+                logdet = logdet + logdet_dnn
                 # Transform x2 tokens
                 x2_prime_tokens = (x2_tokens + bias) * scale
                 x_merged_tokens = torch.cat([x1_tokens, x2_prime_tokens], dim=1)
                 with _NoAmpAutocast():
-                    x_unproj = torch.einsum("b m c, m n -> b n c", x_merged_tokens, self.P_spatial.t())
+                    P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
+                    x_unproj = torch.einsum("b m c, m n -> b n c", x_merged_tokens, P_spatial.t())
 
         elif self.masking_mode == 'masking':
             if self.kind_is_channel:
@@ -396,51 +543,43 @@ class Coupling(nn.Module):
                     bias, scale, logdet_dnn = self.dnn(x1, H_patch=H//self.ps, W_patch=W//self.ps, context=context)
                 else: # vit
                     bias, scale, logdet_dnn = self.dnn(x1, context=context)
-                logdet += logdet_dnn
+                logdet = logdet + logdet_dnn
                 
                 # Apply affine transform
                 x2_prime = (x2 + bias) * scale
                 x_unproj = torch.cat([x1, x2_prime], dim=-1) # Re-merge channels
 
-            else: # Spatial masking
+            else: # Spatial masking with einops-style rearrange
                 # This mode is only supported for ViT, checked in __init__
-                N = x_patched.shape[1]
-                N_half = N // 2
                 
-                # Get indices for the two halves from the permutation matrix
-                perm_indices = self.P_spatial.t().argmax(dim=1)
-                x1_indices = perm_indices[:N_half]
-                x2_indices = perm_indices[N_half:]
+                # Project, then split tokens into two halves for processing
+                with _NoAmpAutocast():
+                    P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
+                    x_proj = torch.einsum("b n c, n m -> b m c", x_patched, P_spatial)
+                
+                # Depth-to-space: reshape to introduce a new sequence dimension for spatial ops.
+                # This mirrors `einops.rearrange(a, "... n (s c) -> ... (n s) c", s=2)`,
+                # halving the channel dim and doubling the sequence length.
+                B, N, C_patched = x_proj.shape
+                x_rearranged = x_proj.view(B, N, 2, C_patched // 2).transpose(1, 2).reshape(B, N * 2, C_patched // 2)
 
-                # Create a mask to zero-out the features of the second half (x2)
-                # The mask has shape (1, N, 1) to allow broadcasting over batch and channels
-                mask = torch.ones_like(x_patched)
-                mask[:, x2_indices, :] = 0.0
-                
-                # Apply mask and feed to DNN
-                # The DNN sees the full sequence length N, but x2 features are zero.
-                # Positional embeddings are applied to all tokens inside the DNN.
-                x_masked_input = x_patched * mask
-                bias, scale, _ = self.dnn(x_masked_input, context=context)
-                
-                # We only need the bias/scale predictions for the x2 tokens
-                bias_x2 = bias.index_select(1, x2_indices)
-                scale_x2 = scale.index_select(1, x2_indices)
-                # Log-determinant contribution only from transformed (x2) tokens
-                logdet_local = torch.log(scale_x2).view(B, -1).sum(dim=1)
-                logdet += logdet_local
-                
-                # Select the original x1 and x2 tokens
-                x1_tokens = x_patched.index_select(1, x1_indices)
-                x2_tokens = x_patched.index_select(1, x2_indices)
+                x1_re, x2_re = torch.chunk(x_rearranged, 2, dim=1)
 
-                # Apply affine transform to x2 tokens
-                x2_prime_tokens = (x2_tokens + bias_x2) * scale_x2
+                # DNN operates on the first half of the rearranged sequence
+                bias, scale, logdet_dnn = self.dnn(x1_re, context=context)
+                logdet += logdet_dnn
                 
-                # Scatter the transformed tokens back into a full tensor
-                x_unproj = torch.zeros_like(x_patched)
-                x_unproj.scatter_(1, x1_indices.view(1, -1, 1).expand_as(x1_tokens), x1_tokens)
-                x_unproj.scatter_(1, x2_indices.view(1, -1, 1).expand_as(x2_prime_tokens), x2_prime_tokens)
+                # Transform the second half
+                x2_prime_re = (x2_re + bias) * scale
+                
+                # Merge and undo the rearrange
+                x_merged_re = torch.cat([x1_re, x2_prime_re], dim=1)
+                x_unrearranged = x_merged_re.view(B, 2, N, C_patched // 2).transpose(1, 2).reshape(B, N, C_patched)
+                
+                # Unproject to get original token order
+                with _NoAmpAutocast():
+                    P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
+                    x_unproj = torch.einsum("b m c, m n -> b n c", x_unrearranged, P_spatial.t())
 
         else:
             raise ValueError(f"Unknown masking_mode: {self.masking_mode}")
@@ -472,14 +611,14 @@ class Coupling(nn.Module):
             x, _ = self.invconv.inverse(x)
             # Accumulate the forward log-determinant
             logdet_invconv = H * W * torch.sum(torch.log(torch.abs(self.invconv.U.diag())))
-            fwd_logdet += logdet_invconv.expand(B)
+            fwd_logdet = fwd_logdet + logdet_invconv.expand(B).clone()
             
         if self.use_actnorm:
             # Apply inverse transformation
             x, _ = self.actnorm.inverse(x)
             # Accumulate the forward log-determinant
             logdet_actnorm = H * W * torch.sum(self.actnorm.log_scale)
-            fwd_logdet += logdet_actnorm.expand(B)
+            fwd_logdet = fwd_logdet + logdet_actnorm.expand(B).clone()
 
         # Patchify the input: (B, H, W, C) -> (B, N, C_patched)
         x_patched = F.unfold(x.permute(0, 3, 1, 2).contiguous(), kernel_size=self.ps, stride=self.ps)
@@ -489,27 +628,31 @@ class Coupling(nn.Module):
         if self.masking_mode == 'pairing':
             if self.kind_is_channel:
                 with _NoAmpAutocast():
-                    y_proj = x_patched @ self.P_chan
+                    P_chan = self.P_chan.to(dtype=x_patched.dtype, device=x_patched.device)
+                    y_proj = x_patched @ P_chan
                 y1, y2 = torch.chunk(y_proj, 2, dim=-1)
                 if self.backbone == 'cnn':
                     bias, scale, logdet_dnn = self.dnn(y1, H_patch=H//self.ps, W_patch=W//self.ps, context=context)
                 else:
                     bias, scale, logdet_dnn = self.dnn(y1, context=context)
-                fwd_logdet += logdet_dnn
+                fwd_logdet = fwd_logdet + logdet_dnn
                 x2 = (y2 / scale) - bias
                 x_merged = torch.cat([y1, x2], dim=-1)
                 with _NoAmpAutocast():
-                    x_unproj = x_merged @ self.P_chan.t()
+                    P_chan = self.P_chan.to(dtype=x_patched.dtype, device=x_patched.device)
+                    x_unproj = x_merged @ P_chan.t()
             else:
                 with _NoAmpAutocast():
-                    y_proj = torch.einsum("b n c, n m -> b m c", x_patched, self.P_spatial)
+                    P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
+                    y_proj = torch.einsum("b n c, n m -> b m c", x_patched, P_spatial)
                 y1_tokens, y2_tokens = torch.chunk(y_proj, 2, dim=1)
                 bias, scale, logdet_dnn = self.dnn(y1_tokens, context=context)
-                fwd_logdet += logdet_dnn
+                fwd_logdet = fwd_logdet + logdet_dnn
                 x2_tokens = (y2_tokens / scale) - bias
                 x_merged_tokens = torch.cat([y1_tokens, x2_tokens], dim=1)
                 with _NoAmpAutocast():
-                    x_unproj = torch.einsum("b m c, m n -> b n c", x_merged_tokens, self.P_spatial.t())
+                    P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
+                    x_unproj = torch.einsum("b m c, m n -> b n c", x_merged_tokens, P_spatial.t())
 
         elif self.masking_mode == 'masking':
             if self.kind_is_channel:
@@ -519,44 +662,32 @@ class Coupling(nn.Module):
                     bias, scale, logdet_dnn = self.dnn(y1, H_patch=H//self.ps, W_patch=W//self.ps, context=context)
                 else: # vit
                     bias, scale, logdet_dnn = self.dnn(y1, context=context)
-                fwd_logdet += logdet_dnn
+                fwd_logdet = fwd_logdet + logdet_dnn
                 
                 x2 = (y2 / scale) - bias
                 x_unproj = torch.cat([y1, x2], dim=-1)
 
-            else: # Spatial masking
-                N = x_patched.shape[1]
-                N_half = N // 2
-                perm_indices = self.P_spatial.t().argmax(dim=1)
-                y1_indices = perm_indices[:N_half]
-                y2_indices = perm_indices[N_half:]
+            else: # Spatial masking with einops-style rearrange
+                with _NoAmpAutocast():
+                    P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
+                    y_proj = torch.einsum("b n c, n m -> b m c", x_patched, P_spatial)
+
+                B, N, C_patched = y_proj.shape
+                y_rearranged = y_proj.view(B, N, 2, C_patched // 2).transpose(1, 2).reshape(B, N * 2, C_patched // 2)
+
+                y1_re, y2_re = torch.chunk(y_rearranged, 2, dim=1)
                 
-                # y1_tokens are the same as x1_tokens
-                y1_tokens = x_patched.index_select(1, y1_indices)
-
-                # To get the correct bias/scale, we must reconstruct the *input* to the DNN
-                # from the forward pass: x_patched with x2 features zeroed out.
-                # Since y1_tokens == x1_tokens, we can build this.
-                x_masked_input = torch.zeros_like(x_patched)
-                x_masked_input.scatter_(1, y1_indices.view(1, -1, 1).expand_as(y1_tokens), y1_tokens)
+                bias, scale, logdet_dnn = self.dnn(y1_re, context=context)
+                fwd_logdet += logdet_dnn
                 
-                bias, scale, _ = self.dnn(x_masked_input, context=context)
+                x2_re = (y2_re / scale) - bias
+                
+                x_merged_re = torch.cat([y1_re, x2_re], dim=1)
+                x_unrearranged = x_merged_re.view(B, 2, N, C_patched // 2).transpose(1, 2).reshape(B, N, C_patched)
 
-                # Select the bias and scale for the y2 tokens
-                bias_y2 = bias.index_select(1, y2_indices)
-                scale_y2 = scale.index_select(1, y2_indices)
-                # Forward log-det only from transformed (y2) tokens
-                logdet_local = torch.log(scale_y2).view(B, -1).sum(dim=1)
-                fwd_logdet += logdet_local
-
-                # Select the y2 tokens and invert their transformation to get x2_tokens
-                y2_tokens = x_patched.index_select(1, y2_indices)
-                x2_tokens = (y2_tokens / scale_y2) - bias_y2
-
-                # Scatter x1 and x2 tokens back to their original positions
-                x_unproj = torch.zeros_like(x_patched)
-                x_unproj.scatter_(1, y1_indices.view(1, -1, 1).expand_as(y1_tokens), y1_tokens)
-                x_unproj.scatter_(1, y2_indices.view(1, -1, 1).expand_as(x2_tokens), x2_tokens)
+                with _NoAmpAutocast():
+                    P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
+                    x_unproj = torch.einsum("b m c, m n -> b n c", x_unrearranged, P_spatial.t())
         else:
             raise ValueError(f"Unknown masking_mode: {self.masking_mode}")
 
@@ -574,8 +705,12 @@ class Coupling(nn.Module):
         # and the FORWARD log-determinant.
         return x_final, fwd_logdet
 
-class JetModel(nn.Module):
-    """A complete normalizing flow model composed of a sequence of coupling layers."""
+class FlowCore(nn.Module):
+    """A complete normalizing flow model composed of a sequence of coupling layers.
+
+    Exposes a one-shot data-dependent initializer to avoid parameter mutations
+    during the first training forward under DDP.
+    """
     def __init__(self,
                  input_img_shape_hwc: Tuple[int, int, int],
                  depth: int = 32,
@@ -585,10 +720,12 @@ class JetModel(nn.Module):
                  scale_factor: float = 2.0,
                  ps: int = 4,
                  backbone: str = 'vit',
-                 channel_repeat: int = 4,
+                 channel_repeat: int = 0,
                  spatial_mode: str = 'mix',
                  channels_coupling_projs: Sequence[str] = ('random',),
-                 masking_mode: str = 'pairing',
+                 spatial_coupling_projs: Optional[Sequence[str]] = None,
+                 kinds: Optional[Sequence[str]] = None,
+                 masking_mode: str = 'masking',
                  actnorm: bool = False,
                  invertible_dense: bool = False,
                  use_grad_checkpoint: bool = False,
@@ -606,45 +743,69 @@ class JetModel(nn.Module):
         self.backbone = backbone.lower()
         self.masking_mode = masking_mode
 
+        # Training-step state and RGB noise schedule defaults
+        self.register_buffer("_train_step", torch.zeros((), dtype=torch.long), persistent=False)
+        self.noise_total_steps: int = 1
+        self.rgb_sigma0: float = 64.0
+        self.rgb_sigma_final: float = 0.0
+
         # Create a seeded generator for deterministic random permutations
         self.rng = None
         if seed is not None:
             self.rng = torch.Generator(device='cpu').manual_seed(seed)
 
-        spatial_mode = spatial_mode.lower()
-        if spatial_mode not in {"row", "column", "checkerboard", "mix"}:
-            raise ValueError(f"Invalid spatial_mode '{spatial_mode}'.")
-
-        if spatial_mode == "row":
-            self.spatial_coupling_projs_config = (
-                'hstripes', 'hstripes-inv'
-            )
-        elif spatial_mode == "column":
-            self.spatial_coupling_projs_config = (
-                'vstripes', 'vstripes-inv'
-            )
-        elif spatial_mode == "checkerboard":
-            self.spatial_coupling_projs_config = (
-                'checkerboard', 'checkerboard-inv'
-            )
+        if spatial_coupling_projs is not None:
+            self.spatial_coupling_projs_config = tuple(spatial_coupling_projs)
         else:
-            self.spatial_coupling_projs_config = (
-                'checkerboard', 'checkerboard-inv',
-                'vstripes', 'vstripes-inv',
-                'hstripes', 'hstripes-inv'
-            )
+            spatial_mode = spatial_mode.lower()
+            if spatial_mode not in {"row", "column", "checkerboard", "mix"}:
+                raise ValueError(f"Invalid spatial_mode '{spatial_mode}'.")
+            if spatial_mode == "row":
+                self.spatial_coupling_projs_config = (
+                    'hstripes', 'hstripes-inv'
+                )
+            elif spatial_mode == "column":
+                self.spatial_coupling_projs_config = (
+                    'vstripes', 'vstripes-inv'
+                )
+            elif spatial_mode == "checkerboard":
+                self.spatial_coupling_projs_config = (
+                    'checkerboard', 'checkerboard-inv'
+                )
+            else:
+                self.spatial_coupling_projs_config = (
+                    'checkerboard', 'checkerboard-inv',
+                    'vstripes', 'vstripes-inv',
+                    'hstripes', 'hstripes-inv'
+                )
 
-        kinds_sequence: Sequence[str] = []
-        if channel_repeat == -1:
-            kinds_sequence = ["spatial"] * depth
-        elif channel_repeat == 0:
-            kinds_sequence = ["channels"] * depth
+        if kinds is not None:
+            kinds_sequence = [str(k).lower() for k in kinds]
+            if any(k not in {"channels", "spatial"} for k in kinds_sequence):
+                raise ValueError(f"Unsupported coupling kind in {kinds_sequence}; expected 'channels' or 'spatial'.")
+            # Cycle or truncate the pattern to match the required depth
+            if len(kinds_sequence) < depth:
+                import itertools as _it
+                kinds_sequence = list(_it.islice(_it.cycle(kinds_sequence), depth))
+            else:
+                kinds_sequence = kinds_sequence[:depth]
         else:
-            while len(kinds_sequence) < depth:
-                kinds_sequence.extend(["channels"] * channel_repeat)
-                if len(kinds_sequence) < depth:
-                    kinds_sequence.append("spatial")
-            kinds_sequence = kinds_sequence[:depth]
+            kinds_sequence: Sequence[str] = []
+            if channel_repeat == -1:
+                kinds_sequence = ["spatial"] * depth
+            elif channel_repeat == 0:
+                # Default mixed coupling pattern:
+                # ("channels", "channels", "spatial") repeated across depth.
+                pattern = ["channels", "channels", "spatial"]
+                while len(kinds_sequence) < depth:
+                    kinds_sequence.extend(pattern)
+                kinds_sequence = kinds_sequence[:depth]
+            else:
+                while len(kinds_sequence) < depth:
+                    kinds_sequence.extend(["channels"] * channel_repeat)
+                    if len(kinds_sequence) < depth:
+                        kinds_sequence.append("spatial")
+                kinds_sequence = kinds_sequence[:depth]
 
         self.kinds_config = tuple(kinds_sequence)
 
@@ -691,12 +852,7 @@ class JetModel(nn.Module):
                 P_spatial = torch.zeros((N, N))
             self.spatial_proj_matrices.append(P_spatial)
 
-        # For ViT, create positional embeddings for full and half token sequences.
-        if self.backbone == 'vit':
-            self.pos_emb_full = nn.Parameter(torch.empty(1, N, emb_dim))
-            nn.init.normal_(self.pos_emb_full, std=1.0 / math.sqrt(emb_dim))
-            self.pos_emb_half = nn.Parameter(torch.empty(1, N // 2, emb_dim))
-            nn.init.normal_(self.pos_emb_half, std=1.0 / math.sqrt(emb_dim))
+        # For ViT, each coupling owns its posemb; no shared embeddings here.
 
         self.couplings = nn.ModuleList()
         for i in range(self.depth):
@@ -717,12 +873,6 @@ class JetModel(nn.Module):
                 use_actnorm=actnorm,
                 use_invertible_dense=invertible_dense
             )
-            if self.backbone == 'vit':
-                # Assign appropriate positional embedding length per coupling
-                if cd == "spatial" and self.masking_mode == 'pairing':
-                    coupling.dnn.posemb = self.pos_emb_half
-                else:
-                    coupling.dnn.posemb = self.pos_emb_full
             self.couplings.append(coupling)
 
     def forward(self, x: torch.Tensor, context: torch.Tensor = None):
@@ -742,6 +892,16 @@ class JetModel(nn.Module):
             x, inv_logdet = coup.inverse(x, context=context)
             total_inv_logdet = total_inv_logdet + inv_logdet
         return x, total_inv_logdet
+
+    @torch.no_grad()
+    def initialize_with_batch(self, x_nhwc: torch.Tensor, context: torch.Tensor = None):
+        """Run a single forward pass to trigger data-dependent initializations (e.g., ActNorm).
+
+        Should be called on rank 0 before wrapping with DDP. After this, broadcast
+        the parameters to other ranks.
+        """
+        _ = self.forward(x_nhwc, context=context)
+        return None
 
 
 def load_params_from_flax_checkpoint(pytorch_model, flax_params_dict):
@@ -827,130 +987,5 @@ class CNNPredictor(nn.Module):
         return bias, scale, logdet
 
 
-if __name__ == '__main__':
-    dummy_x = torch.randn(2, 32, 32, 3)
-    
-    test_input_img_shape_hwc = (dummy_x.shape[1], dummy_x.shape[2], dummy_x.shape[3])
-
-    jet_config = {
-        "depth": 4,
-        "block_depth": 1,
-        "emb_dim": 64,
-        "num_heads": 2,
-        "scale_factor": 2.0,
-        "ps": 4,
-        "input_img_shape_hwc": test_input_img_shape_hwc,
-        "kinds": ('channels', 'spatial') * 2,
-        "channels_coupling_projs": ("random",),
-        "spatial_coupling_projs": ("checkerboard", "checkerboard-inv")
-    }
-
-    model = JetModel(**jet_config)
-    print("JetModel instantiated.")
-    
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    dummy_x = dummy_x.to(device)
-    
-    print(f"Input shape: {dummy_x.shape}")
-
-    dummy_context = None
-
-    try:
-        z, logdet_fwd = model(dummy_x, context=dummy_context)
-        print("Forward pass successful.")
-        print(f"Output z shape: {z.shape}")
-        print(f"Log determinant (forward): {logdet_fwd.shape}, {logdet_fwd}")
-
-        x_reconstructed, logdet_inv = model.inverse(z, context=dummy_context)
-        print("Inverse pass successful.")
-        print(f"Reconstructed x shape: {x_reconstructed.shape}")
-        print(f"Log determinant (inverse): {logdet_inv.shape}, {logdet_inv}")
-
-        print(f"Sum of logdets (should be ~0): {logdet_fwd + logdet_inv}")
-
-        reconstruction_error = torch.abs(dummy_x - x_reconstructed).mean()
-        print(f"Mean reconstruction error: {reconstruction_error.item()}")
-
-        dummy_x_test2 = torch.randn(2, 8, 8, 1).to(device)
-        test2_input_img_shape_hwc = (dummy_x_test2.shape[1], dummy_x_test2.shape[2], dummy_x_test2.shape[3])
-        jet_config_test2 = {**jet_config, 
-                            "ps": 2, 
-                            "emb_dim": 32, 
-                            "input_img_shape_hwc": test2_input_img_shape_hwc}
-        model_test2 = JetModel(**jet_config_test2).to(device)
-        
-        z2, logdet_fwd2 = model_test2(dummy_x_test2)
-        print(f"Test 2: z shape: {z2.shape}, logdet: {logdet_fwd2}")
-        x_rec2, logdet_inv2 = model_test2.inverse(z2)
-        print(f"Test 2: x_rec shape: {x_rec2.shape}, logdet: {logdet_inv2}")
-        print(f"Test 2: Sum of logdets: {logdet_fwd2 + logdet_inv2}")
-        print(f"Test 2: Reconstruction error: {torch.abs(dummy_x_test2 - x_rec2).mean().item()}")
-
-
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        import traceback
-        traceback.print_exc()
-
-
-    # --- Tiny test for spatial masks ---
-    print("\nTesting spatial coupling masks...")
-    grid_h_test, grid_w_test = 8, 8
-    n_test = grid_h_test * grid_w_test
-    n_half_test = n_test // 2
-    test_kinds = ['checkerboard', 'hstripes', 'vstripes']
-    for kind in test_kinds:
-        try:
-            masks = get_spatial_coupling_masks_torch(1, n_test, [kind], grid_h_test, grid_w_test)
-            mask = masks[0]
-            # Each input token must be mapped to exactly one output slot
-            assert torch.all(mask.sum(dim=1) == 1)
-            # Each output slot must be filled by exactly one input token
-            assert torch.all(mask.sum(dim=0) == 1)
-            
-            # Check if exactly half the tokens are mapped to the first half of the output
-            first_half_sum = mask[:, :n_half_test].sum()
-            assert first_half_sum == n_half_test, f"[{kind}] First half sum is {first_half_sum}, expected {n_half_test}"
-            print(f"Test passed for spatial mask: {kind}")
-        except Exception as e:
-            print(f"Test FAILED for spatial mask: {kind}: {e}")
-            import traceback
-            traceback.print_exc()
-
-    # --- Gradient Check for Log-Determinant ---
-    print("\nTesting log-determinant gradients...")
-    try:
-        grad_check_config = {
-            "depth": 4,
-            "block_depth": 1,
-            "emb_dim": 16, # Smaller to speed up test
-            "num_heads": 2,
-            "scale_factor": 2.0,
-            "ps": 2,
-            "input_img_shape_hwc": (4, 4, 4),
-            "channel_repeat": 1,
-            "spatial_mode": "checkerboard",
-            "masking_mode": 'pairing',
-            "actnorm": True,
-            "invertible_dense": True,
-            "use_grad_checkpoint": False # Gradcheck is not compatible with checkpointing
-        }
-        grad_model = JetModel(**grad_check_config).to(torch.double)
-
-        # Input must be double and require grad
-        dummy_x_grad = torch.randn(1, 4, 4, 4, device=device, dtype=torch.double, requires_grad=True)
-
-        def get_logdet(x):
-            _, logdet = grad_model(x)
-            return logdet.sum()
-
-        test_passed = torch.autograd.gradcheck(get_logdet, (dummy_x_grad,), atol=1e-4, rtol=1e-3)
-        print(f"Log-det gradient check passed: {test_passed}")
-
-    except Exception as e:
-        print(f"Test FAILED for log-det gradient check: {e}")
-        import traceback
-        traceback.print_exc()
-
+JetModel = FlowCore
 
