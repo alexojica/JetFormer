@@ -40,6 +40,38 @@ from types import SimpleNamespace
 from tqdm import tqdm
 from src.utils.accelerators import build_accelerator as _build_accel
 
+
+def _coerce_cli_value(value, current):
+    """Attempt to coerce a CLI string override to the type of the existing config entry."""
+    if not isinstance(value, str):
+        return value
+
+    lowered = value.lower()
+    if lowered in ('none', '~', 'null'):
+        return None
+
+    try:
+        parsed = yaml.safe_load(value)
+    except Exception:
+        parsed = value
+
+    if current is None:
+        return parsed
+
+    # Preserve tuple/list semantics from the existing config whenever possible.
+    if isinstance(current, tuple):
+        if isinstance(parsed, (list, tuple)):
+            return tuple(parsed)
+        return (parsed,)
+
+    if isinstance(current, list):
+        if isinstance(parsed, (list, tuple)):
+            return list(parsed)
+        return [parsed]
+
+    # For numeric and boolean values, yaml.safe_load already handles conversion.
+    return parsed
+
 # Centralized config processing logic
 def _deep_update(d: dict, u: Mapping) -> dict:
     for k, v in u.items():
@@ -194,11 +226,8 @@ def get_config_from_yaml_and_cli(config_path: str, cli_args: argparse.Namespace)
             d = config
             for part in keys[:-1]:
                 d = d.setdefault(part, {})
-            # Handle boolean strings from CLI
-            if isinstance(value, str) and value.lower() in ('true', 'false'):
-                d[keys[-1]] = value.lower() == 'true'
-            else:
-                d[keys[-1]] = value
+            current_val = d.get(keys[-1])
+            d[keys[-1]] = _coerce_cli_value(value, current_val)
 
     # --- Backward compatibility and derived values ---
     if 'lr' in config: config['optimizer']['lr'] = config.pop('lr')
