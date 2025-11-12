@@ -37,6 +37,7 @@ model:
   remat_policy: 'nothing_saveable'
   num_vocab_repeats: 16
   scale_tol: 1e-6
+  per_modality_final_norm: false
 
 # Patch PCA
 patch_pca:
@@ -57,19 +58,25 @@ adaptor:
     emb_dim: 512
     num_heads: 8
     ps: 1
+    actnorm: false
+    invertible_dense: false
+    flow_grad_checkpoint: false
     kinds: ["channels"]
     channels_coupling_projs: ["random"]
+    spatial_coupling_projs: ["checkerboard", "checkerboard-inv"]
   latent_noise_dim: 640
+  kind: 'jet'
 
 # Optimizer & Schedule
 optimizer:
+  name: adamw
   lr: 0.0001
   wd: 0.0001
   b1: 0.9
   b2: 0.95
   grad_clip_norm: 1.0
 
-ema_decay: 0.0
+ema_decay: 0.9999
 
 schedule:
   warmup_percent: 0.23
@@ -89,6 +96,7 @@ training:
 
 # Sampling & Evaluation
 sampling:
+  cfg_strength: 4.0
   cfg_inference_weight: 3.0
   temperature: 0.94
   temperature_probs: 1.0
@@ -102,6 +110,7 @@ eval:
 # W&B
 wandb:
   enabled: true
+  offline: false
   project: "jetformer-imagenet-256"
   run_name: "B-256-first100"
   tags: ["imagenet", "256x256", "B", "first100"]
