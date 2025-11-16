@@ -1,0 +1,128 @@
+# General
+num_epochs: 150
+torch_compile: false
+advanced_metrics: true
+batch_size: 32
+grad_accum_steps: 1
+
+# Input/Dataset
+input:
+  dataset: cifar10
+  input_size: [32, 32]
+  num_classes: 10
+  num_workers: 8
+  random_flip_prob: 0.5
+  class_token_length: 1
+  
+# Model Configuration
+model:
+  width: 512
+  depth: 16
+  mlp_dim: 3072
+  num_heads: 8
+  num_kv_heads: 1
+  head_dim: 64
+  vocab_size: 13
+  bos_id: 10
+  boi_id: 11
+  nolabel_id: 12
+  num_mixtures: 128
+  dropout: 0.1
+  drop_labels_probability: 0.1
+  head_dtype: 'bf16'
+  remat_policy: 'nothing_saveable'
+  num_vocab_repeats: 4
+  scale_tol: 1e-3
+  causal_mask_on_prefix: true
+  untie_output_vocab: false
+  per_modality_final_norm: true
+  right_align_inputs: true
+  strict_special_ids: true
+  use_boi_token: true
+  max_seq_len: 96
+  rope_skip_pad: true
+
+# Patch PCA
+patch_pca:
+  model:
+    depth_to_seq: 1
+    patch_size: 2
+    codeword_dim: 12
+    noise_std: 0.0
+    add_dequant_noise: true
+    skip_pca: true
+    whiten: true
+
+# Adaptor/Jet
+use_adaptor: true
+adaptor:
+  model:
+    depth: 32
+    block_depth: 4
+    emb_dim: 256
+    num_heads: 4
+    actnorm: false
+    invertible_dense: false
+    flow_grad_checkpoint: false
+    ps: 1
+    kinds: ["channels"]
+    channels_coupling_projs: ["random"]
+    spatial_coupling_projs: ["checkerboard", "checkerboard-inv"]
+  latent_noise_dim: 0
+  kind: 'jet'
+
+# Optimizer & Schedule
+optimizer:
+  lr: 0.0005
+  wd: 0.0001
+  b1: 0.9
+  b2: 0.95
+  grad_clip_norm: 1.0
+
+ema_decay: 0.999
+
+schedule:
+  warmup_percent: 0.05
+  decay_type: 'cosine'
+
+# Training Curriculum
+training:
+  input_noise_std: 0.3
+  noise_scale: 64.0
+  noise_min: 0.0
+  text_prefix_prob: 1.0
+  loss_on_prefix: false  # Only compute loss on suffix (images), not on class token prefix
+  stop_grad_nvp_prefix: false
+  rgb_noise_on_image_prefix: true
+  text_loss_weight: 1.0
+  image_loss_weight: 1.0
+
+# Sampling & Evaluation
+sampling:
+  cfg_inference_weight: 5.0
+  cfg_mode: "density"
+  temperature: 0.94
+  temperature_probs: 1.0
+
+eval:
+  val_every_epochs: 2
+  sample_every_epochs: 2
+  eval_no_rgb_noise: true
+  fid_every_epochs: 0
+  is_every_epochs: 0
+  fid_is_num_samples: 0
+
+# W&B
+wandb:
+  enabled: true
+  offline: false
+  project: "jetformer-cifar10-32"
+  run_name: "CIFAR10-32-p4-AR512x12"
+  tags: ["cifar10", "32x32", "p2", "small"]
+
+# Accelerator
+accelerator:
+  name: auto
+  device: auto
+  precision: bf16
+  distributed: false

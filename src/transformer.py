@@ -1,0 +1,261 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+
+class GatedMLP(nn.Module):
+    def __init__(self, in_features, hidden_features, out_features, activation="gelu"):
+        super().__init__()
+        self.w_gate = nn.Linear(in_features, hidden_features, bias=False)
+        self.w_up = nn.Linear(in_features, hidden_features, bias=False)
+        self.w_linear = nn.Linear(hidden_features, out_features, bias=False)
+        
+        if activation == "gelu":
+            self.activation_fn = nn.GELU()
+        elif activation == "silu":
+            self.activation_fn = nn.SiLU()
+        else:
+            raise ValueError(f"Unsupported activation: {activation}")
+
+    def forward(self, x):
+        gate_proj = self.w_gate(x)
+        up_proj = self.w_up(x)
+        activations = self.activation_fn(up_proj) * gate_proj
+        outputs = self.w_linear(activations)
+        return outputs
+
+class RotaryEncoding(nn.Module):
+    def __init__(self, dim, max_seq_len=2048):
+        super().__init__()
+        self.dim = dim
+        self.max_seq_len = max_seq_len
+        self.register_buffer('cos_cached', self._build_cache(max_seq_len, dim, torch.cos), persistent=False)
+        self.register_buffer('sin_cached', self._build_cache(max_seq_len, dim, torch.sin), persistent=False)
+
+    def _build_cache(self, seq_len, dim, op):
+        inv_freq = 1.0 / (10000.0 ** (torch.arange(0, dim, 2).float() / dim))
+        t = torch.arange(seq_len, dtype=inv_freq.dtype)
+        freqs = torch.einsum("i,j->ij", t, inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        return op(emb).unsqueeze(0).unsqueeze(0)
+
+    def apply_rope(self, x: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
+        """Apply RoPE to queries/keys using the standard rotate_half formulation:
+            x_rot = x * cos + rotate_half(x) * sin
+        where rotate_half(x) = concat(-x[..., d/2:], x[..., :d/2]).
+        """
+        head_dim = x.shape[-1]
+
+        # Clamp position_ids to be within the cache size for stability
+        position_ids = torch.clamp(position_ids, 0, self.max_seq_len - 1)
+
+        # Gather cos/sin for these positions and broadcast to x's shape
+        cos = self.cos_cached.squeeze(0).squeeze(0)[position_ids]
+        sin = self.sin_cached.squeeze(0).squeeze(0)[position_ids]
+
+        if position_ids.dim() == 1:
+            # [L, D] -> [1, 1, L, D]
+            cos = cos.unsqueeze(0).unsqueeze(0)
+            sin = sin.unsqueeze(0).unsqueeze(0)
+        else:
+            # [B, L, D] -> [B, 1, L, D]
+            cos = cos.unsqueeze(1)
+            sin = sin.unsqueeze(1)
+
+        # rotate_half(x) = [-x2, x1] where x = [x1, x2]
+        x1 = x[..., : head_dim // 2]
+        x2 = x[..., head_dim // 2 :]
+        rot = torch.cat([-x2, x1], dim=-1)
+
+        # Broadcast cos/sin if needed and apply
+        x_out = (x * cos) + (rot * sin)
+        return x_out
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, d_model, n_heads, dropout=0.1, max_seq_len=2048):
+        super().__init__()
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.d_k = d_model // n_heads
+        
+        assert self.d_k % 2 == 0, "Head dimension must be even for RoPE"
+        
+        self.w_q = nn.Linear(d_model, d_model, bias=False)
+        self.w_k = nn.Linear(d_model, d_model, bias=False)
+        self.w_v = nn.Linear(d_model, d_model, bias=False)
+        self.w_o = nn.Linear(d_model, d_model, bias=False)
+        
+        self.dropout = nn.Dropout(dropout)
+        self.rope = RotaryEncoding(self.d_k, max_seq_len)
+        
+    def forward(self, query, key, value, mask=None, position_ids=None):
+        B, L, D = query.shape
+        key_len = key.shape[1]
+        
+        Q = self.w_q(query).reshape(B, L, self.n_heads, self.d_k).transpose(1, 2)
+        K = self.w_k(key).reshape(B, key_len, self.n_heads, self.d_k).transpose(1, 2)
+        V = self.w_v(value).reshape(B, key_len, self.n_heads, self.d_k).transpose(1, 2)
+        
+        Q = self.rope.apply_rope(Q, position_ids)
+        K = self.rope.apply_rope(K, position_ids)
+        
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+        if mask is not None:
+            # Expect boolean mask with True meaning allowed; mask out where False
+            mask_value = torch.finfo(scores.dtype).min
+            scores = scores.masked_fill(~mask, mask_value)
+        
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        
+        out = torch.matmul(attn_weights, V)
+        out = out.transpose(1, 2).contiguous().reshape(B, L, D)
+        
+        return self.w_o(out)
+
+class MultiQueryAttention(nn.Module):
+    def __init__(self, d_model, n_heads, n_kv_heads, dropout=0.1, max_seq_len=2048, pe_type="rope", *, query_pre_attn_norm: str | None = None, attn_logits_softcap: float | None = None):
+        super().__init__()
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.n_kv_heads = n_kv_heads
+        self.d_k = d_model // n_heads
+        self.pe_type = pe_type
+        # Optional attention knobs: query pre-attn scaling and softcap on logits
+        self.query_pre_attn_norm = (str(query_pre_attn_norm).lower() if query_pre_attn_norm is not None else None)
+        self.attn_logits_softcap = float(attn_logits_softcap) if attn_logits_softcap is not None else None
+        
+        assert self.d_k % 2 == 0, "Head dimension must be even for RoPE"
+        assert n_heads % n_kv_heads == 0, "Number of heads must be divisible by number of KV heads"
+        
+        self.head_repeats = n_heads // n_kv_heads
+        
+        self.w_q = nn.Linear(d_model, d_model, bias=False)
+        self.w_k = nn.Linear(d_model, d_model // self.head_repeats, bias=False)
+        self.w_v = nn.Linear(d_model, d_model // self.head_repeats, bias=False)
+        self.w_o = nn.Linear(d_model, d_model, bias=False)
+        
+        self.dropout = nn.Dropout(dropout)
+        if pe_type == "rope":
+            self.pos_encoding = RotaryEncoding(self.d_k, max_seq_len)
+        elif pe_type == "abs":
+            self.pos_encoding = nn.Parameter(torch.randn(1, max_seq_len, d_model))
+        elif pe_type == None:
+            self.pos_encoding = None
+        else:
+            raise ValueError(f"Unsupported positional encoding type: {pe_type}")
+        
+    def forward(self, query, key, value, mask=None, position_ids=None, kv_cache=None):
+        B, L, D = query.shape
+        key_len = key.shape[1]
+
+        if self.pe_type == "abs":
+            query = query + self.pos_encoding[:, :L]
+            key = key + self.pos_encoding[:, :key_len]
+        
+        Q = self.w_q(query).reshape(B, L, self.n_heads, self.d_k).transpose(1, 2)
+        K = self.w_k(key).reshape(B, key_len, self.n_kv_heads, self.d_k).transpose(1, 2)
+        V = self.w_v(value).reshape(B, key_len, self.n_kv_heads, self.d_k).transpose(1, 2)
+        
+        K = K.repeat_interleave(self.head_repeats, dim=1)
+        V = V.repeat_interleave(self.head_repeats, dim=1)
+        
+        if self.pe_type == "rope":
+            if position_ids is None:
+                q_position_ids = torch.arange(L, device=query.device)
+                k_position_ids = torch.arange(key_len, device=key.device)
+            else:
+                # Support per-sample [B,L] or global [L]
+                if position_ids.dim() == 2:
+                    q_position_ids = position_ids[:, :L]
+                    k_position_ids = position_ids[:, :key_len]
+                else:
+                    q_position_ids = position_ids[:L]
+                    k_position_ids = position_ids[:key_len]
+
+            Q = self.pos_encoding.apply_rope(Q, q_position_ids)
+            K = self.pos_encoding.apply_rope(K, k_position_ids)
+        
+        # Optional pre-attn normalization on queries (Gemma: rsqrt_head_dim)
+        score_scale = 1.0 / math.sqrt(self.d_k)
+        if self.query_pre_attn_norm == "rsqrt_head_dim":
+            Q = Q * score_scale
+            score_scale = 1.0  # Already applied to Q, avoid double-scaling
+        
+        # Decode-mode KV cache: concatenate cached keys/values; rely solely on explicit masks
+        # Build/extend KV-cache: during prefill, kv_cache is None and we should
+        # still return a full-cache for subsequent decoding steps.
+        if kv_cache is not None:
+            k_cat = torch.cat([kv_cache[0], K], dim=2)
+            v_cat = torch.cat([kv_cache[1], V], dim=2)
+        else:
+            k_cat, v_cat = K, V
+        # Store detached cache (no backprop through history during decode)
+        new_kv_cache = (k_cat.detach(), v_cat.detach())
+        K_use, V_use = k_cat, v_cat
+
+        scores = torch.matmul(Q, K_use.transpose(-2, -1)) * score_scale
+
+        if self.attn_logits_softcap is not None:
+            cap = float(self.attn_logits_softcap)
+            scores = cap * torch.tanh(scores / cap)
+
+        if mask is not None:
+            # Expect boolean mask with True meaning allowed; mask out where False
+            mask_value = torch.finfo(scores.dtype).min
+            # Slice mask to match scores shape for prefill with padded mask.
+            q_len, s_len = scores.shape[-2], scores.shape[-1]
+            if mask.shape[-1] != s_len:
+                mask = mask[..., :q_len, :s_len]
+            scores = scores.masked_fill(~mask, mask_value)
+        
+        # When an explicit mask is supplied (prefill or masked decode), prefer it over causal flag.
+        is_causal = kv_cache is not None and (mask is None)
+        S_all = K_use.shape[2]
+        if is_causal and L > 1:
+            causal_mask = torch.triu(torch.ones(L, S_all, dtype=torch.bool, device=Q.device), diagonal=1)
+            scores.masked_fill_(causal_mask, float('-inf'))
+
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        
+        out = torch.matmul(attn_weights, V_use)
+
+        out = out.transpose(1, 2).contiguous().reshape(B, L, D)
+
+        return self.w_o(out), new_kv_cache
+    
+class GemmaBlock(nn.Module):
+    def __init__(self, d_model, n_heads, n_kv_heads, d_ff, dropout=0.1, max_seq_len=2048, pe_type="rope", activation="gelu", attn_logits_softcap: float | None = None):
+        super().__init__()
+        # Align with Gemma: allow pre-attn normalization of queries via rsqrt_head_dim; default None keeps behavior unchanged
+        self.attention = MultiQueryAttention(
+            d_model, n_heads, n_kv_heads, dropout, max_seq_len, pe_type,
+            query_pre_attn_norm="rsqrt_head_dim",
+            attn_logits_softcap=attn_logits_softcap,
+        )
+
+        # Feed-forward network with configurable activation
+        self.feed_forward = GatedMLP(
+            in_features=d_model,
+            hidden_features=d_ff,
+            out_features=d_model,
+            activation=activation
+        )
+            
+        self.norm1 = nn.RMSNorm(d_model, eps=1e-6)
+        self.norm2 = nn.RMSNorm(d_model, eps=1e-6)
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, x, mask=None, position_ids=None, cache=None):
+        # Pre-norm attention
+        h = self.norm1(x)
+        attn_out, new_cache = self.attention(h, h, h, mask, position_ids, kv_cache=cache)
+        x = x + self.dropout(attn_out)
+
+        # Pre-norm feed-forward
+        h2 = self.norm2(x)
+        ff_out = self.feed_forward(h2)
+        x = x + self.dropout(ff_out)
+
+        return x, new_cache
