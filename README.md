@@ -20,7 +20,7 @@ This repository contains:
 - Training:
   - Single entrypoint: `src/train.py` with YAML configs under `src/configs/`
   - Accelerators for GPU/MPS/CPU and TPU (`src/utils/accelerators.py`), DDP support, EMA, grad accumulation, torch.compile
-  - Centralized W&B logging, checkpointing, and periodic image sampling utilities [[memory:7337664]]
+  - Centralized W&B logging, checkpointing, and periodic image sampling utilities
 - Datasets (see below): Hugging Face ImageNet-1k, TFDS downsampled ImageNet-64, ImageNet-21k folder trees, CIFAR-10; TinyStories (text-only helper)
 
 ### Install
@@ -138,7 +138,7 @@ requirements.txt         # project dependencies
 - Lint/test locally before PRs (add your favorite linter/test runner).
 
 ### Troubleshooting
-- If W&B auth fails, set `WANDB_MODE=offline` to log locally; training falls back automatically [[memory:7337664]].
+- If W&B auth fails, set `WANDB_MODE=offline` to log locally; training falls back automatically.
 - For HF ImageNet-1k, ensure you’ve accepted the dataset terms and (optionally) set `HF_TOKEN`.
 - For TFDS ImageNet-64, install `tensorflow_datasets`; see dataset notes in `src/utils/dataset.py`.
 - FID/IS requires `cleanfid` or `torch-fidelity`; install one and enable via YAML `eval.*` keys.
