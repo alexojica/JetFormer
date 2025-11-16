@@ -1,10 +1,10 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 authors:
-  - family-names: "JetFormer"
-    given-names: "Contributors"
-title: "JetFormer: Jet Flow (PyTorch)"
+  - family-names: "Ojica"
+    given-names: "Alexandru"
+title: "JetFormer: An Autoregressive Generative Model of Raw Images and Text (a Pytorch implementation)"
 version: "0.1.0"
 date-released: "2025-08-21"
 license: MIT
-repository-code: "https://github.com/your-username/your-repo"
+repository-code: "https://github.com/alexojica/JetFormer"
