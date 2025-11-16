@@ -70,6 +70,23 @@ python scripts/sample_from_checkpoint.py \
   --out_dir samples/t2i --num_images 8 --prompts_file prompts.txt
 ```
 
+### Sampling from Hugging Face (mojique/jetformer-cifar10)
+Download the CIFAR-10 config and checkpoint automatically from the Hub and sample class-conditional images:
+```bash
+python scripts/sample_from_checkpoint.py \
+  --hf_repo mojique/jetformer-cifar10 \
+  --out_dir samples/cifar10_hf --num_images 12 --class_ids 0,1,2,3
+```
+Optional: override filenames and revision if your repo layout differs:
+```bash
+python scripts/sample_from_checkpoint.py \
+  --hf_repo mojique/jetformer-cifar10 \
+  --hf_config cifar10_32.yaml \
+  --hf_ckpt jetformer_CIFAR10-32-p4-AR512x12.pt \
+  --hf_revision main \
+  --out_dir samples/cifar10_hf --num_images 12 --class_ids 0,1,2,3
+```
+
 FID/IS: enable periodic computation from training via `eval.fid_every_epochs`, `eval.is_every_epochs`, and `eval.fid_is_num_samples` in your YAML (see `src/utils/eval.py`).
 
 ### JetFormer scaling
