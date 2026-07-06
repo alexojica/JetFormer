@@ -608,6 +608,14 @@ def train_from_config(config: SimpleNamespace):
                 except Exception:
                     pass
         # End of epoch: run validation and optional sampling per-epoch schedule
+        if is_main_process and num_batches > 0:
+            denom = float(num_batches)
+            print(
+                f"Train Epoch {epoch+1} — total: {epoch_losses['total'] / denom:.4f} | "
+                f"text: {epoch_losses['text'] / denom:.4f} | "
+                f"img: {epoch_losses['image_gen'] / denom:.4f}"
+            )
+
         run_val_this_epoch = True
         val_every = getattr(config.eval, 'val_every_epochs', 1)
         run_val_this_epoch = (val_every <= 1) or (((epoch + 1) % max(1, val_every)) == 0)
