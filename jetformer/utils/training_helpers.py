@@ -203,6 +203,19 @@ def resume_optimizer_from_ckpt(
         state = ckpt.get('scheduler_state_dict', None)
         if state:
             scheduler.load_state_dict(state)
+            # LambdaLR does not serialize its lambda closure. Recompute the LR
+            # for the restored step against the current run's scheduler horizon
+            # so short-run checkpoints resume with the intended schedule.
+            if hasattr(scheduler, 'lr_lambdas') and hasattr(scheduler, 'base_lrs'):
+                last_epoch = max(0, int(getattr(scheduler, 'last_epoch', 0)))
+                lrs = [
+                    float(base_lr) * float(lr_lambda(last_epoch))
+                    for base_lr, lr_lambda in zip(scheduler.base_lrs, scheduler.lr_lambdas)
+                ]
+                for param_group, lr in zip(optimizer.param_groups, lrs):
+                    param_group['lr'] = lr
+                if hasattr(scheduler, '_last_lr'):
+                    scheduler._last_lr = lrs
     except Exception as exc:
         logger.warning("Scheduler state restore skipped: %r", exc)
 
