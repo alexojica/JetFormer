@@ -58,9 +58,8 @@ def evaluate_one_epoch(model_obj: torch.nn.Module,
         except Exception:
             pass
         
-        base = model_obj.module if hasattr(model_obj, 'module') else model_obj
         from jetformer.utils.training_helpers import train_step as _train_step
-        out = _train_step(base, batch, step=0, total_steps=1, config=config)
+        out = _train_step(model_obj, batch, step=0, total_steps=1, config=config)
         
         bsz = batch['image'].size(0)
         sum_total += _metric_float(out.get('loss'), 0.0) * bsz
@@ -68,9 +67,15 @@ def evaluate_one_epoch(model_obj: torch.nn.Module,
         sum_img += _metric_float(out.get('image_bpd_total', out.get('bpd')), 0.0) * bsz
         sum_flow += _metric_float(out.get('flow_bpd_component', out.get('logdet_bpd')), 0.0) * bsz
         count += int(bsz or 0)
-        
+
     model_obj.train(was_training)
-    denom = max(1, count)
+
+    if accelerator is not None and hasattr(accelerator, "reduce_sums"):
+        sum_total, sum_text, sum_img, sum_flow, count = accelerator.reduce_sums(
+            [sum_total, sum_text, sum_img, sum_flow, float(count)]
+        )
+
+    denom = max(1.0, float(count))
     return (sum_total/denom, sum_text/denom, sum_img/denom, sum_flow/denom)
 
 

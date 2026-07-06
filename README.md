@@ -135,7 +135,8 @@ jetformer/                     # core PyTorch implementation
     losses.py            # GMM params, BPD accounting, unified training loss
     sampling.py          # CFG samplers (class-conditional and text-to-image)
     accelerators.py      # GPU/MPS/CPU and TPU accelerator adapters
-    training_helpers.py  # W&B, checkpoints, EMA, init/broadcast, train step
+    training_helpers.py  # W&B, checkpoints, init/broadcast, train step
+    ema.py               # Exponential moving average weights
     eval.py              # Validation loop and optional FID/IS hooks
     tokenizer.py         # SentencePiece downloader/helper
   configs/               # Ready-to-run YAML configs

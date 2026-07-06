@@ -431,8 +431,8 @@ def train_from_config(config: SimpleNamespace):
     persist_wandb_run_id(vars(config), wb_run)
     
     best_val_loss = float('inf')
+    v_total, v_text, v_img, v_flow = evaluate_one_epoch(model, val_loader, accelerator, eval_no_rgb_noise=config.eval.eval_no_rgb_noise, config=config)
     if is_main_process:
-        v_total, v_text, v_img, v_flow = evaluate_one_epoch(model, val_loader, accelerator, eval_no_rgb_noise=config.eval.eval_no_rgb_noise, config=config)
         print(f"Initial Val — total: {v_total:.4f} | text: {v_text:.4f} | img: {v_img:.4f}")
         if wb_run:
             wb_logger.log_validation_epoch(model, v_total, v_text, v_img, v_flow, epoch=0, step=0)
@@ -458,6 +458,8 @@ def train_from_config(config: SimpleNamespace):
                 if ema_enabled and ema is not None:
                     ema.restore(model)
         best_val_loss = v_total
+    if ddp_enabled:
+        accelerator.barrier()
 
     for epoch in range(int(start_epoch), int(config.num_epochs)):
         epoch_losses = {
@@ -495,8 +497,7 @@ def train_from_config(config: SimpleNamespace):
                         torch.compiler.cudagraph_mark_step_begin()
                     except Exception:
                         pass
-                    base = unwrap_base_model(model)
-                    out = training_helpers.train_step(base, batch, step, total_opt_steps, config)
+                    out = training_helpers.train_step(model, batch, step, total_opt_steps, config)
                     loss = out["loss"]
 
                 # Normalize loss for gradient accumulation
@@ -548,7 +549,8 @@ def train_from_config(config: SimpleNamespace):
             # If an epoch-level sampling schedule is configured, it overrides per-batch sampling
             sample_every_epochs = config.eval.sample_every_epochs
             sample_every = config.eval.sample_every_batches if sample_every_epochs <= 0 else 0
-            if is_main_process and wb_run and sample_every > 0 and (batch_idx % sample_every == 0):
+            batch_sample_due = sample_every > 0 and (batch_idx % sample_every == 0)
+            if is_main_process and wb_run and batch_sample_due:
                 print(f"Epoch {epoch+1}/{config.num_epochs}, "
                         f"Batch {batch_idx}/{len(dataloader)}, "
                         f"Total Loss: {loss.item():.4f}, "
@@ -580,6 +582,8 @@ def train_from_config(config: SimpleNamespace):
                 finally:
                     if ema_enabled and ema is not None:
                         ema.restore(model)
+            if ddp_enabled and batch_sample_due:
+                accelerator.barrier()
                 
             if took_step:
                 step += 1
@@ -595,8 +599,9 @@ def train_from_config(config: SimpleNamespace):
         val_every = getattr(config.eval, 'val_every_epochs', 1)
         run_val_this_epoch = (val_every <= 1) or (((epoch + 1) % max(1, val_every)) == 0)
 
-        if is_main_process and run_val_this_epoch:
+        if run_val_this_epoch:
             v_total, v_text, v_img, v_flow = evaluate_one_epoch(model, val_loader, accelerator, eval_no_rgb_noise=config.eval.eval_no_rgb_noise, config=config)
+        if is_main_process and run_val_this_epoch:
             print(f"Val Epoch {epoch+1} — total: {v_total:.4f} | text: {v_text:.4f} | img: {v_img:.4f}")
             if wb_run:
                 wb_logger.log_validation_epoch(model, v_total, v_text, v_img, v_flow, epoch=epoch+1, step=step)
@@ -623,6 +628,8 @@ def train_from_config(config: SimpleNamespace):
                         else {'best_val_loss': best_val_loss}
                     ),
                 )
+        if ddp_enabled and run_val_this_epoch:
+            accelerator.barrier()
 
         # Periodic FID/IS computation after epoch (EMA weights) based solely on epoch cadence
         try:
@@ -676,13 +683,16 @@ def train_from_config(config: SimpleNamespace):
                         ema.restore(model)
                 except Exception:
                     pass
+        if ddp_enabled and (do_fid or do_is):
+            accelerator.barrier()
 
         # Epoch-level sampling independent of validation cadence
         try:
             see = config.eval.sample_every_epochs
         except AttributeError:
             see = 0
-        if is_main_process and see > 0 and (((epoch + 1) % see) == 0):
+        epoch_sample_due = see > 0 and (((epoch + 1) % see) == 0)
+        if is_main_process and epoch_sample_due:
             try:
                 if ema_enabled and ema is not None:
                     ema.apply_to(model)
@@ -707,6 +717,8 @@ def train_from_config(config: SimpleNamespace):
                         ema.restore(model)
                     except Exception:
                         pass
+        if ddp_enabled and epoch_sample_due:
+            accelerator.barrier()
 
         # Always save/overwrite rolling last checkpoint at end of each epoch
         if is_main_process:
@@ -723,6 +735,8 @@ def train_from_config(config: SimpleNamespace):
                 config_dict=sns_to_dict(config),
                 extra_fields=(({'ema_state_dict': ema.state_dict()} if (ema_enabled and ema is not None) else {})),
             )
+        if ddp_enabled:
+            accelerator.barrier()
 
     print("Training completed!")
     # Final checkpoint is already covered by the rolling 'last.pt' saved each epoch.

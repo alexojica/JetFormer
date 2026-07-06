@@ -506,8 +506,43 @@ class JetFormer(nn.Module):
 
         return x, attn_mask, position_ids, padding_mask
     
-    def forward(self, text_tokens, image_tokens, text_first_mask, input_mask, drop_text_cond_mask=None):
-        """Forward pass"""
+    def forward(self, text_tokens, image_tokens=None, text_first_mask=None, input_mask=None, drop_text_cond_mask=None, **loss_kwargs):
+        """Run the transformer forward pass.
+
+        The tensor API returns ``(text_logits, image_logits)``. Passing a batch
+        dict enters the training-loss path, which lets DDP wrap the full loss
+        computation without bypassing distributed autograd hooks.
+        """
+        if isinstance(text_tokens, dict):
+            from jetformer.utils.losses import compute_jetformer_pca_loss
+
+            required = ("step", "total_steps", "config")
+            missing = [name for name in required if name not in loss_kwargs]
+            if missing:
+                raise TypeError(f"batch forward missing required loss kwargs: {missing}")
+            config = loss_kwargs["config"]
+            return compute_jetformer_pca_loss(
+                self,
+                text_tokens,
+                int(loss_kwargs["step"]),
+                int(loss_kwargs["total_steps"]),
+                text_first_prob=config.training.text_prefix_prob,
+                input_noise_std=config.training.input_noise_std,
+                cfg_drop_prob=config.model.drop_labels_probability,
+                loss_on_prefix=config.training.loss_on_prefix,
+                stop_grad_nvp_prefix=config.training.stop_grad_nvp_prefix,
+                advanced_metrics=config.advanced_metrics,
+                noise_scale=config.training.noise_scale,
+                noise_min=config.training.noise_min,
+                rgb_noise_on_image_prefix=config.training.rgb_noise_on_image_prefix,
+                eval_no_rgb_noise=bool(text_tokens.get("no_rgb_noise", False)),
+                text_loss_weight=getattr(config.training, "text_loss_weight", 1.0),
+                image_loss_weight=getattr(config.training, "image_loss_weight", 1.0),
+            )
+
+        if image_tokens is None or text_first_mask is None or input_mask is None:
+            raise TypeError("tensor forward requires image_tokens, text_first_mask, and input_mask")
+
         batch_size = text_tokens.shape[0]
         device = text_tokens.device
         

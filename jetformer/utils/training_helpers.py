@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader
 
 import wandb
 from PIL import Image
+from torch.nn.parallel import DistributedDataParallel as DDP
 from wandb.sdk.data_types.image import Image as WandbImage
 
 from jetformer.utils.image import to_x01, dequantize01
@@ -460,6 +461,9 @@ def train_step(model: torch.nn.Module,
                step: int,
                total_steps: int,
                config: SimpleNamespace) -> Dict[str, Any]:
+    if isinstance(model, DDP):
+        return model(batch, step=step, total_steps=total_steps, config=config)
+
     eval_no_rgb_noise = bool(batch.get('no_rgb_noise', False))
     advanced_metrics = config.advanced_metrics
     
@@ -519,56 +523,3 @@ def rgb_cosine_sigma(
     sigma_t = torch.tensor(float(sigma0), device=step_val.device) * (1.0 + torch.cos(torch.tensor(math.pi, device=step_val.device) * t_prog)) * 0.5
     sigma_t = torch.clamp_min(sigma_t, float(sigma_final))
     return sigma_t
-
-class ExponentialMovingAverage:
-    def __init__(self, model, decay: float = 0.9999):
-        self.decay = float(decay)
-        self.shadow = {}
-        base = model
-        if hasattr(base, 'module'):
-            base = base.module
-        for name, param in base.named_parameters():
-            if param.requires_grad:
-                self.shadow[name] = param.detach().clone().float()
-
-    @torch.no_grad()
-    def update(self, model):
-        base = model
-        if hasattr(base, 'module'):
-            base = base.module
-        for name, param in base.named_parameters():
-            if not param.requires_grad:
-                continue
-            if name not in self.shadow:
-                self.shadow[name] = param.detach().clone().float()
-            else:
-                self.shadow[name].mul_(self.decay).add_(param.detach().float(), alpha=(1.0 - self.decay))
-
-    def state_dict(self):
-        return {k: v.cpu() for k, v in self.shadow.items()}
-
-    def load_state_dict(self, state):
-        self.shadow = {k: v.clone() for k, v in state.items()}
-
-    @torch.no_grad()
-    def apply_to(self, model):
-        base = model
-        if hasattr(base, 'module'):
-            base = base.module
-        self._backup = {}
-        for name, param in base.named_parameters():
-            if name in self.shadow:
-                self._backup[name] = param.detach().clone()
-                param.data.copy_(self.shadow[name].to(param.dtype).to(param.device))
-
-    @torch.no_grad()
-    def restore(self, model):
-        base = model
-        if hasattr(base, 'module'):
-            base = base.module
-        if not hasattr(self, '_backup'):
-            return
-        for name, param in base.named_parameters():
-            if name in self._backup:
-                param.data.copy_(self._backup[name])
-        self._backup = {}
