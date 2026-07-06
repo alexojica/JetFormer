@@ -6,7 +6,7 @@ This repository contains:
 
 ### Features
 - JetFormer model (`jetformer/jetformer.py`):
-  - PatchPCA latents with optional whitening and depth-to-seq; image tokens are NHWC patchified/unpatchified
+  - PatchPCA latents with optional whitening; image tokens are NHWC patchified/unpatchified
   - Optional Jet adaptor (`jetformer/latents.py` → `jetformer/flow/jet_flow.py`) as an invertible normalizing flow over the latent grid (ps=1)
   - Gemma-style decoder-only transformer with Multi-Query Attention, RMSNorm, dropout, and RoPE; explicit right-aligned prefill and masked decode
   - Image head: diagonal-Gaussian GMM (k mixtures) with stable scale parameterization; optional multivariate head; optional bf16 head weights
@@ -88,11 +88,13 @@ python scripts/sample_from_checkpoint.py \
   --ckpt checkpoints/jetformer_CIFAR10-32-small-p2-one-per-class_last.pt \
   --out_dir samples/cifar10_one_per_class \
   --num_images 10 --class_ids 0,1,2,3,4,5,6,7,8,9 \
-  --sample_method mean
+  --sample_method mode
 ```
 This config trains on one CIFAR-10 image per class. Use the rolling `_last.pt`
 checkpoint for the visual overfit check; `_best.pt` is selected by held-out
 validation loss and is not expected to memorize the training images.
+Use `--sample_method mode` for deterministic GMM-component decoding, `mean` for
+the statistical mixture mean, and `sample` for stochastic decoding.
 
 Text-to-image demo (SentencePiece tokenizer; prompts file optional):
 ```bash
@@ -132,6 +134,7 @@ FID/IS: enable periodic computation from training via `eval.fid_every_epochs`, `
 - Paper-aligned toggles:
   - Mixture count: `model.num_mixtures` (e.g., 64/256/1024)
   - Factoring: `patch_pca.model.codeword_dim` (residual dims are Gaussian)
+  - PatchPCA sequence depth: keep `patch_pca.model.depth_to_seq: 1`; larger values are intentionally rejected by the current latent-grid adaptor path.
   - RGB noise curriculum: `training.noise_scale` and `training.noise_min`
   - CFG: training label/text dropout `model.drop_labels_probability`; inference `sampling.cfg_inference_weight` and `sampling.cfg_mode`
   - Pre-/post-projection W: `pre_latent_projection`/`latent_projection` (learned or PCA-frozen)

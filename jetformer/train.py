@@ -379,6 +379,16 @@ def train_from_config(config: SimpleNamespace):
 
     # Wrap with accelerator (adds DDP where applicable) AFTER init
     model = accelerator.wrap_model(model)
+    if len(dataloader) == 0:
+        raise ValueError(
+            f"Training dataloader has zero batches. "
+            f"Reduce batch_size={config.batch_size} or increase the training subset size."
+        )
+    if val_loader is not None and len(val_loader) == 0:
+        raise ValueError(
+            f"Validation dataloader has zero batches. "
+            f"Reduce batch_size={config.batch_size} or increase the validation subset size."
+        )
     
     grad_accum_steps = config.grad_accum_steps
     total_opt_steps = (len(dataloader) * config.num_epochs + (grad_accum_steps - 1)) // max(1, grad_accum_steps)

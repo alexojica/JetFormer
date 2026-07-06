@@ -774,6 +774,8 @@ class JetFormer(nn.Module):
                 def sample(self, sample_shape=torch.Size()):
                     # Add a sequence dimension of 1 for API parity with GMM path
                     return self.dist.sample(sample_shape).unsqueeze(-2)
+                def mean(self):
+                    return self.dist.mean.unsqueeze(-2)
                 def mode(self):
                     return self.dist.loc.unsqueeze(-2)
                 def log_prob(self, x: torch.Tensor):
@@ -804,6 +806,9 @@ class JetFormer(nn.Module):
                     sel_sigma = self.sigma[b, pos, comp_idx, :]
                     normal = torch.distributions.Normal(sel_mu, sel_sigma)
                     return normal.sample()
+                def mean(self):
+                    weights = torch.softmax(self.mix, dim=-1)
+                    return torch.sum(weights[..., None] * self.mu, dim=-2)
                 def mode(self):
                     comp_idx = self.mix.argmax(dim=-1)
                     B, L = comp_idx.shape
@@ -986,6 +991,9 @@ class JetFormer(nn.Module):
         """Construct JetFormer and its auxiliary modules directly from a nested config."""
         get = cls._get_from_ns
 
+        def _is_bfloat16(value) -> bool:
+            return str(value).lower() in {"bfloat16", "bf16"}
+
         # --- Core model parameters ---
         kwargs = {
             'd_model': get(config, 'model.width'),
@@ -1000,7 +1008,7 @@ class JetFormer(nn.Module):
             'num_mixtures': get(config, 'model.num_mixtures'),
             'dropout': get(config, 'model.dropout'),
             # Prefer boolean control for head dtype to avoid string->dtype mismatch
-            'use_bfloat16_img_head': get(config, 'model.head_dtype', 'fp32') == 'bfloat16',
+            'use_bfloat16_img_head': _is_bfloat16(get(config, 'model.head_dtype', 'fp32')),
             'num_vocab_repeats': get(config, 'model.num_vocab_repeats', 1),
             'scale_tol': get(config, 'model.scale_tol', 1e-6),
             'causal_mask_on_prefix': get(config, 'model.causal_mask_on_prefix', True),
@@ -1021,6 +1029,17 @@ class JetFormer(nn.Module):
         kwargs['num_classes'] = get(config, 'input.num_classes')
         kwargs['class_token_length'] = get(config, 'input.class_token_length')
 
+        H, W = kwargs['input_size']
+        ps = kwargs['patch_size']
+        if int(H) % int(ps) != 0 or int(W) % int(ps) != 0:
+            raise ValueError(f"input.input_size={kwargs['input_size']} must be divisible by patch_size={ps}.")
+        depth_to_seq = int(get(config, 'patch_pca.model.depth_to_seq', 1))
+        if depth_to_seq != 1:
+            raise ValueError(
+                "patch_pca.model.depth_to_seq values other than 1 are not supported by "
+                "the current JetFormer latent-grid adaptor path."
+            )
+
         # --- Jet/Flow parameters surfaced from adaptor config ---
         adaptor_model_cfg = get(config, 'adaptor.model', SimpleNamespace())
         kwargs['jet_depth'] = getattr(adaptor_model_cfg, 'depth', None)
@@ -1036,59 +1055,48 @@ class JetFormer(nn.Module):
         model = cls(**final_kwargs).to(device)
 
         # Attach training mode (e.g., 'pca')
-        try:
-            model.training_mode = get(config, 'jetformer_training_mode', 'pca')
-        except Exception:
-            pass
+        model.training_mode = get(config, 'jetformer_training_mode', 'pca')
 
-        # Attach PatchPCA if configured
-        try:
-            from jetformer.latents import PatchPCA
-            pca_model_params = get(config, 'patch_pca.model')
-            if pca_model_params:
-                pca_params_dict = vars(pca_model_params)
-                # Ensure PCA input size matches dataset/model
-                if 'input_size' not in pca_params_dict or pca_params_dict['input_size'] is None:
-                    pca_params_dict['input_size'] = kwargs['input_size']
-                allowed_keys = {
-                    'pca_init_file', 'whiten', 'noise_std', 'add_dequant_noise',
-                    'input_size', 'patch_size', 'depth_to_seq', 'skip_pca', 'eps'
-                }
-                safe_params = {k: v for k, v in pca_params_dict.items() if k in allowed_keys}
-                model.patch_pca = PatchPCA(**safe_params).to(device)
-        except Exception:
-            pass
+        from jetformer.latents import PatchPCA, build_adaptor
+
+        pca_model_params = get(config, 'patch_pca.model')
+        if pca_model_params is None:
+            raise ValueError("config.patch_pca.model is required for JetFormer training and sampling.")
+        pca_params_dict = dict(vars(pca_model_params))
+        # Ensure PCA input size matches dataset/model
+        if 'input_size' not in pca_params_dict or pca_params_dict['input_size'] is None:
+            pca_params_dict['input_size'] = kwargs['input_size']
+        allowed_keys = {
+            'pca_init_file', 'whiten', 'noise_std', 'add_dequant_noise',
+            'input_size', 'patch_size', 'depth_to_seq', 'skip_pca', 'eps'
+        }
+        safe_params = {k: v for k, v in pca_params_dict.items() if k in allowed_keys}
+        model.patch_pca = PatchPCA(**safe_params).to(device)
 
         # Attach Adaptor/Flow if enabled
-        try:
-            from jetformer.latents import build_adaptor
-            use_adaptor = get(config, 'use_adaptor', False)
-            if use_adaptor:
-                H, W = kwargs['input_size']
-                ps = kwargs['patch_size']
-                grid_h, grid_w = H // ps, W // ps
-                full_token_dim = 3 * ps * ps
-                adaptor_cfg = get(config, 'adaptor', SimpleNamespace())
-                adaptor_model_cfg_ns = get(adaptor_cfg, 'model', SimpleNamespace())
-                model.adaptor = build_adaptor(
-                    kind=getattr(adaptor_cfg, 'kind', 'jet'),
-                    grid_h=grid_h,
-                    grid_w=grid_w,
-                    dim=full_token_dim,
-                    **vars(adaptor_model_cfg_ns)
-                ).to(device)
-                model._latent_noise_dim = getattr(adaptor_cfg, 'latent_noise_dim', 0)
-        except Exception:
-            pass
+        use_adaptor = bool(get(config, 'use_adaptor', False))
+        model._latent_noise_dim = 0
+        if use_adaptor:
+            grid_h, grid_w = int(H) // int(ps), int(W) // int(ps)
+            full_token_dim = 3 * int(ps) * int(ps)
+            adaptor_cfg = get(config, 'adaptor', SimpleNamespace())
+            adaptor_model_cfg_ns = get(adaptor_cfg, 'model', SimpleNamespace())
+            model.adaptor = build_adaptor(
+                kind=getattr(adaptor_cfg, 'kind', 'jet'),
+                grid_h=grid_h,
+                grid_w=grid_w,
+                dim=full_token_dim,
+                **vars(adaptor_model_cfg_ns)
+            ).to(device)
+            model._latent_noise_dim = int(getattr(adaptor_cfg, 'latent_noise_dim', 0))
+            if model._latent_noise_dim < 0:
+                raise ValueError("adaptor.latent_noise_dim must be non-negative after config normalization.")
 
-        # Alias model.jet to the proper flow module for training/sampling utilities
-        try:
-            if getattr(model, 'training_mode', 'pca') == 'pca' and getattr(model, 'adaptor', None) is not None:
-                model.jet = getattr(model.adaptor, 'flow', model.adaptor)
-                model.jet_is_latent = True
-            else:
-                model.jet_is_latent = False
-        except Exception:
-            pass
+        # Alias model.jet to the proper flow module for training/sampling utilities.
+        if getattr(model, 'training_mode', 'pca') == 'pca' and getattr(model, 'adaptor', None) is not None:
+            model.jet = getattr(model.adaptor, 'flow', model.adaptor)
+            model.jet_is_latent = True
+        else:
+            model.jet_is_latent = False
 
         return model

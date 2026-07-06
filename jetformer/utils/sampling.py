@@ -12,7 +12,9 @@ from PIL import Image
 
 def _draw_pdf(pdf, sample_method: str = "sample"):
     method = str(sample_method or "sample").lower()
-    if method in {"mean", "mode", "greedy"} and hasattr(pdf, "mode"):
+    if method == "mean" and hasattr(pdf, "mean"):
+        return pdf.mean()
+    if method in {"mode", "greedy"} and hasattr(pdf, "mode"):
         return pdf.mode()
     return pdf.sample()
 

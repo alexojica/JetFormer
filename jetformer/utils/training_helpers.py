@@ -172,7 +172,10 @@ def initialize_actnorm_if_needed(model: torch.nn.Module,
 def broadcast_flow_params_if_ddp(model: torch.nn.Module) -> None:
     if dist.is_available() and dist.is_initialized():
         base = model.module if hasattr(model, 'module') else model
-        for p in base.jet.parameters():
+        jet = getattr(base, 'jet', None)
+        if jet is None:
+            return
+        for p in jet.parameters():
             dist.broadcast(p.data, src=0)
 
 
