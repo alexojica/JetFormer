@@ -104,6 +104,7 @@ def get_default_config() -> dict:
     return {
         'seed': 0,
         'num_epochs': 100,
+        'max_run_epochs': None,
         'torch_compile': False,
         'advanced_metrics': True,
         'batch_size': 2048,
@@ -468,7 +469,12 @@ def train_from_config(config: SimpleNamespace):
     if ddp_enabled:
         accelerator.barrier()
 
-    for epoch in range(int(start_epoch), int(config.num_epochs)):
+    end_epoch = int(config.num_epochs)
+    max_run_epochs = getattr(config, 'max_run_epochs', None)
+    if max_run_epochs is not None:
+        end_epoch = min(end_epoch, int(start_epoch) + max(0, int(max_run_epochs)))
+
+    for epoch in range(int(start_epoch), end_epoch):
         epoch_losses = {
             'total': 0.0,
             'text': 0.0,
@@ -765,6 +771,11 @@ def main() -> None:
     parser.add_argument('--batch_size', type=int, help='Override batch size')
     parser.add_argument('--learning_rate', type=float, help='Override learning rate')
     parser.add_argument('--num_epochs', type=int, help='Override number of epochs')
+    parser.add_argument(
+        '--max_run_epochs',
+        type=int,
+        help='Limit epochs in this invocation without changing the total scheduler horizon',
+    )
     parser.add_argument('--resume_from', type=str, help='Path to checkpoint to resume from')
 
     args, unknown = parser.parse_known_args()

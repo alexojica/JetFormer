@@ -62,6 +62,11 @@ Train and auto-checkpoint:
 ```bash
 python -m jetformer.train --config jetformer/configs/cifar10_32.yaml
 ```
+For a short invocation that should keep the YAML scheduler horizon intact, use
+`--max_run_epochs` instead of overriding `--num_epochs`:
+```bash
+python -m jetformer.train --config jetformer/configs/cifar10_32_mps_xl.yaml --max_run_epochs 1
+```
 After `pip install -e .`, the equivalent console entrypoint is:
 ```bash
 jetformer-train --config jetformer/configs/cifar10_32.yaml
@@ -137,6 +142,7 @@ FID/IS: enable periodic computation from training via `eval.fid_every_epochs`, `
 
 ### Checkpoints and sampling
 - Checkpoints are saved under `./checkpoints/` as `jetformer_{run_name}_best.pt` (val best) and `jetformer_{run_name}_last.pt` (rolling).
+- `num_epochs` defines the full training/scheduler horizon. Use `max_run_epochs` to stop an invocation early without changing the learning-rate schedule saved in checkpoints.
 - Periodic image sampling can be enabled via `eval.sample_every_epochs` (images logged to W&B if enabled).
 
 ### Project layout
