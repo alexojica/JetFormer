@@ -984,14 +984,16 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
         # For class-conditional datasets, wrap them to provide 'text'
         val_dataset = ClassAsTextDataset(val_dataset)
     else:
-        # Fallback to a default dataset if not specified (e.g., for older configs)
-        logger.warning(f"Dataset '{dataset_choice}' not recognized or handled; falling back to 'imagenet64_tfds'.")
-        dataset = TFDSImagenetResized64(
-            split='train',
-            max_samples=getattr(input_cfg, 'max_samples', None),
-            class_subset=getattr(input_cfg, 'class_subset', None)
+        valid_datasets = (
+            'cifar10',
+            'imagenet1k_hf',
+            'imagenet21k_folder',
+            'imagenet64_tfds',
         )
-        val_dataset = TFDSImagenetResized64(split='validation')
+        raise ValueError(
+            f"Unknown input.dataset={dataset_choice!r}. "
+            f"Expected one of: {', '.join(valid_datasets)}."
+        )
 
     train_sampler, val_sampler = accelerator.build_samplers(dataset, val_dataset)
     pin_mem = True if accelerator.device.type == 'cuda' else False

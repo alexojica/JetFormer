@@ -9,6 +9,16 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 
+def _metric_float(value, default: float = 0.0) -> float:
+    if value is None:
+        return float(default)
+    if torch.is_tensor(value):
+        if value.numel() == 0:
+            return float(default)
+        return float(value.detach().float().mean().item())
+    return float(value)
+
+
 @torch.no_grad()
 def evaluate_one_epoch(model_obj: torch.nn.Module,
                        loader: DataLoader,
@@ -26,6 +36,7 @@ def evaluate_one_epoch(model_obj: torch.nn.Module,
     Returns:
         A tuple containing (total_loss, text_ce, image_bpd, flow_bpd).
     """
+    was_training = model_obj.training
     model_obj.eval()
     sum_total = 0.0
     sum_text = 0.0
@@ -52,13 +63,13 @@ def evaluate_one_epoch(model_obj: torch.nn.Module,
         out = _train_step(base, batch, step=0, total_steps=1, config=config)
         
         bsz = batch['image'].size(0)
-        sum_total += float(out.get('loss', 0.0)) * bsz
-        sum_text += float(out.get('text_loss', 0.0)) * bsz
-        sum_img += float(out.get('image_bpd_total', out.get('bpd', 0.0))) * bsz
-        sum_flow += float(out.get('flow_bpd_component', out.get('logdet_bpd', 0.0))) * bsz
+        sum_total += _metric_float(out.get('loss'), 0.0) * bsz
+        sum_text += _metric_float(out.get('text_loss'), 0.0) * bsz
+        sum_img += _metric_float(out.get('image_bpd_total', out.get('bpd')), 0.0) * bsz
+        sum_flow += _metric_float(out.get('flow_bpd_component', out.get('logdet_bpd')), 0.0) * bsz
         count += int(bsz or 0)
         
-    model_obj.train()
+    model_obj.train(was_training)
     denom = max(1, count)
     return (sum_total/denom, sum_text/denom, sum_img/denom, sum_flow/denom)
 
@@ -276,4 +287,3 @@ def compute_fid(generated_dir: Path | str, ref_dir: Path | str | None = None, re
         except Exception:
             score = None
     return score
-

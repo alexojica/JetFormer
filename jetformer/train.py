@@ -192,7 +192,6 @@ def get_default_config() -> dict:
             'cfg_inference_weight': 3.0,
             'temperature': 0.94,
             'temperature_probs': 1.0,
-            'cfg_strength': 3.0, # Legacy, prefer cfg_inference_weight
             'cfg_mode': "interp",
         },
         'eval': {
@@ -256,9 +255,9 @@ def get_config_from_yaml_and_cli(config_path: str, cli_args: argparse.Namespace)
     if 'weight_decay' in config:
         config['optimizer']['wd'] = config.pop('weight_decay')
     
-    # Unify sampling CFG strength parameter
+    # Unify legacy sampling CFG strength parameter when it is explicitly supplied.
     if 'cfg_strength' in config['sampling']:
-        config['sampling']['cfg_inference_weight'] = config['sampling']['cfg_strength']
+        config['sampling']['cfg_inference_weight'] = config['sampling'].pop('cfg_strength')
 
     # Auto-compute latent_noise_dim if not set
     if config['adaptor'].get('latent_noise_dim', -1) <= 0:
