@@ -252,8 +252,7 @@ def generate_text_to_image_samples_cfg(
             from jetformer.utils.logging import get_logger
             logger = get_logger(__name__)
             logger.error(f"Error during sampling for prompt '{prompt_text}': {e}", exc_info=True)
-            placeholder = Image.new('RGB', (256, 256), color='red')
-            samples.append({'prompt': (prompt_value if 'prompt_value' in locals() else prompt_text), 'image': placeholder})
+            continue
             
     model.train()
     return samples

@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import random
 import time
@@ -410,7 +411,7 @@ def train_from_config(config: SimpleNamespace):
     opt_cfg = {**vars(config.optimizer), **vars(getattr(config, 'schedule', SimpleNamespace()))}
     optimizer, scheduler = get_opt_sched(model, opt_cfg, total_steps)
     if _loaded_ckpt:
-        resume_optimizer_from_ckpt(optimizer, _loaded_ckpt)
+        resume_optimizer_from_ckpt(optimizer, _loaded_ckpt, scheduler=scheduler)
     step = initialize_step_from_ckpt(model, len(dataloader), start_epoch, device_obj, _loaded_ckpt)
 
     ema_decay_val = config.ema_decay
@@ -431,6 +432,11 @@ def train_from_config(config: SimpleNamespace):
     persist_wandb_run_id(vars(config), wb_run)
     
     best_val_loss = float('inf')
+    if _loaded_ckpt is not None:
+        try:
+            best_val_loss = float(_loaded_ckpt.get('best_val_loss', best_val_loss))
+        except Exception:
+            best_val_loss = float('inf')
     v_total, v_text, v_img, v_flow = evaluate_one_epoch(model, val_loader, accelerator, eval_no_rgb_noise=config.eval.eval_no_rgb_noise, config=config)
     if is_main_process:
         print(f"Initial Val — total: {v_total:.4f} | text: {v_text:.4f} | img: {v_img:.4f}")
@@ -457,7 +463,8 @@ def train_from_config(config: SimpleNamespace):
             finally:
                 if ema_enabled and ema is not None:
                     ema.restore(model)
-        best_val_loss = v_total
+        if not math.isfinite(best_val_loss):
+            best_val_loss = v_total
     if ddp_enabled:
         accelerator.barrier()
 
@@ -624,8 +631,9 @@ def train_from_config(config: SimpleNamespace):
                     wb_run=wb_run,
                     config_dict=sns_to_dict(config),
                     extra_fields=(
-                        {'best_val_loss': best_val_loss, 'ema_state_dict': ema.state_dict()} if (ema_enabled and ema is not None)
-                        else {'best_val_loss': best_val_loss}
+                        {'best_val_loss': best_val_loss, 'global_step': int(step), 'ema_state_dict': ema.state_dict()}
+                        if (ema_enabled and ema is not None)
+                        else {'best_val_loss': best_val_loss, 'global_step': int(step)}
                     ),
                 )
         if ddp_enabled and run_val_this_epoch:
@@ -733,7 +741,11 @@ def train_from_config(config: SimpleNamespace):
                 ckpt_path=last_ckpt_path,
                 wb_run=wb_run,
                 config_dict=sns_to_dict(config),
-                extra_fields=(({'ema_state_dict': ema.state_dict()} if (ema_enabled and ema is not None) else {})),
+                extra_fields=(
+                    {'best_val_loss': best_val_loss, 'global_step': int(step), 'ema_state_dict': ema.state_dict()}
+                    if (ema_enabled and ema is not None)
+                    else {'best_val_loss': best_val_loss, 'global_step': int(step)}
+                ),
             )
         if ddp_enabled:
             accelerator.barrier()

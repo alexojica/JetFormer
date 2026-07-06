@@ -10,6 +10,8 @@ def to_x01(images: torch.Tensor) -> torch.Tensor:
     Supports uint8-like [0,255] or float [-1,1]. Returns float tensor in [0,1].
     """
     images_f = images.float()
+    if (images_f.min() >= 0.0) and (images_f.max() <= 1.0):
+        return images_f
     if (images_f.min() >= 0.0) and (images_f.max() > 1.0):
         return images_f / 255.0
     return (images_f + 1.0) * 0.5
@@ -83,4 +85,3 @@ def unpatchify(tokens: torch.Tensor, H: int, W: int, patch_size: int) -> torch.T
     x = tokens.transpose(1, 2).contiguous()  # B, D, N
     x = F.fold(x, output_size=(H, W), kernel_size=patch_size, stride=patch_size)  # B,C,H,W
     return x.permute(0, 2, 3, 1).contiguous()  # B,H,W,C
-

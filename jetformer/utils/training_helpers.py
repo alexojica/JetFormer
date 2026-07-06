@@ -185,14 +185,26 @@ def set_model_total_steps(model: torch.nn.Module, total_steps: int) -> None:
         pass
 
 
-def resume_optimizer_from_ckpt(optimizer: torch.optim.Optimizer, ckpt: Optional[Dict[str, Any]]) -> None:
+def resume_optimizer_from_ckpt(
+    optimizer: torch.optim.Optimizer,
+    ckpt: Optional[Dict[str, Any]],
+    scheduler: Optional[Any] = None,
+) -> None:
     if ckpt is None:
         return
     try:
         if 'optimizer_state_dict' in ckpt:
             optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Optimizer state restore skipped: %r", exc)
+    if scheduler is None:
+        return
+    try:
+        state = ckpt.get('scheduler_state_dict', None)
+        if state:
+            scheduler.load_state_dict(state)
+    except Exception as exc:
+        logger.warning("Scheduler state restore skipped: %r", exc)
 
 
 def initialize_step_from_ckpt(model: torch.nn.Module,
@@ -203,7 +215,11 @@ def initialize_step_from_ckpt(model: torch.nn.Module,
     step = 0
     if ckpt is not None:
         try:
-            step = max(0, int(start_epoch)) * int(steps_per_epoch)
+            fallback_step = max(0, int(start_epoch)) * int(steps_per_epoch)
+            scheduler_state = ckpt.get('scheduler_state_dict', {})
+            if isinstance(scheduler_state, dict) and 'last_epoch' in scheduler_state:
+                fallback_step = max(0, int(scheduler_state.get('last_epoch', fallback_step)))
+            step = int(ckpt.get('global_step', fallback_step))
             base_model = model.module if hasattr(model, 'module') else model
             if hasattr(base_model, '_step'):
                 base_model._step = torch.tensor(step, dtype=torch.long, device=device)
@@ -395,7 +411,10 @@ def save_checkpoint(model: torch.nn.Module,
         'epoch': epoch,
         'config': config_dict,
         'wandb_run_id': (getattr(wb_run, 'id', None) if wb_run is not None else None),
-        'wandb_run_name': config_dict.get('wandb_run_name', None) if isinstance(config_dict, dict) else None,
+        'wandb_run_name': (
+            (config_dict.get('wandb', {}) or {}).get('run_name', config_dict.get('wandb_run_name', None))
+            if isinstance(config_dict, dict) else None
+        ),
     }
     if extra_fields:
         checkpoint.update(extra_fields)
