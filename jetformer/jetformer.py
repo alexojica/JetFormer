@@ -750,15 +750,9 @@ class JetFormer(nn.Module):
         else:
             mix_logits, means, scales = self.gmm_params(image_logits)
             if temperature_probs is not None:
-                try:
-                    mix_logits = mix_logits / max(float(temperature_probs), 1e-6)
-                except Exception:
-                    pass
+                mix_logits = mix_logits * float(temperature_probs)
             if temperature_scales is not None:
-                try:
-                    scales = scales * float(temperature_scales)
-                except Exception:
-                    pass
+                scales = scales * float(temperature_scales)
 
             class _DiagMixture:
                 def __init__(self, mix, mu, sigma, scale_tol: float):
