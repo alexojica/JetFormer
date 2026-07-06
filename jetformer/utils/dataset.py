@@ -782,6 +782,148 @@ class HFCIFAR10(Dataset):
         return {"image": img_tensor, "label": label_tensor}
 
 
+def _parse_class_subset(
+    class_subset: Optional[Union[int, str, List[int], List[str]]],
+    *,
+    num_classes: int,
+    class_names: Optional[List[str]] = None,
+) -> Optional[List[int]]:
+    if class_subset is None:
+        return None
+    vals: List[int] = []
+    name_to_idx = {name: i for i, name in enumerate(class_names or [])}
+
+    def add_value(value: Any) -> None:
+        if isinstance(value, int):
+            vals.append(int(value))
+            return
+        s = str(value).strip()
+        if not s:
+            return
+        if ':' in s:
+            try:
+                start, end = s.split(':', 1)
+                vals.extend(range(int(start.strip()), int(end.strip())))
+                return
+            except Exception:
+                pass
+        if s.isdigit():
+            vals.append(int(s))
+            return
+        if s in name_to_idx:
+            vals.append(int(name_to_idx[s]))
+
+    if isinstance(class_subset, (list, tuple)):
+        for item in class_subset:
+            add_value(item)
+    elif isinstance(class_subset, str) and ',' in class_subset:
+        for item in class_subset.split(','):
+            add_value(item)
+    else:
+        add_value(class_subset)
+
+    selected = sorted({int(v) for v in vals if 0 <= int(v) < int(num_classes)})
+    return selected or None
+
+
+class HFTinyImageNet(Dataset):
+    """Hugging Face Tiny ImageNet wrapper returning uint8 CHW images."""
+
+    def __init__(
+        self,
+        split: str = 'train',
+        resolution: int = 64,
+        random_flip_prob: float = 0.0,
+        max_samples: Optional[int] = None,
+        max_samples_per_class: Optional[int] = None,
+        class_subset: Optional[Union[int, str, List[int], List[str]]] = None,
+        random_subset_seed: Optional[int] = None,
+        cache_dir: Optional[str] = None,
+    ):
+        super().__init__()
+        if split in {'val', 'validation'}:
+            split_name = 'valid'
+        else:
+            split_name = 'train' if split == 'train' else split
+        self.resolution = int(resolution)
+        self._flip_prob = float(random_flip_prob) if split_name == 'train' else 0.0
+
+        self.ds = load_dataset(
+            "zh-plus/tiny-imagenet",
+            split=split_name,
+            cache_dir=cache_dir,
+        )
+        try:
+            label_feat = self.ds.features.get('label', None)
+            classes = list(getattr(label_feat, 'names', [])) if label_feat is not None else []
+        except Exception:
+            classes = []
+        self.classes = classes or [str(i) for i in range(200)]
+
+        selected_ids = _parse_class_subset(class_subset, num_classes=len(self.classes), class_names=self.classes)
+        self._label_remap = None
+        if selected_ids is not None:
+            selected = set(selected_ids)
+            self._label_remap = {orig: new for new, orig in enumerate(selected_ids)}
+            self.classes = [self.classes[i] for i in selected_ids]
+        else:
+            selected = None
+
+        self.indices: List[int] = []
+        if max_samples_per_class is not None:
+            limit = int(max_samples_per_class)
+            counts: Dict[int, int] = {}
+            for i, ex in enumerate(self.ds):
+                label = int(ex['label'])
+                if selected is not None and label not in selected:
+                    continue
+                mapped = self._label_remap[label] if self._label_remap is not None else label
+                if counts.get(mapped, 0) < limit:
+                    self.indices.append(i)
+                    counts[mapped] = counts.get(mapped, 0) + 1
+                if len(counts) >= len(self.classes) and all(v >= limit for v in counts.values()):
+                    break
+        elif selected is not None:
+            for i, ex in enumerate(self.ds):
+                if int(ex['label']) in selected:
+                    self.indices.append(i)
+                    if max_samples is not None and len(self.indices) >= int(max_samples):
+                        break
+        else:
+            self.indices = list(range(len(self.ds)))
+            if max_samples is not None:
+                seed = int(random_subset_seed) if random_subset_seed is not None else 0
+                rng = random.Random(seed)
+                rng.shuffle(self.indices)
+                self.indices = self.indices[: int(max_samples)]
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx: int):
+        ex = self.ds[self.indices[int(idx)]]
+        img = ex.get('image')
+        if not isinstance(img, Image.Image):
+            img = Image.fromarray(np.array(img))
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        if self._flip_prob > 0.0 and random.random() < self._flip_prob:
+            try:
+                img = img.transpose(Image.FLIP_LEFT_RIGHT)
+            except Exception:
+                pass
+
+        from jetformer.utils.image import aspect_preserving_resize_and_center_crop
+        img = aspect_preserving_resize_and_center_crop(img, self.resolution)
+        img_np = np.array(img, dtype=np.uint8)
+        img_tensor = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()
+        label = int(ex['label'])
+        if self._label_remap is not None:
+            label = int(self._label_remap[label])
+        label_tensor = torch.tensor(label, dtype=torch.long)
+        return {"image": img_tensor, "label": label_tensor}
+
+
 _IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tif', '.tiff'}
 
 
@@ -896,7 +1038,7 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
         )
         val_dataset = TFDSImagenetResized64(
             split='validation',
-            max_samples=getattr(input_cfg, 'max_samples', None),
+            max_samples=getattr(input_cfg, 'val_max_samples', getattr(input_cfg, 'max_samples', None)),
             class_subset=getattr(input_cfg, 'class_subset', None)
         )
     elif str(dataset_choice).lower() == 'imagenet21k_folder':
@@ -916,7 +1058,7 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
             root_dir=root,
             split='val',
             resolution=res,
-            max_samples=getattr(input_cfg, 'max_samples', None),
+            max_samples=getattr(input_cfg, 'val_max_samples', getattr(input_cfg, 'max_samples', None)),
             class_subset=getattr(input_cfg, 'class_subset', None)
         )
     elif str(dataset_choice).lower() == 'cifar10':
@@ -955,6 +1097,37 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
         # Provide class label as text tokens for AR conditioning
         dataset = ClassAsTextDataset(dataset)
         val_dataset = ClassAsTextDataset(val_dataset)
+    elif str(dataset_choice).lower() == 'tiny_imagenet_hf':
+        H, W = tuple(getattr(input_cfg, 'input_size'))
+        res = int(H)
+        if res != int(W):
+            raise ValueError("tiny_imagenet_hf requires square input_size [H, W]")
+        flip_prob = float(getattr(input_cfg, 'random_flip_prob', 0.0))
+        dataset = HFTinyImageNet(
+            split='train',
+            resolution=res,
+            random_flip_prob=flip_prob,
+            max_samples=getattr(input_cfg, 'max_samples', None),
+            max_samples_per_class=getattr(input_cfg, 'max_samples_per_class', None),
+            class_subset=getattr(input_cfg, 'class_subset', None),
+            random_subset_seed=getattr(input_cfg, 'random_subset_seed', getattr(config, 'seed', None)),
+            cache_dir=getattr(input_cfg, 'hf_cache_dir', None),
+        )
+        val_seed = getattr(input_cfg, 'val_random_subset_seed', None)
+        if val_seed is None and getattr(config, 'seed', None) is not None:
+            val_seed = int(getattr(config, 'seed')) + 10_000
+        val_dataset = HFTinyImageNet(
+            split='validation',
+            resolution=res,
+            random_flip_prob=0.0,
+            max_samples=getattr(input_cfg, 'val_max_samples', getattr(input_cfg, 'max_samples', None)),
+            max_samples_per_class=getattr(input_cfg, 'val_max_samples_per_class', None),
+            class_subset=getattr(input_cfg, 'class_subset', None),
+            random_subset_seed=val_seed,
+            cache_dir=getattr(input_cfg, 'hf_cache_dir', None),
+        )
+        dataset = ClassAsTextDataset(dataset)
+        val_dataset = ClassAsTextDataset(val_dataset)
     elif str(dataset_choice).lower() == 'imagenet1k_hf':
         # Use HF ILSVRC/imagenet-1k with user-specified resolution
         H, W = tuple(getattr(input_cfg, 'input_size'))
@@ -976,7 +1149,7 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
         val_dataset = HFImagenet1k(
             split='validation',
             resolution=res,
-            max_samples=getattr(input_cfg, 'max_samples', None),
+            max_samples=getattr(input_cfg, 'val_max_samples', getattr(input_cfg, 'max_samples', None)),
             class_subset=getattr(input_cfg, 'class_subset', None),
             random_flip_prob=0.0,
             safe_decode=safe_decode,
@@ -989,6 +1162,7 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
             'imagenet1k_hf',
             'imagenet21k_folder',
             'imagenet64_tfds',
+            'tiny_imagenet_hf',
         )
         raise ValueError(
             f"Unknown input.dataset={dataset_choice!r}. "

@@ -1,0 +1,131 @@
+# Full CIFAR-10 XL research run for Apple Silicon / MPS.
+#
+# This is the largest practical local CIFAR target found by MPS profiling on a
+# 64 GB Apple Silicon machine. Wider candidates fit in memory, but their epoch
+# time is too slow for iterative sample-quality work.
+seed: 0
+num_epochs: 80
+torch_compile: false
+advanced_metrics: true
+batch_size: 16
+grad_accum_steps: 2
+log_every_batches: 50
+grad_logging: false
+
+input:
+  dataset: cifar10
+  cifar_source: hf
+  input_size: [32, 32]
+  num_classes: 10
+  num_workers: 0
+  dataloader_prefetch_factor: 2
+  val_max_samples_per_class: 200
+  random_flip_prob: 0.5
+  class_token_length: 1
+
+model:
+  width: 768
+  depth: 16
+  mlp_dim: 3072
+  num_heads: 16
+  num_kv_heads: 1
+  head_dim: 48
+  vocab_size: 13
+  bos_id: 10
+  boi_id: 11
+  nolabel_id: 12
+  num_mixtures: 64
+  dropout: 0.1
+  drop_labels_probability: 0.1
+  head_dtype: 'fp32'
+  remat_policy: 'none'
+  num_vocab_repeats: 1
+  scale_tol: 1e-3
+  causal_mask_on_prefix: true
+  untie_output_vocab: false
+  per_modality_final_norm: true
+  right_align_inputs: true
+  strict_special_ids: true
+  use_boi_token: true
+  max_seq_len: 320
+  rope_skip_pad: true
+
+patch_pca:
+  model:
+    depth_to_seq: 1
+    patch_size: 2
+    codeword_dim: 12
+    noise_std: 0.0
+    add_dequant_noise: false
+    skip_pca: true
+    whiten: true
+
+use_adaptor: true
+adaptor:
+  model:
+    depth: 4
+    block_depth: 1
+    emb_dim: 768
+    num_heads: 16
+    actnorm: false
+    invertible_dense: false
+    flow_grad_checkpoint: false
+    ps: 1
+    kinds: ["channels"]
+    channels_coupling_projs: ["random"]
+    spatial_coupling_projs: ["checkerboard", "checkerboard-inv"]
+  latent_noise_dim: 0
+  kind: 'jet'
+
+optimizer:
+  name: adamw
+  lr: 0.0002
+  wd: 0.01
+  b1: 0.9
+  b2: 0.95
+  grad_clip_norm: 1.0
+
+ema_decay: 0.9995
+
+schedule:
+  warmup_percent: 0.05
+  decay_type: 'cosine'
+
+training:
+  input_noise_std: 0.0
+  noise_scale: 0.0
+  noise_min: 0.0
+  text_prefix_prob: 1.0
+  loss_on_prefix: false
+  stop_grad_nvp_prefix: false
+  rgb_noise_on_image_prefix: true
+  text_loss_weight: 1.0
+  image_loss_weight: 1.0
+
+sampling:
+  cfg_inference_weight: 1.0
+  cfg_mode: "interp"
+  temperature: 0.8
+  temperature_probs: 0.8
+
+eval:
+  val_every_epochs: 1
+  sample_every_epochs: 0
+  sample_every_batches: 0
+  eval_no_rgb_noise: true
+  fid_every_epochs: 0
+  is_every_epochs: 0
+  fid_is_num_samples: 0
+
+wandb:
+  enabled: false
+  offline: true
+  project: "jetformer-cifar10-32"
+  run_name: "CIFAR10-32-mps-xl-p2"
+  tags: ["cifar10", "full", "mps", "xl", "p2"]
+
+accelerator:
+  name: auto
+  device: auto
+  precision: bf16
+  distributed: false

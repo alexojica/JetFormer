@@ -1,8 +1,8 @@
 wandb/
 cache/
+checkpoints/
 __pycache__/
 *.pth
-# *.pt
 *.pkl
 *.json
 *.csv
@@ -10,10 +10,14 @@ __pycache__/
 laion_pop_cache/
 data/
 venv/
+.venv/
+.env
+.env.*
+.huggingface/
+.netrc
 logs/
 outputs/
 samples/
-# checkpoints/
 run*/
 *.log
 

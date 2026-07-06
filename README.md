@@ -21,7 +21,7 @@ This repository contains:
   - Single entrypoint: `jetformer/train.py` with YAML configs under `jetformer/configs/`
   - Accelerators for GPU/MPS/CPU and TPU (`jetformer/utils/accelerators.py`), DDP support, EMA, grad accumulation, torch.compile
   - Centralized W&B logging, checkpointing, and periodic image sampling utilities
-- Datasets (see below): Hugging Face ImageNet-1k, TFDS downsampled ImageNet-64, ImageNet-21k folder trees, CIFAR-10; TinyStories (text-only helper)
+- Datasets (see below): Hugging Face ImageNet-1k, Hugging Face Tiny ImageNet, TFDS downsampled ImageNet-64, ImageNet-21k folder trees, CIFAR-10; TinyStories (text-only helper)
 
 ### Install
 1) Create a Python 3.10+ environment and install dependencies:
@@ -46,6 +46,9 @@ python -c "from jetformer.utils.tokenizer import download_sentencepiece_model as
 - TFDS downsampled ImageNet-64 (class-conditional):
   - Config: `jetformer/configs/imagenet_64.yaml` (supports `class_subset` and `max_samples`)
   - Requires `tensorflow_datasets`; see `jetformer/utils/dataset.py` for optional `manual_tar_dir` notes.
+- Tiny ImageNet 64 via Hugging Face Datasets (class-conditional):
+  - Config: `jetformer/configs/tiny_imagenet_64_mps.yaml`
+  - Public 64x64/200-class dataset; useful as the next local target after CIFAR-10.
 - ImageNet-21k style folder:
   - Provide `--imagenet21k_root` with `train/` and `val/` subfolders (per-class directories).
 - CIFAR-10 (fastest class-conditional smoke tests):
@@ -118,6 +121,8 @@ FID/IS: enable periodic computation from training via `eval.fid_every_epochs`, `
   - `jetformer/configs/imagenet_64.yaml`, `jetformer/configs/imagenet_256.yaml`, `jetformer/configs/imagenet_256_first100.yaml`
   - `jetformer/configs/cifar10_32.yaml`, `jetformer/configs/cifar10_32_tiny.yaml`, `jetformer/configs/cifar10_32_small.yaml`, `jetformer/configs/cifar10_32_small_p2.yaml`
   - `jetformer/configs/cifar10_32_mps_large.yaml` is the full-CIFAR Apple Silicon research config.
+  - `jetformer/configs/cifar10_32_mps_xl.yaml` is the largest practical full-CIFAR Apple Silicon config profiled locally.
+  - `jetformer/configs/tiny_imagenet_64_mps.yaml` is the public Tiny ImageNet 64x64 Apple Silicon research config.
   - `jetformer/configs/cifar10_32_small_p2_one_per_class.yaml` is a 10-image overfit sanity check, not a full CIFAR-10 generative benchmark. For visual inspection, sample from its rolling `_last.pt` checkpoint.
 - Paper-aligned toggles:
   - Mixture count: `model.num_mixtures` (e.g., 64/256/1024)

@@ -1,0 +1,131 @@
+# Public Tiny ImageNet 64x64 research config for Apple Silicon / MPS.
+#
+# Tiny ImageNet has 100k training images, 10k validation images, 200 classes,
+# and 64x64 RGB inputs. This config uses raw 4x4 RGB patch tokens, so its
+# sequence length matches 32x32 CIFAR with 2x2 patches while the image-token
+# dimension rises from 12 to 48.
+seed: 0
+num_epochs: 100
+torch_compile: false
+advanced_metrics: true
+batch_size: 8
+grad_accum_steps: 4
+log_every_batches: 100
+grad_logging: false
+
+input:
+  dataset: tiny_imagenet_hf
+  input_size: [64, 64]
+  num_classes: 200
+  num_workers: 0
+  dataloader_prefetch_factor: 2
+  val_max_samples_per_class: 10
+  random_flip_prob: 0.5
+  class_token_length: 1
+
+model:
+  width: 512
+  depth: 12
+  mlp_dim: 2048
+  num_heads: 16
+  num_kv_heads: 1
+  head_dim: 32
+  vocab_size: 203
+  bos_id: 200
+  boi_id: 201
+  nolabel_id: 202
+  num_mixtures: 64
+  dropout: 0.1
+  drop_labels_probability: 0.1
+  head_dtype: 'fp32'
+  remat_policy: 'none'
+  num_vocab_repeats: 1
+  scale_tol: 1e-3
+  causal_mask_on_prefix: true
+  untie_output_vocab: false
+  per_modality_final_norm: true
+  right_align_inputs: true
+  strict_special_ids: true
+  use_boi_token: true
+  max_seq_len: 320
+  rope_skip_pad: true
+
+patch_pca:
+  model:
+    depth_to_seq: 1
+    patch_size: 4
+    codeword_dim: 48
+    noise_std: 0.0
+    add_dequant_noise: false
+    skip_pca: true
+    whiten: true
+
+use_adaptor: true
+adaptor:
+  model:
+    depth: 4
+    block_depth: 1
+    emb_dim: 512
+    num_heads: 16
+    actnorm: false
+    invertible_dense: false
+    flow_grad_checkpoint: false
+    ps: 1
+    kinds: ["channels"]
+    channels_coupling_projs: ["random"]
+    spatial_coupling_projs: ["checkerboard", "checkerboard-inv"]
+  latent_noise_dim: 0
+  kind: 'jet'
+
+optimizer:
+  name: adamw
+  lr: 0.0002
+  wd: 0.01
+  b1: 0.9
+  b2: 0.95
+  grad_clip_norm: 1.0
+
+ema_decay: 0.9995
+
+schedule:
+  warmup_percent: 0.05
+  decay_type: 'cosine'
+
+training:
+  input_noise_std: 0.0
+  noise_scale: 0.0
+  noise_min: 0.0
+  text_prefix_prob: 1.0
+  loss_on_prefix: false
+  stop_grad_nvp_prefix: false
+  rgb_noise_on_image_prefix: true
+  text_loss_weight: 1.0
+  image_loss_weight: 1.0
+
+sampling:
+  cfg_inference_weight: 1.0
+  cfg_mode: "interp"
+  temperature: 0.8
+  temperature_probs: 0.8
+
+eval:
+  val_every_epochs: 1
+  sample_every_epochs: 0
+  sample_every_batches: 0
+  eval_no_rgb_noise: true
+  fid_every_epochs: 0
+  is_every_epochs: 0
+  fid_is_num_samples: 0
+
+wandb:
+  enabled: false
+  offline: true
+  project: "jetformer-tiny-imagenet-64"
+  run_name: "TinyImageNet-64-mps-p4"
+  tags: ["tiny-imagenet", "64x64", "mps", "p4"]
+
+accelerator:
+  name: auto
+  device: auto
+  precision: bf16
+  distributed: false
