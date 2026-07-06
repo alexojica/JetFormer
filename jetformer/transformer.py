@@ -140,7 +140,7 @@ class MultiQueryAttention(nn.Module):
             self.pos_encoding = RotaryEncoding(self.d_k, max_seq_len)
         elif pe_type == "abs":
             self.pos_encoding = nn.Parameter(torch.randn(1, max_seq_len, d_model))
-        elif pe_type == None:
+        elif pe_type is None:
             self.pos_encoding = None
         else:
             raise ValueError(f"Unsupported positional encoding type: {pe_type}")

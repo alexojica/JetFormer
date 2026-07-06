@@ -1,40 +1,34 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-import numpy as np
-import math
-from PIL import Image
-import torchvision.transforms as transforms
-import platform
 import os
 import pathlib
- # Defer importing TFDS until we have disabled TF GPU usage (see helper below)
-import torchvision
-import numpy as np
-from PIL import Image
-from typing import Optional, Tuple, Dict, Any, List, Union
-from types import SimpleNamespace
-import json
-from pathlib import Path
-import wandb
-import time
-import os
-import requests
+import platform
+import random
 from io import BytesIO
-import hashlib
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import numpy as np
+import torch
+import torchvision
 from datasets import load_dataset, Image as HFImage
 from huggingface_hub import login as hf_login
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import warnings
-warnings.filterwarnings('ignore')
-from src.utils.logging import get_logger
-logger = get_logger(__name__)
+from PIL import Image
 from sentencepiece import SentencePieceProcessor
-from src.utils.tokenizer import download_sentencepiece_model
-import random
+from torch.utils.data import DataLoader, Dataset
+
+from jetformer.utils.logging import get_logger
+from jetformer.utils.tokenizer import download_sentencepiece_model
+
+logger = get_logger(__name__)
+
+
+def _seed_data_worker(worker_id: int) -> None:
+    del worker_id
+    worker_seed = torch.initial_seed() % (2**32)
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+    torch.manual_seed(worker_seed)
+
 
 class ClassAsTextDataset(Dataset):
     """Wraps a dataset to present the 'label' field as 'text'."""
@@ -180,7 +174,7 @@ class TinyStoriesDataset(Dataset):
                     if count % 10000 == 0 and count > 0:
                         logger.info(f"Processed {count} samples")
                         
-                except Exception as e:
+                except Exception:
                     continue
             
             logger.info(f"Processing complete: {count} samples loaded")
@@ -257,7 +251,7 @@ class TinyStoriesDataset(Dataset):
         }
 
 
-# ---- Centralized image dataset implementations (moved from src/flow/dataset.py) ----
+# ---- Centralized image dataset implementations (moved from jetformer/flow/dataset.py) ----
 
 class TFDSImagenet(Dataset):
     """A PyTorch Dataset for TFDS downsampled_imagenet datasets (32x32 or 64x64)."""
@@ -274,12 +268,12 @@ class TFDSImagenet(Dataset):
             raise ValueError("Resolution must be 32 or 64 for TFDSImagenet.")
         dataset_name = f'downsampled_imagenet/{resolution}x{resolution}'
 
+        tfds = _import_tfds_cpu_only()
         if manual_tar_dir is not None:
             if platform.system() == "Windows":
                 manual_tar_dir = str(pathlib.Path(manual_tar_dir).resolve())
             tfds.download.manual_dir = manual_tar_dir
 
-        tfds = _import_tfds_cpu_only()
         self._tfds = tfds
         builder = self._tfds.builder(dataset_name, data_dir=data_dir)
         builder.download_and_prepare()
@@ -649,7 +643,7 @@ class HFImagenet1k(Dataset):
                 pass
 
         # Aspect-preserving resize + center crop to target resolution
-        from src.utils.image import aspect_preserving_resize_and_center_crop
+        from jetformer.utils.image import aspect_preserving_resize_and_center_crop
         img_pil = aspect_preserving_resize_and_center_crop(img_pil, self.resolution)
         img_np = np.array(img_pil, dtype=np.uint8)
         # Robust channel handling in case upstream decoders yield unexpected shapes
@@ -675,7 +669,14 @@ class TorchvisionCIFAR10(Dataset):
     Applies probabilistic horizontal flips during training according to
     `random_flip_prob` to match config-driven augmentation.
     """
-    def __init__(self, split: str = 'train', download: bool = True, random_flip_prob: float = 0.0):
+    def __init__(
+        self,
+        split: str = 'train',
+        download: bool = True,
+        random_flip_prob: float = 0.0,
+        max_samples: Optional[int] = None,
+        max_samples_per_class: Optional[int] = None,
+    ):
         super().__init__()
         train = (split == 'train')
         self.ds = torchvision.datasets.CIFAR10(
@@ -691,12 +692,27 @@ class TorchvisionCIFAR10(Dataset):
         except Exception:
             self.classes = [str(i) for i in range(10)]
         self._flip_prob = float(random_flip_prob) if train else 0.0
+        if max_samples_per_class is not None:
+            limit = int(max_samples_per_class)
+            counts = {}
+            self.indices = []
+            for i, label in enumerate(getattr(self.ds, 'targets', [])):
+                label = int(label)
+                if counts.get(label, 0) < limit:
+                    self.indices.append(i)
+                    counts[label] = counts.get(label, 0) + 1
+                if len(counts) >= len(self.classes) and all(v >= limit for v in counts.values()):
+                    break
+        elif max_samples is None:
+            self.indices = list(range(len(self.ds)))
+        else:
+            self.indices = list(range(min(int(max_samples), len(self.ds))))
 
     def __len__(self):
-        return len(self.ds)
+        return len(self.indices)
 
     def __getitem__(self, idx: int):
-        img, label = self.ds[idx]
+        img, label = self.ds[self.indices[int(idx)]]
         # Apply random horizontal flip on the PIL image before tensor conversion
         if self._flip_prob > 0.0 and random.random() < self._flip_prob:
             try:
@@ -706,6 +722,63 @@ class TorchvisionCIFAR10(Dataset):
         img_np = np.array(img, dtype=np.uint8)
         img_tensor = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()
         label_tensor = torch.tensor(label, dtype=torch.long)
+        return {"image": img_tensor, "label": label_tensor}
+
+
+class HFCIFAR10(Dataset):
+    """Hugging Face CIFAR-10 wrapper returning uint8 CHW images."""
+
+    def __init__(
+        self,
+        split: str = 'train',
+        random_flip_prob: float = 0.0,
+        max_samples: Optional[int] = None,
+        max_samples_per_class: Optional[int] = None,
+        cache_dir: Optional[str] = None,
+    ):
+        super().__init__()
+        split_name = 'train' if split == 'train' else 'test'
+        split_expr = split_name
+        if max_samples is not None and max_samples_per_class is None:
+            split_expr = f"{split_name}[:{int(max_samples)}]"
+        self.ds = load_dataset(
+            "uoft-cs/cifar10",
+            split=split_expr,
+            cache_dir=cache_dir,
+        )
+        self.classes = [
+            'airplane', 'automobile', 'bird', 'cat', 'deer',
+            'dog', 'frog', 'horse', 'ship', 'truck',
+        ]
+        self._flip_prob = float(random_flip_prob) if split == 'train' else 0.0
+        if max_samples_per_class is not None:
+            limit = int(max_samples_per_class)
+            counts = {}
+            self.indices = []
+            for i, ex in enumerate(self.ds):
+                label = int(ex['label'])
+                if counts.get(label, 0) < limit:
+                    self.indices.append(i)
+                    counts[label] = counts.get(label, 0) + 1
+                if len(counts) >= len(self.classes) and all(v >= limit for v in counts.values()):
+                    break
+        else:
+            self.indices = list(range(len(self.ds)))
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx: int):
+        ex = self.ds[self.indices[int(idx)]]
+        img = ex['img']
+        if self._flip_prob > 0.0 and random.random() < self._flip_prob:
+            try:
+                img = img.transpose(Image.FLIP_LEFT_RIGHT)
+            except Exception:
+                pass
+        img_np = np.array(img, dtype=np.uint8)
+        img_tensor = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()
+        label_tensor = torch.tensor(int(ex['label']), dtype=torch.long)
         return {"image": img_tensor, "label": label_tensor}
 
 
@@ -794,7 +867,7 @@ class ImageNet21kFolder(Dataset):
             label_tensor = torch.tensor(-1, dtype=torch.long)
             return {"image": img_tensor, "label": label_tensor}
 
-        from src.utils.image import aspect_preserving_resize_and_center_crop
+        from jetformer.utils.image import aspect_preserving_resize_and_center_crop
         img = aspect_preserving_resize_and_center_crop(img, self.resolution)
         img_np = np.array(img, dtype=np.uint8)
         img_tensor = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()
@@ -848,8 +921,37 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
         )
     elif str(dataset_choice).lower() == 'cifar10':
         flip_prob = float(getattr(input_cfg, 'random_flip_prob', 0.0))
-        dataset = TorchvisionCIFAR10(split='train', download=True, random_flip_prob=flip_prob)
-        val_dataset = TorchvisionCIFAR10(split='test', download=True, random_flip_prob=0.0)
+        cifar_source = str(getattr(input_cfg, 'cifar_source', 'torchvision')).lower()
+        if cifar_source in {'hf', 'huggingface'}:
+            dataset = HFCIFAR10(
+                split='train',
+                random_flip_prob=flip_prob,
+                max_samples=getattr(input_cfg, 'max_samples', None),
+                max_samples_per_class=getattr(input_cfg, 'max_samples_per_class', None),
+                cache_dir=getattr(input_cfg, 'hf_cache_dir', None),
+            )
+            val_dataset = HFCIFAR10(
+                split='test',
+                random_flip_prob=0.0,
+                max_samples=getattr(input_cfg, 'val_max_samples', getattr(input_cfg, 'max_samples', None)),
+                max_samples_per_class=getattr(input_cfg, 'val_max_samples_per_class', getattr(input_cfg, 'max_samples_per_class', None)),
+                cache_dir=getattr(input_cfg, 'hf_cache_dir', None),
+            )
+        else:
+            dataset = TorchvisionCIFAR10(
+                split='train',
+                download=True,
+                random_flip_prob=flip_prob,
+                max_samples=getattr(input_cfg, 'max_samples', None),
+                max_samples_per_class=getattr(input_cfg, 'max_samples_per_class', None),
+            )
+            val_dataset = TorchvisionCIFAR10(
+                split='test',
+                download=True,
+                random_flip_prob=0.0,
+                max_samples=getattr(input_cfg, 'val_max_samples', getattr(input_cfg, 'max_samples', None)),
+                max_samples_per_class=getattr(input_cfg, 'val_max_samples_per_class', getattr(input_cfg, 'max_samples_per_class', None)),
+            )
         # Provide class label as text tokens for AR conditioning
         dataset = ClassAsTextDataset(dataset)
         val_dataset = ClassAsTextDataset(val_dataset)
@@ -894,18 +996,39 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
     train_sampler, val_sampler = accelerator.build_samplers(dataset, val_dataset)
     pin_mem = True if accelerator.device.type == 'cuda' else False
 
+    num_workers = int(getattr(input_cfg, 'num_workers'))
     prefetch_factor = int(getattr(input_cfg, 'dataloader_prefetch_factor', 2))
+    seed = getattr(config, 'seed', None)
+    train_generator = None
+    val_generator = None
+    worker_init_fn = None
+    if seed is not None:
+        seed_int = int(seed)
+        rank = int(getattr(accelerator, 'rank', 0))
+        train_generator = torch.Generator()
+        train_generator.manual_seed(seed_int + rank)
+        val_generator = torch.Generator()
+        val_generator.manual_seed(seed_int + 10_000 + rank)
+        worker_init_fn = _seed_data_worker
+
+    worker_kwargs = {}
+    if num_workers > 0:
+        worker_kwargs = {
+            'prefetch_factor': prefetch_factor,
+            'persistent_workers': True,
+        }
 
     dataloader = DataLoader(
         dataset,
         batch_size=config.batch_size,
         shuffle=(train_sampler is None),
         sampler=train_sampler,
-        num_workers=int(getattr(input_cfg, 'num_workers')),
-        prefetch_factor=prefetch_factor,
-        persistent_workers=True,
+        num_workers=num_workers,
         drop_last=True,
-        pin_memory=pin_mem
+        pin_memory=pin_mem,
+        worker_init_fn=worker_init_fn,
+        generator=train_generator,
+        **worker_kwargs,
     )
 
     val_loader = DataLoader(
@@ -913,11 +1036,12 @@ def create_datasets_and_loaders(config: SimpleNamespace, accelerator) -> Tuple[A
         batch_size=config.batch_size,
         shuffle=False,
         sampler=val_sampler,
-        num_workers=int(getattr(input_cfg, 'num_workers')),
-        prefetch_factor=prefetch_factor,
-        persistent_workers=True,
+        num_workers=num_workers,
         drop_last=False,
-        pin_memory=pin_mem
+        pin_memory=pin_mem,
+        worker_init_fn=worker_init_fn,
+        generator=val_generator,
+        **worker_kwargs,
     )
 
     return dataset, val_dataset, dataloader, val_loader

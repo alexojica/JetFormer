@@ -1,44 +1,49 @@
-import torch
-import torch.nn.functional as F
-import torch.optim as optim
-import time
-import sys
-import wandb
 import argparse
-import yaml
-import math
 import os
-from pathlib import Path
-import numpy as np
-from torch.utils.data import DataLoader, Dataset
-import torch.distributed as dist
-from contextlib import nullcontext
+import random
+import time
 from collections.abc import Mapping
+from contextlib import nullcontext
+from pathlib import Path
+from types import SimpleNamespace
 
-from src.utils.logging import WBLogger
-from src.utils.optim import get_optimizer_and_scheduler as get_opt_sched
-from src.jetformer import JetFormer
-from src.utils.training_helpers import (
-    init_wandb as helpers_init_wandb,
-    count_model_parameters,
-    load_checkpoint_if_exists,
-    initialize_actnorm_if_needed,
+import numpy as np
+import torch
+import torch.distributed as dist
+import wandb
+import yaml
+from tqdm import tqdm
+
+import jetformer.utils.training_helpers as training_helpers
+from jetformer.jetformer import JetFormer
+from jetformer.utils.accelerators import build_accelerator as _build_accel
+from jetformer.utils.dataset import create_datasets_and_loaders
+from jetformer.utils.eval import compute_and_log_fid_is, evaluate_one_epoch
+from jetformer.utils.logging import WBLogger
+from jetformer.utils.optim import get_optimizer_and_scheduler as get_opt_sched
+from jetformer.utils.training_helpers import (
     broadcast_flow_params_if_ddp,
-    set_model_total_steps,
-    resume_optimizer_from_ckpt,
+    count_model_parameters,
+    generate_and_log_samples,
+    init_wandb as helpers_init_wandb,
+    initialize_actnorm_if_needed,
     initialize_step_from_ckpt,
     persist_wandb_run_id,
-    unwrap_model as unwrap_base_model,
-    generate_and_log_samples,
+    resume_optimizer_from_ckpt,
     save_checkpoint,
+    set_model_total_steps,
+    unwrap_model as unwrap_base_model,
 )
-from src.utils.dataset import create_datasets_and_loaders
-from src.utils.eval import evaluate_one_epoch, compute_and_log_fid_is
-import src.utils.training_helpers as training_helpers
-from src.utils.losses import compute_jetformer_pca_loss
-from types import SimpleNamespace
-from tqdm import tqdm
-from src.utils.accelerators import build_accelerator as _build_accel
+
+
+def seed_everything(seed: int) -> None:
+    """Seed Python, NumPy, and PyTorch RNGs without forcing deterministic kernels."""
+    seed = int(seed)
+    random.seed(seed)
+    np.random.seed(seed % (2**32))
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def _coerce_cli_value(value, current):
@@ -85,6 +90,7 @@ def get_default_config() -> dict:
     """Provides a default configuration aligned with the paper's reference setup."""
     # Defaults primarily based on the 350M model configuration for ImageNet 256.
     return {
+        'seed': 0,
         'num_epochs': 100,
         'torch_compile': False,
         'advanced_metrics': True,
@@ -230,10 +236,14 @@ def get_config_from_yaml_and_cli(config_path: str, cli_args: argparse.Namespace)
             d[keys[-1]] = _coerce_cli_value(value, current_val)
 
     # --- Backward compatibility and derived values ---
-    if 'lr' in config: config['optimizer']['lr'] = config.pop('lr')
-    if 'wd' in config: config['optimizer']['wd'] = config.pop('wd')
-    if 'learning_rate' in config: config['optimizer']['lr'] = config.pop('learning_rate')
-    if 'weight_decay' in config: config['optimizer']['wd'] = config.pop('weight_decay')
+    if 'lr' in config:
+        config['optimizer']['lr'] = config.pop('lr')
+    if 'wd' in config:
+        config['optimizer']['wd'] = config.pop('wd')
+    if 'learning_rate' in config:
+        config['optimizer']['lr'] = config.pop('learning_rate')
+    if 'weight_decay' in config:
+        config['optimizer']['wd'] = config.pop('weight_decay')
     
     # Unify sampling CFG strength parameter
     if 'cfg_strength' in config['sampling']:
@@ -266,15 +276,13 @@ try:
 except Exception:
     pass
 
-# Use shared accelerators from src/accelerators.py
-from src.utils.accelerators import GPUAccelerator, TPUAccelerator, HAS_TPU as _HAS_TPU
-
-IMAGE_SIZE = (256, 256, 3)
-
 def train_from_config(config: SimpleNamespace):
     # Accelerator + process setup
     accel_cfg = vars(config.accelerator)
     accelerator = _build_accel(accel_cfg)
+    seed = getattr(config, 'seed', None)
+    if seed is not None:
+        seed_everything(int(seed))
 
     device_obj = accelerator.device
     is_main_process = accelerator.is_main_process
@@ -399,7 +407,7 @@ def train_from_config(config: SimpleNamespace):
     ema_enabled = ema_decay_val > 0.0
     ema = None
     if ema_enabled:
-        from src.utils.ema import ExponentialMovingAverage
+        from jetformer.utils.ema import ExponentialMovingAverage
         ema = ExponentialMovingAverage(model, decay=ema_decay_val)
         try:
             if _loaded_ckpt is not None and 'ema_state_dict' in _loaded_ckpt:
@@ -458,7 +466,7 @@ def train_from_config(config: SimpleNamespace):
         progress_bar = tqdm(iterable, desc=f"Train Epoch {epoch+1}/{config.num_epochs}", total=len(dataloader), leave=True) if is_main_process else iterable
         ema = locals().get('ema', None)
         if ema is None and ema_enabled:
-            from src.utils.ema import ExponentialMovingAverage
+            from jetformer.utils.ema import ExponentialMovingAverage
             ema = ExponentialMovingAverage(model, decay=ema_decay_val)
         for batch_idx, batch in enumerate(progress_bar):
             start_time = time.time()
@@ -714,7 +722,7 @@ def train_from_config(config: SimpleNamespace):
     return model
 
 
-if __name__ == "__main__":
+def main() -> None:
     parser = argparse.ArgumentParser(description='Train JetFormer model (YAML + CLI overrides)')
     parser.add_argument('--config', type=str, required=True, help='Path to YAML config file')
     # Add CLI overrides for frequently changed parameters
@@ -736,3 +744,7 @@ if __name__ == "__main__":
     config = get_config_from_yaml_and_cli(args.config, args)
     
     train_from_config(config)
+
+
+if __name__ == "__main__":
+    main()

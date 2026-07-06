@@ -169,11 +169,20 @@ class GPUAccelerator:
                 return torch.amp.autocast('cuda', enabled=False)
             else:
                 return torch.amp.autocast('cuda', enabled=enabled)
+        if self._precision in ('fp32', 'tf32'):
+            return torch.amp.autocast(self.device.type, enabled=False)
+        if self._precision == 'bf16':
+            return torch.amp.autocast(self.device.type, enabled=enabled, dtype=torch.bfloat16)
+        if self._precision == 'fp16':
+            return torch.amp.autocast(self.device.type, enabled=enabled, dtype=torch.float16)
         return torch.amp.autocast(self.device.type, enabled=enabled)
 
     def create_grad_scaler(self, enabled: bool):
         fp16_enabled = (self.device.type == 'cuda' and self._precision == 'fp16' and enabled)
-        return torch.amp.GradScaler(enabled=fp16_enabled)
+        try:
+            return torch.amp.GradScaler("cuda", enabled=fp16_enabled)
+        except TypeError:
+            return torch.amp.GradScaler(enabled=fp16_enabled)
 
     @property
     def precision(self) -> str:
@@ -353,4 +362,3 @@ def broadcast_parameters(module: torch.nn.Module, src_rank: int = 0) -> None:
     if dist.is_available() and dist.is_initialized():
         for p in module.parameters():
             dist.broadcast(p.data, src=src_rank)
-

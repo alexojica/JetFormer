@@ -1,6 +1,5 @@
 import logging
 import os
-import time
 import math
 import torch
 import wandb

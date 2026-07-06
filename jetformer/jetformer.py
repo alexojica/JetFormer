@@ -4,10 +4,10 @@ import torch.nn.functional as F
 import math
 from typing import Tuple
 from types import SimpleNamespace
-from src.utils.image import patchify as tk_patchify, unpatchify as tk_unpatchify
-from src.utils.losses import gmm_params as mix_gmm_params, gmm_distribution as mix_gmm_distribution, sample_gmm as mix_sample_gmm
-from src.transformer import GemmaBlock
-from src.flow.projections import InvertibleLinear
+from jetformer.utils.image import patchify as tk_patchify, unpatchify as tk_unpatchify
+from jetformer.utils.losses import gmm_params as mix_gmm_params, gmm_distribution as mix_gmm_distribution, sample_gmm as mix_sample_gmm
+from jetformer.transformer import GemmaBlock
+from jetformer.flow.projections import InvertibleLinear
 import torch.utils.checkpoint as checkpoint
 
 class JetFormer(nn.Module):
@@ -531,8 +531,7 @@ class JetFormer(nn.Module):
         else:
             x = self.transformer(x, attn_mask, position_ids)
         
-        text_seq_len = text_tokens.shape[1] 
-        text_seq_len_rep = text_seq_len * self.num_vocab_repeats
+        text_seq_len = text_tokens.shape[1]
         image_seq_len = image_tokens.shape[1]
         
         a_txt, b_txt, a_img, b_img = self._split_image_and_text_prelogits(x, text_seq_len, image_seq_len)
@@ -740,6 +739,8 @@ class JetFormer(nn.Module):
                 def sample(self, sample_shape=torch.Size()):
                     # Add a sequence dimension of 1 for API parity with GMM path
                     return self.dist.sample(sample_shape).unsqueeze(-2)
+                def mode(self):
+                    return self.dist.loc.unsqueeze(-2)
                 def log_prob(self, x: torch.Tensor):
                     # Remove sequence dim of 1 if present before calling log_prob
                     if x.ndim == self.dist.loc.ndim + 1 and x.shape[-2] == 1:
@@ -769,11 +770,17 @@ class JetFormer(nn.Module):
                     mix = torch.distributions.Categorical(logits=self.mix.view(B * L, K))
                     comp_idx = mix.sample().view(B, L)
                     b = torch.arange(B, device=self.mix.device).unsqueeze(1).expand(B, L)
-                    l = torch.arange(L, device=self.mix.device).unsqueeze(0).expand(B, L)
-                    sel_mu = self.mu[b, l, comp_idx, :]
-                    sel_sigma = self.sigma[b, l, comp_idx, :]
+                    pos = torch.arange(L, device=self.mix.device).unsqueeze(0).expand(B, L)
+                    sel_mu = self.mu[b, pos, comp_idx, :]
+                    sel_sigma = self.sigma[b, pos, comp_idx, :]
                     normal = torch.distributions.Normal(sel_mu, sel_sigma)
                     return normal.sample()
+                def mode(self):
+                    comp_idx = self.mix.argmax(dim=-1)
+                    B, L = comp_idx.shape
+                    b = torch.arange(B, device=self.mix.device).unsqueeze(1).expand(B, L)
+                    pos = torch.arange(L, device=self.mix.device).unsqueeze(0).expand(B, L)
+                    return self.mu[b, pos, comp_idx, :]
                 def log_prob(self, x: torch.Tensor):
                     B, L, K = self.mix.shape
                     x_exp = x.unsqueeze(2)
@@ -1007,7 +1014,7 @@ class JetFormer(nn.Module):
 
         # Attach PatchPCA if configured
         try:
-            from src.latents import PatchPCA
+            from jetformer.latents import PatchPCA
             pca_model_params = get(config, 'patch_pca.model')
             if pca_model_params:
                 pca_params_dict = vars(pca_model_params)
@@ -1025,7 +1032,7 @@ class JetFormer(nn.Module):
 
         # Attach Adaptor/Flow if enabled
         try:
-            from src.latents import build_adaptor
+            from jetformer.latents import build_adaptor
             use_adaptor = get(config, 'use_adaptor', False)
             if use_adaptor:
                 H, W = kwargs['input_size']

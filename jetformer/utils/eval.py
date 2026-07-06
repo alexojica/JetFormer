@@ -1,4 +1,3 @@
-import math
 import os
 from typing import Any, Dict, Optional, List, Tuple
 from pathlib import Path
@@ -49,7 +48,7 @@ def evaluate_one_epoch(model_obj: torch.nn.Module,
             pass
         
         base = model_obj.module if hasattr(model_obj, 'module') else model_obj
-        from src.utils.training_helpers import train_step as _train_step
+        from jetformer.utils.training_helpers import train_step as _train_step
         out = _train_step(base, batch, step=0, total_steps=1, config=config)
         
         bsz = batch['image'].size(0)
@@ -195,7 +194,7 @@ def compute_and_log_fid_is(
     cfg_strength: float,
     cfg_mode: str,
 ) -> Dict[str, float]:
-    from src.utils.sampling import generate_text_to_image_samples_cfg
+    from jetformer.utils.sampling import generate_text_to_image_samples_cfg
     if (not compute_fid) and (not compute_is):
         return {}
 
@@ -264,7 +263,6 @@ def compute_fid(generated_dir: Path | str, ref_dir: Path | str | None = None, re
     """
     gdir = Path(generated_dir)
     rdir = Path(ref_dir) if ref_dir is not None else None
-    rstats = Path(ref_stats) if ref_stats is not None else None
     score: Optional[float] = None
     try:
         from cleanfid import fid as cfid
@@ -278,5 +276,4 @@ def compute_fid(generated_dir: Path | str, ref_dir: Path | str | None = None, re
         except Exception:
             score = None
     return score
-
 

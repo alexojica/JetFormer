@@ -3,10 +3,9 @@ from typing import Tuple, Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from src.utils.image import patchify as tk_patchify, unpatchify as tk_unpatchify
-from src.flow.jet_flow import FlowCore
+from jetformer.utils.image import patchify as tk_patchify, unpatchify as tk_unpatchify
+from jetformer.flow.jet_flow import FlowCore
 
 
 class IdentityAdaptor(nn.Module):
@@ -204,7 +203,6 @@ class PatchPCA(nn.Module):
 
     def _tokens_to_images(self, tokens: torch.Tensor) -> torch.Tensor:
         # tokens: [B,N,D_full] -> image NHWC -> CHW in [-1,1]
-        b = tokens.shape[0]
         H, W = self.input_size
         x_nhwc = tk_unpatchify(tokens, H, W, self.patch_size)
         x_chw = x_nhwc.permute(0, 3, 1, 2).contiguous()
@@ -285,4 +283,3 @@ __all__ = [
     'build_adaptor',
     'PatchPCA',
 ]
-

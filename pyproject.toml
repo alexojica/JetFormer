@@ -8,12 +8,52 @@ version = "0.0.0"
 description = "JetFormer research code"
 readme = "README.md"
 requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "numpy<2.0.0",
+    "pillow>=9.0.0",
+    "tqdm>=4.65.0",
+    "wandb>=0.15.0",
+    "einops>=0.7.0",
+    "tensorflow_datasets>=4.9.0",
+    "kagglehub>=0.3.4",
+    "pandas>=2.0.0",
+    "PyYAML>=6.0",
+    "requests>=2.31.0",
+    "sentencepiece>=0.1.99",
+    "datasets>=2.18.0",
+    "huggingface_hub>=0.19.0",
+]
 
-[tool.setuptools]
-package-dir = {"" = "src"}
+[project.optional-dependencies]
+eval = [
+    "clean-fid>=0.1.35",
+    "torch-fidelity>=0.3.0",
+]
+dev = [
+    "ruff>=0.14.0",
+]
+
+[project.scripts]
+jetformer-train = "jetformer.train:main"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+extend-exclude = ["external", "data", "checkpoints", "samples", "wandb"]
+
+[tool.ruff.lint]
+select = ["E", "F"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/sample_from_checkpoint.py" = ["E402"]
 
 [tool.setuptools.packages.find]
-where = ["src"]
-include = ["*"]
+where = ["."]
+include = ["jetformer*"]
 exclude = ["jetformer_tex*"]
 
+[tool.setuptools.package-data]
+"jetformer.configs" = ["*.yaml"]

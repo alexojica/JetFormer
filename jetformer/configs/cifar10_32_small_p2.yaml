@@ -1,0 +1,132 @@
+# Smallest practical CIFAR-10 JetFormer setup for local visual overfit.
+#
+# Uses 2x2 RGB patches, so the AR distribution predicts all 12 patch values
+# per token and has no unmodelled residual latent dimensions. The 64-example
+# training slice keeps this intentionally small while still containing all
+# CIFAR-10 classes.
+num_epochs: 300
+torch_compile: false
+advanced_metrics: true
+batch_size: 16
+grad_accum_steps: 1
+log_every_batches: 1
+grad_logging: false
+
+input:
+  dataset: cifar10
+  cifar_source: hf
+  input_size: [32, 32]
+  num_classes: 10
+  num_workers: 0
+  dataloader_prefetch_factor: 2
+  max_samples: 64
+  val_max_samples: 64
+  random_flip_prob: 0.0
+  class_token_length: 1
+
+model:
+  width: 128
+  depth: 4
+  mlp_dim: 512
+  num_heads: 4
+  num_kv_heads: 1
+  head_dim: 32
+  vocab_size: 13
+  bos_id: 10
+  boi_id: 11
+  nolabel_id: 12
+  num_mixtures: 32
+  dropout: 0.0
+  drop_labels_probability: 0.0
+  head_dtype: 'fp32'
+  remat_policy: 'none'
+  num_vocab_repeats: 1
+  scale_tol: 1e-3
+  causal_mask_on_prefix: true
+  untie_output_vocab: false
+  per_modality_final_norm: true
+  right_align_inputs: true
+  strict_special_ids: true
+  use_boi_token: true
+  max_seq_len: 320
+  rope_skip_pad: true
+
+patch_pca:
+  model:
+    depth_to_seq: 1
+    patch_size: 2
+    codeword_dim: 12
+    noise_std: 0.0
+    add_dequant_noise: false
+    skip_pca: true
+    whiten: true
+
+use_adaptor: true
+adaptor:
+  model:
+    depth: 4
+    block_depth: 1
+    emb_dim: 128
+    num_heads: 4
+    actnorm: false
+    invertible_dense: false
+    flow_grad_checkpoint: false
+    ps: 1
+    kinds: ["channels"]
+    channels_coupling_projs: ["random"]
+    spatial_coupling_projs: ["checkerboard", "checkerboard-inv"]
+  latent_noise_dim: 0
+  kind: 'jet'
+
+optimizer:
+  name: adamw
+  lr: 0.001
+  wd: 0.00001
+  b1: 0.9
+  b2: 0.95
+  grad_clip_norm: 1.0
+
+ema_decay: 0.0
+
+schedule:
+  warmup_percent: 0.03
+  decay_type: 'cosine'
+
+training:
+  input_noise_std: 0.0
+  noise_scale: 0.0
+  noise_min: 0.0
+  text_prefix_prob: 1.0
+  loss_on_prefix: false
+  stop_grad_nvp_prefix: false
+  rgb_noise_on_image_prefix: true
+  text_loss_weight: 1.0
+  image_loss_weight: 1.0
+
+sampling:
+  cfg_inference_weight: 0.0
+  cfg_mode: "interp"
+  temperature: 0.15
+  temperature_probs: 5.0
+
+eval:
+  val_every_epochs: 10
+  sample_every_epochs: 0
+  sample_every_batches: 0
+  eval_no_rgb_noise: true
+  fid_every_epochs: 0
+  is_every_epochs: 0
+  fid_is_num_samples: 0
+
+wandb:
+  enabled: false
+  offline: true
+  project: "jetformer-cifar10-32"
+  run_name: "CIFAR10-32-small-p2-fullpatch"
+  tags: ["cifar10", "small", "p2", "overfit"]
+
+accelerator:
+  name: auto
+  device: auto
+  precision: fp32
+  distributed: false

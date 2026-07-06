@@ -1,14 +1,19 @@
 import argparse
-import os
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 from typing import List
 
 import torch
 
-from src.train import get_config_from_yaml_and_cli
-from src.jetformer import JetFormer
-from src.utils.dataset import create_datasets_and_loaders
-from src.utils.sampling import (
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from jetformer.train import get_config_from_yaml_and_cli
+from jetformer.jetformer import JetFormer
+from jetformer.utils.dataset import create_datasets_and_loaders
+from jetformer.utils.sampling import (
     generate_class_conditional_samples,
     generate_text_to_image_samples_cfg,
     build_sentencepiece_tokenizer_dataset,
@@ -22,22 +27,32 @@ except Exception:
 
 
 def _read_prompts_file(path: str) -> List[str]:
-    prompts: List[str] = []
+    prompts = [line.strip() for line in Path(path).read_text(encoding='utf-8').splitlines()]
+    return [prompt for prompt in prompts if prompt]
+
+
+def _parse_class_ids(raw: str | None, num_images: int, num_classes: int) -> List[int]:
+    if raw is None or raw.strip() == "":
+        return list(range(min(num_images, num_classes)))
     try:
-        with open(path, 'r', encoding='utf-8') as f:
-            for line in f:
-                s = line.strip()
-                if len(s) > 0:
-                    prompts.append(s)
-    except Exception:
-        pass
-    return prompts
+        class_ids = [int(x.strip()) for x in raw.split(',') if x.strip()]
+    except ValueError as exc:
+        raise ValueError(f"Invalid --class_ids value: {raw!r}") from exc
+    invalid = [class_id for class_id in class_ids if class_id < 0 or class_id >= num_classes]
+    if invalid:
+        raise ValueError(f"--class_ids contains ids outside [0, {num_classes - 1}]: {invalid}")
+    return class_ids
+
+
+def _safe_filename(name: str, fallback: str) -> str:
+    safe = ''.join(c if (c.isalnum() or c in '-_.') else '_' for c in str(name)).strip('._')
+    return safe or fallback
 
 
 def main():
     parser = argparse.ArgumentParser(description="Sample images from a JetFormer checkpoint using a YAML config.")
     # Local inputs
-    parser.add_argument("--config", type=str, required=False, help="Path to YAML config (e.g., src/configs/cifar10_32.yaml)")
+    parser.add_argument("--config", type=str, required=False, help="Path to YAML config (e.g., jetformer/configs/cifar10_32.yaml)")
     parser.add_argument("--ckpt", type=str, required=False, help="Path to checkpoint .pt file")
     # Hugging Face Hub inputs
     parser.add_argument("--hf_repo", type=str, default=None, help="Hugging Face repo id (e.g., mojique/jetformer-cifar10)")
@@ -52,13 +67,19 @@ def main():
     parser.add_argument("--cfg_mode", type=str, default=None, help="Override CFG mode: density|interp (uses config if None)")
     parser.add_argument("--temperature", type=float, default=None, help="Override temperature scaling for scales (uses config if None)")
     parser.add_argument("--temperature_probs", type=float, default=None, help="Override temperature for mixture logits (uses config if None)")
+    parser.add_argument("--sample_method", type=str, default="sample", choices=["sample", "mean", "mode", "greedy"], help="Image-token sampling method")
     parser.add_argument("--prompts_file", type=str, default=None, help="Optional path to a text file with one prompt per line (text-to-image)")
     parser.add_argument("--class_ids", type=str, default=None, help="Optional comma-separated list of class ids to sample (class-conditional)")
     args = parser.parse_args()
 
     # Resolve device
     if args.device == "auto":
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        if torch.cuda.is_available():
+            device = torch.device('cuda')
+        elif torch.backends.mps.is_available():
+            device = torch.device('mps')
+        else:
+            device = torch.device('cpu')
     else:
         device = torch.device(args.device)
 
@@ -112,7 +133,8 @@ def main():
     model.eval()
 
     # Setup output directory
-    os.makedirs(args.out_dir, exist_ok=True)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     # Resolve sampling parameters with overrides falling back to YAML
     cfg_weight = float(args.cfg_weight) if args.cfg_weight is not None else float(getattr(config.sampling, 'cfg_inference_weight', 0.0))
@@ -141,13 +163,7 @@ def main():
     saved = 0
     if is_class_cond and args.prompts_file is None:
         # Parse class ids or default to first K classes
-        if args.class_ids is not None and len(args.class_ids.strip()) > 0:
-            try:
-                class_ids = [int(x.strip()) for x in args.class_ids.split(',') if x.strip() != ""]
-            except Exception:
-                class_ids = list(range(min(args.num_images, int(getattr(model, 'num_classes', 10)))))
-        else:
-            class_ids = list(range(min(args.num_images, int(getattr(model, 'num_classes', 10)))))
+        class_ids = _parse_class_ids(args.class_ids, args.num_images, int(getattr(model, 'num_classes', 10)))
 
         samples = generate_class_conditional_samples(
             model,
@@ -158,14 +174,12 @@ def main():
             dataset=dataset,
             temperature_scales=temperature,
             temperature_probs=temperature_probs,
+            sample_method=args.sample_method,
         )
         for i, s in enumerate(samples[: args.num_images]):
-            try:
-                prompt = s.get('prompt', f'class_{i}')
-                s['image'].save(os.path.join(args.out_dir, f"{prompt}_{i}.png"))
-                saved += 1
-            except Exception:
-                continue
+            prompt = _safe_filename(s.get('prompt', f'class_{i}'), f'class_{i}')
+            s['image'].save(out_dir / f"{prompt}_{i}.png")
+            saved += 1
     else:
         # Text-to-image mode; use provided prompts or a minimal SPM dataset
         prompts = []
@@ -183,19 +197,15 @@ def main():
             prompts=prompts if (prompts and len(prompts) > 0) else None,
             temperature_scales=temperature,
             temperature_probs=temperature_probs,
+            sample_method=args.sample_method,
         )
         for i, s in enumerate(samples[: args.num_images]):
-            try:
-                prompt = s.get('prompt', f'sample_{i}')
-                s['image'].save(os.path.join(args.out_dir, f"{prompt}_{i}.png"))
-                saved += 1
-            except Exception:
-                continue
+            prompt = _safe_filename(s.get('prompt', f'sample_{i}'), f'sample_{i}')
+            s['image'].save(out_dir / f"{prompt}_{i}.png")
+            saved += 1
 
     print(f"Saved {saved} images to {args.out_dir}")
 
 
 if __name__ == "__main__":
     main()
-
-

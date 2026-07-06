@@ -1,7 +1,6 @@
-import torch
 import urllib.request
 import os
-from src.utils.logging import get_logger
+from jetformer.utils.logging import get_logger
 
 logger = get_logger(__name__)
 

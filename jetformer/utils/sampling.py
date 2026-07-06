@@ -5,10 +5,16 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
-from src.utils.losses import gmm_params
 
 
 # Legacy direct sampler removed in favor of CFG sampler; use generate_text_to_image_samples_cfg
+
+
+def _draw_pdf(pdf, sample_method: str = "sample"):
+    method = str(sample_method or "sample").lower()
+    if method in {"mean", "mode", "greedy"} and hasattr(pdf, "mode"):
+        return pdf.mode()
+    return pdf.sample()
 
 
 class CFGDensity:
@@ -117,6 +123,7 @@ def generate_text_to_image_samples_cfg(
     fast_mixture_first: bool = False,
     temperature_scales: float | None = None,
     temperature_probs: float | None = None,
+    sample_method: str = "sample",
 ):
     model.eval()
     samples = []
@@ -209,12 +216,12 @@ def generate_text_to_image_samples_cfg(
                     else:
                         guided_logits = logits_u + float(cfg_strength) * (logits_c - logits_u)
                         pdf = model.get_pdf(guided_logits, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
-                        sampled_shared = pdf.sample()  # [1,1,D]
+                        sampled_shared = _draw_pdf(pdf, sample_method)  # [1,1,D]
                     # Repeat to feed both sequences identically
                     sampled_token = sampled_shared.repeat(2, 1, 1)  # [2,1,D]
                 else:
                     pdf = model.get_pdf(logits_all, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
-                    sampled_token = pdf.sample()  # [1,1,D]
+                    sampled_token = _draw_pdf(pdf, sample_method)  # [1,1,D]
 
                 if pos < out_len:
                     image_tokens_shared[:, pos, :] = sampled_token[0:1].squeeze(1)
@@ -241,7 +248,7 @@ def generate_text_to_image_samples_cfg(
             samples.append({'prompt': prompt_value, 'image': image_pil})
 
         except Exception as e:
-            from src.utils.logging import get_logger
+            from jetformer.utils.logging import get_logger
             logger = get_logger(__name__)
             logger.error(f"Error during sampling for prompt '{prompt_text}': {e}", exc_info=True)
             placeholder = Image.new('RGB', (256, 256), color='red')
@@ -260,7 +267,8 @@ def generate_class_conditional_samples(base,
                                        fast_mixture_first: bool = False,
                                        dataset: Any | None = None,
                                        temperature_scales: float | None = None,
-                                       temperature_probs: float | None = None) -> List[Dict[str, Any]]:
+                                       temperature_probs: float | None = None,
+                                       sample_method: str = "sample") -> List[Dict[str, Any]]:
     samples: List[Dict[str, Any]] = []
     # Ensure deterministic sampling (disable dropout, etc.)
     was_training = base.training
@@ -362,11 +370,11 @@ def generate_class_conditional_samples(base,
                     else:
                         guided_logits = logits_u + float(cfg_strength) * (logits_c - logits_u)
                         pdf = base.get_pdf(guided_logits, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
-                        sampled_shared = pdf.sample()
+                        sampled_shared = _draw_pdf(pdf, sample_method)
                     sampled = sampled_shared.repeat(2, 1, 1)  # feed both sequences
                 else:
                     pdf = base.get_pdf(logits_all, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
-                    sampled = pdf.sample()
+                    sampled = _draw_pdf(pdf, sample_method)
 
                 img_tokens[:, pos] = sampled[0:1].squeeze(1)
 
@@ -392,7 +400,7 @@ def generate_class_conditional_samples(base,
             prompt_str = str(prompt_name) if (prompt_name is not None) else f'class_{int(cls)}'
             samples.append({'prompt': prompt_str, 'image': Image.fromarray((img*255).clip(0,255).astype('uint8'))})
         except Exception as e:
-            from src.utils.logging import get_logger
+            from jetformer.utils.logging import get_logger
             logger = get_logger(__name__)
             logger.error(f"Failed to generate sample for class {cls}: {e}", exc_info=True)
             continue
@@ -411,12 +419,13 @@ def build_sentencepiece_tokenizer_dataset(max_length: int = 64):
     """
     try:
         from sentencepiece import SentencePieceProcessor
-        from src.utils.tokenizer import download_sentencepiece_model
+        from jetformer.utils.tokenizer import download_sentencepiece_model
     except Exception as exc:
         raise RuntimeError("SentencePiece is required for text tokenization. Please install sentencepiece.") from exc
 
     spm_path = download_sentencepiece_model()
-    sp = SentencePieceProcessor(); sp.Load(spm_path)
+    sp = SentencePieceProcessor()
+    sp.Load(spm_path)
 
     class _SentencePieceDataset:
         def tokenize_text(self, text: str):
@@ -431,4 +440,3 @@ def build_sentencepiece_tokenizer_dataset(max_length: int = 64):
             }
 
     return _SentencePieceDataset()
-

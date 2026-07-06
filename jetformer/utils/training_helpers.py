@@ -1,5 +1,4 @@
 import os
-import time
 import math
 from typing import Dict, Any, Optional, Tuple
 from types import SimpleNamespace
@@ -12,15 +11,16 @@ from torch.utils.data import DataLoader
 import wandb
 from PIL import Image
 from wandb.sdk.data_types.image import Image as WandbImage
-from src.utils.logging import get_logger
-logger = get_logger(__name__)
-from src.jetformer import JetFormer
-from src.utils.image import to_x01, dequantize01
-from src.utils.sampling import (
+
+from jetformer.utils.image import to_x01, dequantize01
+from jetformer.utils.losses import compute_jetformer_pca_loss
+from jetformer.utils.logging import get_logger
+from jetformer.utils.sampling import (
     generate_text_to_image_samples_cfg,
     generate_class_conditional_samples,
 )
-from src.utils.losses import compute_jetformer_pca_loss
+
+logger = get_logger(__name__)
 
 
 def resolve_wandb_resume_by_name(cfg: Dict[str, Any]) -> None:
@@ -367,7 +367,7 @@ def generate_and_log_samples(base_model,
         # Try without step parameter as fallback
         try:
             wandb.log(log_payload)
-            logger.info(f"Logged samples without step parameter")
+            logger.info("Logged samples without step parameter")
         except Exception as e2:
             logger.error(f"Failed to log samples to W&B (fallback): {e2}")
 
@@ -463,11 +463,11 @@ def train_step(model: torch.nn.Module,
     eval_no_rgb_noise = bool(batch.get('no_rgb_noise', False))
     advanced_metrics = config.advanced_metrics
     
-    text_loss_weight = config.training.text_loss_weight
+    text_loss_weight = getattr(config.training, 'text_loss_weight', 1.0)
+    image_loss_weight = getattr(config.training, 'image_loss_weight', 1.0)
     cfg_drop_prob = config.model.drop_labels_probability
 
     # PCA image latent training (paper path)
-    from src.utils.losses import compute_jetformer_pca_loss
     out = compute_jetformer_pca_loss(
         model,
         batch,
@@ -484,6 +484,7 @@ def train_step(model: torch.nn.Module,
         rgb_noise_on_image_prefix=config.training.rgb_noise_on_image_prefix,
         eval_no_rgb_noise=eval_no_rgb_noise,
         text_loss_weight=text_loss_weight,
+        image_loss_weight=image_loss_weight,
     )
     
     return out
@@ -571,4 +572,3 @@ class ExponentialMovingAverage:
             if name in self._backup:
                 param.data.copy_(self._backup[name])
         self._backup = {}
-

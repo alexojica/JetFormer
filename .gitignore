@@ -12,6 +12,7 @@ data/
 venv/
 logs/
 outputs/
+samples/
 # checkpoints/
 run*/
 *.log
@@ -42,3 +43,9 @@ laion_pop_cache/
 tinystories_cache/
 sentencepiece.model
 venv/
+
+# Local reference repositories
+external/
+
+# Tool caches
+.ruff_cache/

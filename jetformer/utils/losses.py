@@ -2,7 +2,6 @@ import torch
 import torch.nn.functional as F
 import math
 import numpy as np
-from typing import Any, Dict, Optional, Tuple
 
 
 def cross_entropy_masked(logits: torch.Tensor,
@@ -77,11 +76,11 @@ def gmm_params(image_logits: torch.Tensor, num_mixtures: int, ar_dim: int, *, sc
     """
     # Ensure mixture computations run in fp32 for stability
     image_logits = image_logits.float()
-    b, l, _ = image_logits.shape
+    batch_size, seq_len, _ = image_logits.shape
     k = num_mixtures
     d = ar_dim
     mix_logits = image_logits[..., :k]
-    other = image_logits[..., k:].reshape(b, l, k, 2, d)
+    other = image_logits[..., k:].reshape(batch_size, seq_len, k, 2, d)
     means = other[..., 0, :]
     raw_scales = other[..., 1, :]
     scales = _square_plus(raw_scales)
@@ -100,15 +99,15 @@ def gmm_distribution(mix_logits: torch.Tensor, means: torch.Tensor, scales: torc
     Returns:
         comps (MixtureSameFamily), targets_flat [B*L, D]
     """
-    b, l, k = mix_logits.shape
+    batch_size, seq_len, k = mix_logits.shape
     d = means.shape[-1]
-    mix_flat = mix_logits.reshape(b * l, k)
-    means_flat = means.reshape(b * l, k, d)
-    scales_flat = scales.reshape(b * l, k, d)
+    mix_flat = mix_logits.reshape(batch_size * seq_len, k)
+    means_flat = means.reshape(batch_size * seq_len, k, d)
+    scales_flat = scales.reshape(batch_size * seq_len, k, d)
     mix = torch.distributions.Categorical(logits=mix_flat)
     comp = torch.distributions.Independent(torch.distributions.Normal(means_flat, scales_flat), 1)
     comps = torch.distributions.MixtureSameFamily(mix, comp)
-    targets_flat = targets.reshape(b * l, d)
+    targets_flat = targets.reshape(batch_size * seq_len, d)
     return comps, targets_flat
 
 
@@ -178,7 +177,8 @@ def compute_jetformer_pca_loss(model,
                                noise_min: float | None = None,
                                rgb_noise_on_image_prefix: bool = True,
                                eval_no_rgb_noise: bool = False,
-                               text_loss_weight: float = 1.0):
+                               text_loss_weight: float = 1.0,
+                               image_loss_weight: float = 1.0):
     """JetFormer loss over PatchPCA latents with optional Jet adaptor.
 
     Implements the paper's composition:
@@ -362,13 +362,13 @@ def compute_jetformer_pca_loss(model,
         valid_img_denom = valid_img.float().sum().clamp_min(1.0)
         image_loss = (image_bpd_per_sample * valid_img.float()).sum() / valid_img_denom
         
-        final_loss = image_loss + text_loss * float(text_loss_weight)
+        final_loss = image_loss * float(image_loss_weight) + text_loss * float(text_loss_weight)
     else:
         # Per-example loss selection
         example_loss = torch.where(
             ~text_first_mask,
             nll_txt_per_sample * float(text_loss_weight),
-            image_bpd_per_sample
+            image_bpd_per_sample * float(image_loss_weight)
         )
         final_loss = example_loss.mean()
         # For logging, report masked averages

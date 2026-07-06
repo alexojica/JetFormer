@@ -1,14 +1,11 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 import itertools
 import math
-from typing import Sequence, Tuple, Optional, Callable
+from typing import Sequence, Tuple, Optional
 import torch.utils.checkpoint as checkpoint
-from src.utils.losses import bits_per_dim_flow
-from src.transformer import GatedMLP
-from src.utils.logging import get_logger
+from jetformer.utils.logging import get_logger
 
 _logger = get_logger(__name__)
 
@@ -329,7 +326,8 @@ def get_spatial_coupling_masks_torch(depth, num_tokens, proj_kinds, grid_h, grid
     grid_indices = torch.arange(n, device=device).view(grid_h, grid_w)
 
     for i, kind in enumerate(proj_kinds):
-        if kind == "zero": continue
+        if kind == "zero":
+            continue
 
         if kind.startswith("checkerboard"):
             if n % 2 != 0:
@@ -600,25 +598,17 @@ class Coupling(nn.Module):
     def inverse(self, y: torch.Tensor, context: torch.Tensor = None):
         """Applies the inverse coupling transformation."""
         B, H, W, C = y.shape
-        # This function must return the inverse transformation of y -> x,
-        # and the log-determinant of the FORWARD pass, log|det(dy/dx)|.
-        fwd_logdet = torch.zeros(B, device=y.device)
+        inv_logdet = torch.zeros(B, device=y.device)
 
         # --- Invert ActNorm and InvConv FIRST ---
         x = y # Start with y, and progressively invert to get x
         if self.use_invertible_dense:
-            # Apply inverse transformation
-            x, _ = self.invconv.inverse(x)
-            # Accumulate the forward log-determinant
-            logdet_invconv = H * W * torch.sum(torch.log(torch.abs(self.invconv.U.diag())))
-            fwd_logdet = fwd_logdet + logdet_invconv.expand(B).clone()
+            x, logdet_invconv = self.invconv.inverse(x)
+            inv_logdet = inv_logdet + logdet_invconv
             
         if self.use_actnorm:
-            # Apply inverse transformation
-            x, _ = self.actnorm.inverse(x)
-            # Accumulate the forward log-determinant
-            logdet_actnorm = H * W * torch.sum(self.actnorm.log_scale)
-            fwd_logdet = fwd_logdet + logdet_actnorm.expand(B).clone()
+            x, logdet_actnorm = self.actnorm.inverse(x)
+            inv_logdet = inv_logdet + logdet_actnorm
 
         # Patchify the input: (B, H, W, C) -> (B, N, C_patched)
         x_patched = F.unfold(x.permute(0, 3, 1, 2).contiguous(), kernel_size=self.ps, stride=self.ps)
@@ -635,7 +625,7 @@ class Coupling(nn.Module):
                     bias, scale, logdet_dnn = self.dnn(y1, H_patch=H//self.ps, W_patch=W//self.ps, context=context)
                 else:
                     bias, scale, logdet_dnn = self.dnn(y1, context=context)
-                fwd_logdet = fwd_logdet + logdet_dnn
+                inv_logdet = inv_logdet - logdet_dnn
                 x2 = (y2 / scale) - bias
                 x_merged = torch.cat([y1, x2], dim=-1)
                 with _NoAmpAutocast():
@@ -647,7 +637,7 @@ class Coupling(nn.Module):
                     y_proj = torch.einsum("b n c, n m -> b m c", x_patched, P_spatial)
                 y1_tokens, y2_tokens = torch.chunk(y_proj, 2, dim=1)
                 bias, scale, logdet_dnn = self.dnn(y1_tokens, context=context)
-                fwd_logdet = fwd_logdet + logdet_dnn
+                inv_logdet = inv_logdet - logdet_dnn
                 x2_tokens = (y2_tokens / scale) - bias
                 x_merged_tokens = torch.cat([y1_tokens, x2_tokens], dim=1)
                 with _NoAmpAutocast():
@@ -662,7 +652,7 @@ class Coupling(nn.Module):
                     bias, scale, logdet_dnn = self.dnn(y1, H_patch=H//self.ps, W_patch=W//self.ps, context=context)
                 else: # vit
                     bias, scale, logdet_dnn = self.dnn(y1, context=context)
-                fwd_logdet = fwd_logdet + logdet_dnn
+                inv_logdet = inv_logdet - logdet_dnn
                 
                 x2 = (y2 / scale) - bias
                 x_unproj = torch.cat([y1, x2], dim=-1)
@@ -678,7 +668,7 @@ class Coupling(nn.Module):
                 y1_re, y2_re = torch.chunk(y_rearranged, 2, dim=1)
                 
                 bias, scale, logdet_dnn = self.dnn(y1_re, context=context)
-                fwd_logdet += logdet_dnn
+                inv_logdet = inv_logdet - logdet_dnn
                 
                 x2_re = (y2_re / scale) - bias
                 
@@ -701,9 +691,7 @@ class Coupling(nn.Module):
         )
         x_final = x_final.permute(0, 2, 3, 1).contiguous()
 
-        # The inverse function of the whole coupling layer returns the reconstructed x
-        # and the FORWARD log-determinant.
-        return x_final, fwd_logdet
+        return x_final, inv_logdet
 
 class FlowCore(nn.Module):
     """A complete normalizing flow model composed of a sequence of coupling layers.
@@ -905,9 +893,16 @@ class FlowCore(nn.Module):
 
 
 def load_params_from_flax_checkpoint(pytorch_model, flax_params_dict):
-    """Placeholder function for loading model parameters from a Flax checkpoint."""
-    print("Weight loading from Flax checkpoint is not fully implemented.")
-    pass
+    """Load weights from a Flax checkpoint.
+
+    The PyTorch port does not currently provide a verified Flax-to-PyTorch
+    parameter mapping. Failing explicitly is safer than silently returning a
+    randomly initialized model.
+    """
+    raise NotImplementedError(
+        "Flax checkpoint conversion is not implemented for this PyTorch port. "
+        "Use native PyTorch checkpoints or add an explicit parameter mapping."
+    )
 
 
 class ConvBNGelu(nn.Module):
@@ -988,4 +983,3 @@ class CNNPredictor(nn.Module):
 
 
 JetModel = FlowCore
-

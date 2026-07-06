@@ -8,15 +8,26 @@ Thank you for considering contributing to JetFormer! This document outlines how 
 ```bash
 pip install -r requirements.txt
 ```
+- For editable development installs:
+```bash
+pip install -e ".[dev,eval]"
+```
 
 ## Running
-- Single-GPU training example:
+- CIFAR-10 smoke training example:
 ```bash
-python -m flow.train --dataset imagenet64_tfds --resolution 64 --accelerator gpu --device cuda
+python -m jetformer.train --config jetformer/configs/cifar10_32_tiny.yaml
 ```
-- Ablation sweep:
+- Equivalent editable-install entrypoint:
 ```bash
-python -m flow.ablation_runner --study vit_depth_sweep
+jetformer-train --config jetformer/configs/cifar10_32_tiny.yaml
+```
+- Sample from a checkpoint:
+```bash
+python scripts/sample_from_checkpoint.py \
+  --config jetformer/configs/cifar10_32_tiny.yaml \
+  --ckpt checkpoints/jetformer_CIFAR10-32-tiny-smoke_last.pt \
+  --out_dir samples/tiny --num_images 8 --class_ids 0,1,2,3
 ```
 
 ## Style and quality
@@ -24,6 +35,11 @@ python -m flow.ablation_runner --study vit_depth_sweep
 - Prefer early returns and guard clauses.
 - Keep comments concise and focused on "why".
 - Avoid committing large artifacts (datasets, weights, logs). See `.gitignore`.
+- Run the repository quality checks before opening a PR:
+```bash
+ruff check src scripts
+python -m compileall -q src scripts/sample_from_checkpoint.py
+```
 
 ## Git workflow
 1. Create a feature branch from `main`.

@@ -1,5 +1,5 @@
 import math
-from typing import Any, Dict, Tuple
+from typing import Any, Dict
 
 import torch
 
@@ -8,17 +8,28 @@ def create_adamw(model: torch.nn.Module,
                  lr: float,
                  wd: float = 1e-4,
                  beta1: float = 0.9,
-                 beta2: float = 0.95) -> torch.optim.Optimizer:
+                 beta2: float = 0.95,
+                 fused: bool | None = None) -> torch.optim.Optimizer:
+    params = [p for p in model.parameters() if p.requires_grad]
+    if not params:
+        raise ValueError("Cannot create AdamW optimizer: model has no trainable parameters.")
+
+    kwargs = {
+        "lr": lr,
+        "betas": (beta1, beta2),
+        "weight_decay": wd,
+    }
+
+    # Fused AdamW is a CUDA fast path. Keep it opt-in and avoid passing it on
+    # CPU/MPS where support differs across PyTorch builds.
+    if fused is True and all(p.device.type == "cuda" for p in params):
+        kwargs["fused"] = True
+
     try:
-        return torch.optim.AdamW(
-            filter(lambda p: p.requires_grad, model.parameters()),
-            lr=lr, betas=(beta1, beta2), weight_decay=wd, fused=True
-        )
-    except TypeError:
-        return torch.optim.AdamW(
-            filter(lambda p: p.requires_grad, model.parameters()),
-            lr=lr, betas=(beta1, beta2), weight_decay=wd
-        )
+        return torch.optim.AdamW(params, **kwargs)
+    except (RuntimeError, TypeError):
+        kwargs.pop("fused", None)
+        return torch.optim.AdamW(params, **kwargs)
 
 
 def build_cosine_scheduler(optimizer: torch.optim.Optimizer,
@@ -56,14 +67,15 @@ def get_optimizer_and_scheduler(model: torch.nn.Module, cfg: Dict[str, Any], tot
 
     b1 = float(cfg.get('b1', cfg.get('opt_b1', 0.9)))
     b2 = float(cfg.get('b2', cfg.get('opt_b2', 0.95)))
+    fused = cfg.get('fused', None)
+    if fused is not None:
+        fused = str(fused).lower() in {'1', 'true', 'yes', 'on'} if isinstance(fused, str) else bool(fused)
 
     # Scheduler config comes from top-level 'schedule' block, not optimizer block
     warmup_percent = float(cfg.get('warmup_percent', 0.1))
     decay_type = cfg.get('decay_type', 'cosine')
     use_cosine = (str(decay_type).lower() == 'cosine')
     
-    optimizer = create_adamw(model, lr=lr, wd=wd, beta1=b1, beta2=b2)
+    optimizer = create_adamw(model, lr=lr, wd=wd, beta1=b1, beta2=b2, fused=fused)
     scheduler = build_cosine_scheduler(optimizer, total_steps=total_steps, warmup_percent=warmup_percent, use_cosine=use_cosine)
     return optimizer, scheduler
-
-

@@ -25,5 +25,8 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install pytest
+        pip install -e ".[dev]"
+    - name: Lint
+      run: ruff check jetformer scripts
+    - name: Compile
+      run: python -m compileall -q jetformer scripts/sample_from_checkpoint.py
