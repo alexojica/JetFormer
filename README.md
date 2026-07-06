@@ -72,6 +72,20 @@ python scripts/sample_from_checkpoint.py \
   --out_dir samples/out --num_images 8 --class_ids 0,1,2,3
 ```
 
+Small visual overfit sanity check:
+```bash
+python -m jetformer.train --config jetformer/configs/cifar10_32_small_p2_one_per_class.yaml
+python scripts/sample_from_checkpoint.py \
+  --config jetformer/configs/cifar10_32_small_p2_one_per_class.yaml \
+  --ckpt checkpoints/jetformer_CIFAR10-32-small-p2-one-per-class_last.pt \
+  --out_dir samples/cifar10_one_per_class \
+  --num_images 10 --class_ids 0,1,2,3,4,5,6,7,8,9 \
+  --sample_method mean
+```
+This config trains on one CIFAR-10 image per class. Use the rolling `_last.pt`
+checkpoint for the visual overfit check; `_best.pt` is selected by held-out
+validation loss and is not expected to memorize the training images.
+
 Text-to-image demo (SentencePiece tokenizer; prompts file optional):
 ```bash
 python scripts/sample_from_checkpoint.py \
@@ -104,7 +118,7 @@ FID/IS: enable periodic computation from training via `eval.fid_every_epochs`, `
   - `jetformer/configs/imagenet_64.yaml`, `jetformer/configs/imagenet_256.yaml`, `jetformer/configs/imagenet_256_first100.yaml`
   - `jetformer/configs/cifar10_32.yaml`, `jetformer/configs/cifar10_32_tiny.yaml`, `jetformer/configs/cifar10_32_small.yaml`, `jetformer/configs/cifar10_32_small_p2.yaml`
   - `jetformer/configs/cifar10_32_mps_large.yaml` is the full-CIFAR Apple Silicon research config.
-  - `jetformer/configs/cifar10_32_small_p2_one_per_class.yaml` is a 10-image overfit sanity check, not a full CIFAR-10 generative benchmark.
+  - `jetformer/configs/cifar10_32_small_p2_one_per_class.yaml` is a 10-image overfit sanity check, not a full CIFAR-10 generative benchmark. For visual inspection, sample from its rolling `_last.pt` checkpoint.
 - Paper-aligned toggles:
   - Mixture count: `model.num_mixtures` (e.g., 64/256/1024)
   - Factoring: `patch_pca.model.codeword_dim` (residual dims are Gaussian)

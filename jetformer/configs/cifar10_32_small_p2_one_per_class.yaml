@@ -3,6 +3,10 @@
 # One training image per CIFAR-10 class. This makes each class token identify
 # one real CIFAR image, so free-running class-conditional generation has a
 # compact target instead of averaging many images per class.
+#
+# For visual inspection, sample the rolling *_last.pt checkpoint. The *_best.pt
+# checkpoint is selected by held-out validation loss and is not expected to
+# memorize these ten training images.
 num_epochs: 1000
 torch_compile: false
 advanced_metrics: true
