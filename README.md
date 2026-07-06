@@ -103,6 +103,7 @@ FID/IS: enable periodic computation from training via `eval.fid_every_epochs`, `
 - Use the provided configs as starting points and scale `model.width/depth`, `num_mixtures`, and dataset size:
   - `jetformer/configs/imagenet_64.yaml`, `jetformer/configs/imagenet_256.yaml`, `jetformer/configs/imagenet_256_first100.yaml`
   - `jetformer/configs/cifar10_32.yaml`, `jetformer/configs/cifar10_32_tiny.yaml`, `jetformer/configs/cifar10_32_small.yaml`, `jetformer/configs/cifar10_32_small_p2.yaml`
+  - `jetformer/configs/cifar10_32_mps_large.yaml` is the full-CIFAR Apple Silicon research config.
   - `jetformer/configs/cifar10_32_small_p2_one_per_class.yaml` is a 10-image overfit sanity check, not a full CIFAR-10 generative benchmark.
 - Paper-aligned toggles:
   - Mixture count: `model.num_mixtures` (e.g., 64/256/1024)
