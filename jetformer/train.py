@@ -46,6 +46,17 @@ def seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def _metric_float(value, default: float = 0.0) -> float:
+    """Convert scalar-like metric values without retaining autograd graphs."""
+    if value is None:
+        return float(default)
+    if torch.is_tensor(value):
+        if value.numel() == 0:
+            return float(default)
+        return float(value.detach().float().mean().item())
+    return float(value)
+
+
 def _coerce_cli_value(value, current):
     """Attempt to coerce a CLI string override to the type of the existing config entry."""
     if not isinstance(value, str):
@@ -513,17 +524,17 @@ def train_from_config(config: SimpleNamespace):
                 took_step = True
 
             epoch_losses['total'] += loss.item()
-            epoch_losses['text'] += float(out.get('text_loss', 0.0))
-            epoch_losses['image_gen'] += float(out.get('image_loss', 0.0))
-            epoch_losses['flow'] += float(out.get('flow_bpd_component', 0.0))
+            epoch_losses['text'] += _metric_float(out.get('text_loss'), 0.0)
+            epoch_losses['image_gen'] += _metric_float(out.get('image_loss'), 0.0)
+            epoch_losses['flow'] += _metric_float(out.get('flow_bpd_component'), 0.0)
             num_batches += 1
 
             if is_main_process and hasattr(progress_bar, 'set_postfix'):
                 try:
                     progress_bar.set_postfix({
                         "loss": f"{loss.item():.4f}",
-                        "text": f"{float(out.get('text_loss', 0.0)):.4f}",
-                        "img": f"{float(out.get('image_loss', 0.0)):.4f}",
+                        "text": f"{_metric_float(out.get('text_loss'), 0.0):.4f}",
+                        "img": f"{_metric_float(out.get('image_loss'), 0.0):.4f}",
                     })
                 except Exception:
                     pass
@@ -542,8 +553,8 @@ def train_from_config(config: SimpleNamespace):
                 print(f"Epoch {epoch+1}/{config.num_epochs}, "
                         f"Batch {batch_idx}/{len(dataloader)}, "
                         f"Total Loss: {loss.item():.4f}, "
-                        f"Text: {float(out.get('text_loss', 0.0)):.4f}, "
-                        f"Image Gen: {float(out.get('image_loss', 0.0)):.4f}")
+                        f"Text: {_metric_float(out.get('text_loss'), 0.0):.4f}, "
+                        f"Image Gen: {_metric_float(out.get('image_loss'), 0.0):.4f}")
                 
                 print("Generating samples for wandb logging...")
                 try:

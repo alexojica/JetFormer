@@ -150,8 +150,8 @@ requirements.txt         # project dependencies
 - Style: PEP8; prefer explicit names, early returns, and guard clauses.
 - Run quality checks before PRs:
 ```bash
-ruff check src scripts
-python -m compileall -q src scripts/sample_from_checkpoint.py
+ruff check jetformer scripts
+python -m compileall -q jetformer scripts/sample_from_checkpoint.py
 ```
 
 ### Troubleshooting

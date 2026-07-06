@@ -94,10 +94,21 @@ class WBLogger:
         except Exception:
             return float('nan')
 
+    @staticmethod
+    def _metric_float(value, default: float = 0.0) -> float:
+        """Convert scalar-like metric values without retaining autograd graphs."""
+        if value is None:
+            return float(default)
+        if torch.is_tensor(value):
+            if value.numel() == 0:
+                return float(default)
+            return float(value.detach().float().mean().item())
+        return float(value)
+
     def log_train_step(self, model, optimizer, out: dict, step: int, epoch: int, batch_time: float, log_grads: bool = False):
         if not self.enabled:
             return
-        text_ce = float(out.get('text_loss', 0.0))
+        text_ce = self._metric_float(out.get('text_loss'), 0.0)
         # Prefer a stable CE source for PPL even when text CE isn't optimized.
         # Use prefix CE when available (common when loss_on_prefix is False),
         # otherwise fall back to suffix CE, then to the training text loss.
@@ -106,7 +117,7 @@ class WBLogger:
 
         def _ppl_from_ce(val):
             try:
-                v = float(val)
+                v = self._metric_float(val, 0.0)
                 if math.isfinite(v) and v > 0.0:
                     return float(math.exp(min(30.0, v)))
             except Exception:
@@ -183,35 +194,35 @@ class WBLogger:
         # Prefer explicit NLL (nats) if provided; otherwise derive from BPD if possible
         payload = {
             # Loss components
-            "loss/total": float(out.get('loss', 0.0)),
-            "loss/image": float(out.get('image_loss', 0.0)),
-            "loss/text": float(out.get('text_loss', 0.0)),
+            "loss/total": self._metric_float(out.get('loss'), 0.0),
+            "loss/image": self._metric_float(out.get('image_loss'), 0.0),
+            "loss/text": self._metric_float(out.get('text_loss'), 0.0),
             # Bits/dim (paper-consistent): total, ar, flow
-            "bpd/total": float(out.get('image_bpd_total', out.get('bpd', 0.0))),
-            "bpd/ar": float(out.get('ar_bpd_component', 0.0)),
-            "bpd/flow": float(out.get('flow_bpd_component', 0.0)),
+            "bpd/total": self._metric_float(out.get('image_bpd_total', out.get('bpd')), 0.0),
+            "bpd/ar": self._metric_float(out.get('ar_bpd_component'), 0.0),
+            "bpd/flow": self._metric_float(out.get('flow_bpd_component'), 0.0),
             # Text metrics (CE)
             "text/ce": text_ce,
             "text/ppl": text_ppl,
-            "text/ce_denom": float(out.get('text_ce_denom', float('nan'))),
-            "text/ce_prefix": float(out.get('nll_text_prefix', float('nan'))),
-            "text/ce_suffix": float(out.get('nll_text_suffix', float('nan'))),
+            "text/ce_denom": self._metric_float(out.get('text_ce_denom'), float('nan')),
+            "text/ce_prefix": self._metric_float(out.get('nll_text_prefix'), float('nan')),
+            "text/ce_suffix": self._metric_float(out.get('nll_text_suffix'), float('nan')),
             # Image metrics (BPD)
-            "bpd/image_prefix": float(out.get('nll_image_prefix', float('nan'))),
-            "bpd/image_suffix": float(out.get('nll_image_suffix', float('nan'))),
+            "bpd/image_prefix": self._metric_float(out.get('nll_image_prefix'), float('nan')),
+            "bpd/image_suffix": self._metric_float(out.get('nll_image_suffix'), float('nan')),
             # Curriculum & noise
-            "diag/sigma_rgb": float(out.get('sigma_rgb', 0.0)),
+            "diag/sigma_rgb": self._metric_float(out.get('sigma_rgb'), 0.0),
             "diag/latent_noise_std": float(getattr(self.cfg, 'latent_noise_std', 0.3)),
             # AR/flow diagnostics
-            "diag/ar/gmm_entropy_nats": float(out.get('gmm_entropy_nats', float('nan'))),
-            "diag/ar/gmm_log_scales_mean": float(out.get('gmm_log_scales_mean', float('nan'))),
-            "diag/ar/gmm_log_scales_std": float(out.get('gmm_log_scales_std', float('nan'))),
-            "diag/ar/image_logits_rms": float(out.get('image_logits_rms', float('nan'))),
-            "diag/flow/logdet_per_patch": float(out.get('flow_logdet_per_patch', float('nan'))),
-            "diag/latent/ar_hat_tokens_rms": float(out.get('ar_hat_tokens_rms', float('nan'))),
-            "diag/latent/residual_tokens_rms": float(out.get('residual_tokens_rms', float('nan'))),
-            "diag/sanity/gmm_small_scales_rate": float(out.get('gmm_small_scales_rate', 0.0)),
-            "diag/text_first_rate": float(out.get('text_first_rate', float('nan'))),
+            "diag/ar/gmm_entropy_nats": self._metric_float(out.get('gmm_entropy_nats'), float('nan')),
+            "diag/ar/gmm_log_scales_mean": self._metric_float(out.get('gmm_log_scales_mean'), float('nan')),
+            "diag/ar/gmm_log_scales_std": self._metric_float(out.get('gmm_log_scales_std'), float('nan')),
+            "diag/ar/image_logits_rms": self._metric_float(out.get('image_logits_rms'), float('nan')),
+            "diag/flow/logdet_per_patch": self._metric_float(out.get('flow_logdet_per_patch'), float('nan')),
+            "diag/latent/ar_hat_tokens_rms": self._metric_float(out.get('ar_hat_tokens_rms'), float('nan')),
+            "diag/latent/residual_tokens_rms": self._metric_float(out.get('residual_tokens_rms'), float('nan')),
+            "diag/sanity/gmm_small_scales_rate": self._metric_float(out.get('gmm_small_scales_rate'), 0.0),
+            "diag/text_first_rate": self._metric_float(out.get('text_first_rate'), float('nan')),
             # Optimization / dynamics
             "diag/optim/lr": optimizer.param_groups[0]['lr'] if hasattr(optimizer, 'param_groups') else 0.0,
             "diag/optim/beta2": optimizer.param_groups[0].get('betas', (None, 0.95))[1] if hasattr(optimizer, 'param_groups') else 0.95,
@@ -274,5 +285,4 @@ def get_logger(name: str) -> logging.Logger:
         logger.addHandler(handler)
         logger.propagate = False
     return logger
-
 

@@ -35,6 +35,7 @@ class CFGDensity:
             for attr in ("mix", "mu", "sigma")
         )
         self._supports_rejection = self._supports_rejection and self.w != 0.0
+        self._supports_rejection = self._supports_rejection and int(self.pdf_c.mu.shape[-1]) == 1
 
         if not self._supports_rejection:
             return

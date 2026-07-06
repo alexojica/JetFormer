@@ -751,7 +751,7 @@ class JetFormer(nn.Module):
             mix_logits, means, scales = self.gmm_params(image_logits)
             if temperature_probs is not None:
                 try:
-                    mix_logits = mix_logits * float(temperature_probs)
+                    mix_logits = mix_logits / max(float(temperature_probs), 1e-6)
                 except Exception:
                     pass
             if temperature_scales is not None:

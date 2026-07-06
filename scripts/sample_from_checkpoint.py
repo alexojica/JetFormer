@@ -49,6 +49,21 @@ def _safe_filename(name: str, fallback: str) -> str:
     return safe or fallback
 
 
+class _ClassNamesDataset:
+    def __init__(self, classes: List[str]):
+        self.classes = classes
+
+
+def _class_names_from_config(config: SimpleNamespace, num_classes: int) -> List[str]:
+    dataset_name = str(getattr(getattr(config, "input", SimpleNamespace()), "dataset", "")).lower()
+    if dataset_name == "cifar10":
+        return [
+            "airplane", "automobile", "bird", "cat", "deer",
+            "dog", "frog", "horse", "ship", "truck",
+        ][:num_classes]
+    return [f"class_{i}" for i in range(num_classes)]
+
+
 def main():
     parser = argparse.ArgumentParser(description="Sample images from a JetFormer checkpoint using a YAML config.")
     # Local inputs
@@ -142,9 +157,8 @@ def main():
     temperature = float(args.temperature) if args.temperature is not None else float(getattr(config.sampling, 'temperature', 1.0))
     temperature_probs = float(args.temperature_probs) if args.temperature_probs is not None else float(getattr(config.sampling, 'temperature_probs', 1.0))
 
-    # Build dataset for class names or tokenizer; we avoid full dataloader construction
-    # by creating datasets via the same utility then discarding loaders.
-    # We use a minimal accelerator stub to satisfy the API.
+    # Build datasets only for sampling modes that need a tokenizer. Class-conditional
+    # sampling only needs class names, so keep it independent from dataset downloads.
     class _NullAccel:
         def __init__(self, device):
             self.device = device
@@ -154,8 +168,6 @@ def main():
             self.rank = 0
         def build_samplers(self, d1, d2):
             return None, None
-    accel = _NullAccel(device)
-    dataset, val_dataset, _, _ = create_datasets_and_loaders(config, accel)
 
     # Determine sampling mode: class-conditional vs text-to-image
     is_class_cond = bool(getattr(model, 'num_classes', 0)) and int(getattr(model, 'num_classes', 0)) > 0
@@ -163,7 +175,9 @@ def main():
     saved = 0
     if is_class_cond and args.prompts_file is None:
         # Parse class ids or default to first K classes
-        class_ids = _parse_class_ids(args.class_ids, args.num_images, int(getattr(model, 'num_classes', 10)))
+        num_classes = int(getattr(model, 'num_classes', 10))
+        class_ids = _parse_class_ids(args.class_ids, args.num_images, num_classes)
+        dataset = _ClassNamesDataset(_class_names_from_config(config, num_classes))
 
         samples = generate_class_conditional_samples(
             model,
@@ -182,6 +196,8 @@ def main():
             saved += 1
     else:
         # Text-to-image mode; use provided prompts or a minimal SPM dataset
+        accel = _NullAccel(device)
+        dataset, _, _, _ = create_datasets_and_loaders(config, accel)
         prompts = []
         if args.prompts_file:
             prompts = _read_prompts_file(args.prompts_file)
