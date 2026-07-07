@@ -211,9 +211,9 @@ def resume_optimizer_from_ckpt(
                 last_epoch = max(0, int(getattr(scheduler, 'last_epoch', 0)))
                 lrs = [
                     float(base_lr) * float(lr_lambda(last_epoch))
-                    for base_lr, lr_lambda in zip(scheduler.base_lrs, scheduler.lr_lambdas)
+                    for base_lr, lr_lambda in zip(scheduler.base_lrs, scheduler.lr_lambdas, strict=True)
                 ]
-                for param_group, lr in zip(optimizer.param_groups, lrs):
+                for param_group, lr in zip(optimizer.param_groups, lrs, strict=True):
                     param_group['lr'] = lr
                 if hasattr(scheduler, '_last_lr'):
                     scheduler._last_lr = lrs
@@ -311,7 +311,7 @@ def generate_and_log_samples(base_model,
                 if (not class_ids) and hasattr(ds, 'classes') and isinstance(ds.classes, list) and len(ds.classes) > 0:
                     n = len(ds.classes)
                     picks = [0, max(0, n // 3), max(0, (2 * n) // 3), n - 1]
-                    class_ids = sorted(set(int(p) for p in picks if 0 <= p < n))
+                    class_ids = sorted({int(p) for p in picks if 0 <= p < n})
             except Exception:
                 class_ids = None
             # Clamp to model's valid class table

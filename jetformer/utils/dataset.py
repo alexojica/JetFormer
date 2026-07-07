@@ -376,7 +376,7 @@ class TFDSImagenetResized(Dataset):
                                 vals.append(int(s))
                         elif isinstance(v, int):
                             vals.append(int(v))
-                    selected = set(int(x) for x in vals if 0 <= int(x) < 1000)
+                    selected = {int(x) for x in vals if 0 <= int(x) < 1000}
                 elif isinstance(self.class_subset, str):
                     s = self.class_subset.strip()
                     # Support a single range string like "0:100" or comma-separated mix
@@ -394,7 +394,7 @@ class TFDSImagenetResized(Dataset):
                                 pass
                         if p.isdigit():
                             vals.append(int(p))
-                    selected = set(int(x) for x in vals if 0 <= int(x) < 1000)
+                    selected = {int(x) for x in vals if 0 <= int(x) < 1000}
                 elif isinstance(self.class_subset, int):
                     selected = {int(self.class_subset)}
             except Exception:
@@ -538,7 +538,7 @@ class HFImagenet1k(Dataset):
                                         vals.append(int(idx))
                         elif isinstance(v, int):
                             vals.append(int(v))
-                    selected = set(int(x) for x in vals if 0 <= int(x) < 1000)
+                    selected = {int(x) for x in vals if 0 <= int(x) < 1000}
                 elif isinstance(self.class_subset, str):
                     s = self.class_subset.strip()
                     parts = [p.strip() for p in s.split(',')] if (',' in s) else [s]
@@ -561,7 +561,7 @@ class HFImagenet1k(Dataset):
                                 idx = name_to_idx.get(p, None)
                                 if idx is not None:
                                     vals.append(int(idx))
-                    selected = set(int(x) for x in vals if 0 <= int(x) < 1000)
+                    selected = {int(x) for x in vals if 0 <= int(x) < 1000}
                 elif isinstance(self.class_subset, int):
                     selected = {int(self.class_subset)}
             except Exception:

@@ -34,8 +34,8 @@ def aspect_preserving_resize_and_center_crop(img: Image.Image, resolution: int) 
     w, h = img.size
     if min(w, h) != resolution:
         scale = float(resolution) / float(min(w, h))
-        new_w = max(1, int(round(w * scale)))
-        new_h = max(1, int(round(h * scale)))
+        new_w = max(1, round(w * scale))
+        new_h = max(1, round(h * scale))
         # Resize using bicubic filtering with antialiasing, mirroring resize_small(..., method="bicubic", antialias=True)
         img = img.resize((new_w, new_h), Image.Resampling.BICUBIC, reducing_gap=1.0)
         w, h = img.size
@@ -58,7 +58,7 @@ def patchify(x_nhwc: torch.Tensor, patch_size: int) -> torch.Tensor:
     """
     if x_nhwc.dim() != 4:
         raise ValueError("x_nhwc must be rank-4 [B,H,W,C]")
-    b, h, w, c = x_nhwc.shape
+    _, h, w, _ = x_nhwc.shape
     if h % patch_size != 0 or w % patch_size != 0:
         raise ValueError(f"H and W must be divisible by patch_size; got {(h, w)} and ps={patch_size}")
     x = x_nhwc.permute(0, 3, 1, 2).contiguous()  # B,C,H,W
@@ -81,7 +81,6 @@ def unpatchify(tokens: torch.Tensor, H: int, W: int, patch_size: int) -> torch.T
     """
     if tokens.dim() != 3:
         raise ValueError("tokens must be rank-3 [B,N,D]")
-    b, n, d = tokens.shape
     x = tokens.transpose(1, 2).contiguous()  # B, D, N
     x = F.fold(x, output_size=(H, W), kernel_size=patch_size, stride=patch_size)  # B,C,H,W
     return x.permute(0, 2, 3, 1).contiguous()  # B,H,W,C

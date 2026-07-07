@@ -786,13 +786,19 @@ class JetFormer(nn.Module):
             class _WrappedMVN:
                 def __init__(self, mvn_dist):
                     self.dist = mvn_dist
-                def sample(self, sample_shape=torch.Size()):
+
+                def sample(self, sample_shape=None):
+                    if sample_shape is None:
+                        sample_shape = torch.Size()
                     # Add a sequence dimension of 1 for API parity with GMM path
                     return self.dist.sample(sample_shape).unsqueeze(-2)
+
                 def mean(self):
                     return self.dist.mean.unsqueeze(-2)
+
                 def mode(self):
                     return self.dist.loc.unsqueeze(-2)
+
                 def log_prob(self, x: torch.Tensor):
                     # Remove sequence dim of 1 if present before calling log_prob
                     if x.ndim == self.dist.loc.ndim + 1 and x.shape[-2] == 1:
@@ -831,7 +837,6 @@ class JetFormer(nn.Module):
                     pos = torch.arange(L, device=self.mix.device).unsqueeze(0).expand(B, L)
                     return self.mu[b, pos, comp_idx, :]
                 def log_prob(self, x: torch.Tensor):
-                    B, L, K = self.mix.shape
                     x_exp = x.unsqueeze(2)
                     var = (self.sigma * self.sigma).clamp_min(1e-12)
                     log_two_pi = torch.log(torch.tensor(2.0 * math.pi, device=self.mix.device, dtype=self.mix.dtype))
