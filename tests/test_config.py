@@ -33,6 +33,7 @@ def test_config_merges_yaml_cli_overrides_and_derived_values(tmp_path):
             "config": str(config_path),
             "batch_size": "8",
             "input.max_samples": "32",
+            "resume_optimizer": "false",
             "wandb.enabled": "false",
         }
     )
@@ -41,6 +42,7 @@ def test_config_merges_yaml_cli_overrides_and_derived_values(tmp_path):
 
     assert config.batch_size == 8
     assert config.input.max_samples == 32
+    assert config.resume_optimizer is False
     assert config.wandb.enabled is False
     assert config.sampling.cfg_inference_weight == 2.5
     assert config.patch_pca.model.input_size == [32, 32]

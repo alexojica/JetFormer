@@ -146,6 +146,7 @@ FID/IS: enable periodic computation from training via `eval.fid_every_epochs`, `
 ### Checkpoints and sampling
 - Checkpoints are saved under `./checkpoints/` as `jetformer_{run_name}_best.pt` (val best) and `jetformer_{run_name}_last.pt` (rolling).
 - `num_epochs` defines the full training/scheduler horizon. Use `max_run_epochs` to stop an invocation early without changing the learning-rate schedule saved in checkpoints.
+- Resume from model weights but reset optimizer/scheduler state with `--resume_optimizer=false`; this is useful for low-LR fine-tuning from a validation-best checkpoint.
 - Periodic image sampling can be enabled via `eval.sample_every_epochs` (images logged to W&B if enabled).
 
 ### Project layout

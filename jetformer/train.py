@@ -218,6 +218,7 @@ def get_default_config() -> dict:
             'precision': 'bf16',
         },
         'resume_from': None,
+        'resume_optimizer': True,
         'log_every_batches': 50,
         'grad_logging': False,
     }
@@ -421,8 +422,11 @@ def train_from_config(config: SimpleNamespace):
     # Merge schedule params into optimizer cfg for scheduler construction
     opt_cfg = {**vars(config.optimizer), **vars(getattr(config, 'schedule', SimpleNamespace()))}
     optimizer, scheduler = get_opt_sched(model, opt_cfg, total_steps)
-    if _loaded_ckpt:
+    resume_optimizer_state = bool(getattr(config, 'resume_optimizer', True))
+    if _loaded_ckpt and resume_optimizer_state:
         resume_optimizer_from_ckpt(optimizer, _loaded_ckpt, scheduler=scheduler)
+    elif _loaded_ckpt and is_main_process:
+        print("Skipping optimizer/scheduler restore; starting fresh optimizer state from current config.")
     step = initialize_step_from_ckpt(model, len(dataloader), start_epoch, device_obj, _loaded_ckpt)
 
     ema_decay_val = config.ema_decay
