@@ -630,9 +630,13 @@ class HFImagenet1k(Dataset):
             if img_pil.mode != 'RGB':
                 img_pil = img_pil.convert('RGB')
         except Exception:
-            # Return a zero image on failure to decode
+            # Keep the original label token valid even if image decode fails.
+            try:
+                fallback_label = int(ex.get('label', 0))
+            except Exception:
+                fallback_label = 0
             img_tensor = torch.zeros((3, self.resolution, self.resolution), dtype=torch.uint8)
-            label_tensor = torch.tensor(-1, dtype=torch.long)
+            label_tensor = torch.tensor(fallback_label, dtype=torch.long)
             return {"image": img_tensor, "label": label_tensor}
 
         # Optional random horizontal flip for training split
@@ -1006,7 +1010,7 @@ class ImageNet21kFolder(Dataset):
             img = Image.open(img_path).convert('RGB')
         except Exception:
             img_tensor = torch.zeros((3, self.resolution, self.resolution), dtype=torch.uint8)
-            label_tensor = torch.tensor(-1, dtype=torch.long)
+            label_tensor = torch.tensor(target_class_idx, dtype=torch.long)
             return {"image": img_tensor, "label": label_tensor}
 
         from jetformer.utils.image import aspect_preserving_resize_and_center_crop

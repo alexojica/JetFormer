@@ -38,7 +38,9 @@ python scripts/sample_from_checkpoint.py \
 - Run the repository quality checks before opening a PR:
 ```bash
 ruff check jetformer scripts
+vulture jetformer scripts --min-confidence 80
 python -m compileall -q jetformer scripts/sample_from_checkpoint.py
+python -m build --sdist --wheel
 ```
 
 ## Git workflow

@@ -166,7 +166,7 @@ def main():
             self.ddp_enabled = False
             self.world_size = 1
             self.rank = 0
-        def build_samplers(self, d1, d2):
+        def build_samplers(self, _d1, _d2):
             return None, None
 
     # Determine sampling mode: class-conditional vs text-to-image

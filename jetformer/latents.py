@@ -132,14 +132,14 @@ class PatchPCA(nn.Module):
         self.register_buffer("pca_inv_proj", torch.eye(self.token_dim), persistent=False)
         self.pca_loaded: bool = False
 
-        if isinstance(pca_init_file, str) and os.path.exists(pca_init_file) and not self.skip_pca:
+        if isinstance(pca_init_file, str) and pca_init_file and not self.skip_pca:
+            if not os.path.exists(pca_init_file):
+                raise FileNotFoundError(f"PatchPCA pca_init_file not found: {pca_init_file}")
             try:
                 self._load_pca_params(pca_init_file)
-                self.pca_loaded = True
-            except Exception:
-                # Fall back to identity if loading fails
-                self.pca_loaded = False
-                self.skip_pca = True
+            except Exception as exc:
+                raise RuntimeError(f"Failed to load PatchPCA parameters from {pca_init_file}") from exc
+            self.pca_loaded = True
 
     @torch.no_grad()
     def _load_pca_params(self, path: str) -> None:
@@ -182,15 +182,24 @@ class PatchPCA(nn.Module):
         if scales is None:
             scales = torch.ones(self.token_dim, dtype=torch.float32)
 
-        # Store as buffers
-        self.pca_mean = nn.Parameter(mean, requires_grad=False)
+        expected_vec = (self.token_dim,)
+        expected_mat = (self.token_dim, self.token_dim)
+        if tuple(mean.shape) != expected_vec:
+            raise ValueError(f"PCA mean must have shape {expected_vec}, got {tuple(mean.shape)}.")
+        if tuple(comps.shape) != expected_mat:
+            raise ValueError(f"PCA components must have shape {expected_mat}, got {tuple(comps.shape)}.")
+        if tuple(scales.shape) != expected_vec:
+            raise ValueError(f"PCA scales must have shape {expected_vec}, got {tuple(scales.shape)}.")
+
+        # Store as non-trainable buffers.
+        self.pca_mean.copy_(mean)
         # Whitening projection: (x - mean) @ (comps / scales).T
         scales_safe = torch.clamp(scales, min=self.eps)
         proj = comps / scales_safe.unsqueeze(1)
         # Inverse whitening: (z @ (comps.T * scales)) + mean
         inv_proj = comps.t() * scales_safe.unsqueeze(0)
-        self.pca_proj = nn.Parameter(proj, requires_grad=False)
-        self.pca_inv_proj = nn.Parameter(inv_proj, requires_grad=False)
+        self.pca_proj.copy_(proj)
+        self.pca_inv_proj.copy_(inv_proj)
 
     def _images_to_tokens(self, images_bchw: torch.Tensor) -> torch.Tensor:
         # Input expected in [-1,1]; convert to NHWC then patchify

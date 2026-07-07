@@ -1,14 +1,17 @@
+import math
+from types import SimpleNamespace
+from typing import Tuple
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Tuple
-from types import SimpleNamespace
+import torch.utils.checkpoint as checkpoint
+
 from jetformer.utils.image import patchify as tk_patchify, unpatchify as tk_unpatchify
 from jetformer.utils.losses import gmm_params as mix_gmm_params, gmm_distribution as mix_gmm_distribution, sample_gmm as mix_sample_gmm
 from jetformer.transformer import GemmaBlock
 from jetformer.flow.projections import InvertibleLinear
-import torch.utils.checkpoint as checkpoint
 
 class JetFormer(nn.Module):
     def __init__(
@@ -82,6 +85,13 @@ class JetFormer(nn.Module):
         # Checkpointing controls
         self.grad_checkpoint_transformer = bool(grad_checkpoint_transformer)
         self.flow_grad_checkpoint = bool(flow_grad_checkpoint)
+        # Kept as constructor metadata for compatibility with older configs.
+        self.jet_depth = jet_depth
+        self.jet_block_depth = jet_block_depth
+        self.jet_emb_dim = jet_emb_dim
+        self.jet_num_heads = jet_num_heads
+        self.flow_actnorm = bool(flow_actnorm)
+        self.flow_invertible_dense = bool(flow_invertible_dense)
         
         self.input_size = input_size
         n_patches_h = input_size[0] // patch_size
@@ -110,11 +120,14 @@ class JetFormer(nn.Module):
             _pfd = None
         self.pre_factor_dim = _pfd
         if self.pre_factor_dim is not None:
-            assert int(self.image_ar_dim) <= int(self.pre_factor_dim), "image ar dim must be at most pre factor dim"
+            if int(self.image_ar_dim) > int(self.pre_factor_dim):
+                raise ValueError("image_ar_dim must be at most pre_factor_dim.")
         
-        assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
+        if d_model % n_heads != 0:
+            raise ValueError("d_model must be divisible by n_heads.")
         head_dim = d_model // n_heads
-        assert head_dim % 2 == 0, "Head dimension must be even for RoPE"
+        if head_dim % 2 != 0:
+            raise ValueError("Head dimension must be even for RoPE.")
         
         # Decoder behavior toggles
         # BOI usage is gated strictly by the presence of boi_id.
@@ -195,12 +208,13 @@ class JetFormer(nn.Module):
             D_full = self.image_token_dim
             self.proj = InvertibleLinear(D_full)
             if self.latent_projection == "pca_frozen" and latent_proj_matrix_path:
-                try:
-                    W_np = torch.from_numpy(__import__('numpy').load(latent_proj_matrix_path)).float()
-                    if W_np.shape[0] == W_np.shape[1] == self.image_token_dim:
-                        self.proj.set_weight(W_np, frozen=True)
-                except Exception:
-                    pass
+                W_np = torch.from_numpy(np.load(latent_proj_matrix_path)).float()
+                if W_np.shape != (self.image_token_dim, self.image_token_dim):
+                    raise ValueError(
+                        f"latent projection matrix must have shape "
+                        f"{(self.image_token_dim, self.image_token_dim)}, got {tuple(W_np.shape)}."
+                    )
+                self.proj.set_weight(W_np, frozen=True)
 
         # Pre-flow projection W on patch tokens
         self.pre_latent_projection = None if (pre_latent_projection is None or str(pre_latent_projection).lower() in {"none", "false"}) else str(pre_latent_projection).lower()
@@ -209,12 +223,13 @@ class JetFormer(nn.Module):
             D_full_px = 3 * patch_size * patch_size
             self.pre_proj = InvertibleLinear(D_full_px)
             if self.pre_latent_projection == "pca_frozen" and pre_latent_proj_matrix_path:
-                try:
-                    W_px = torch.from_numpy(__import__('numpy').load(pre_latent_proj_matrix_path)).float()
-                    if W_px.shape[0] == W_px.shape[1] == D_full_px:
-                        self.pre_proj.set_weight(W_px, frozen=True)
-                except Exception:
-                    pass
+                W_px = torch.from_numpy(np.load(pre_latent_proj_matrix_path)).float()
+                if W_px.shape != (D_full_px, D_full_px):
+                    raise ValueError(
+                        f"pre-latent projection matrix must have shape "
+                        f"{(D_full_px, D_full_px)}, got {tuple(W_px.shape)}."
+                    )
+                self.pre_proj.set_weight(W_px, frozen=True)
         
         max_total_len = max_seq_len + self.image_seq_len + 1
         # Gemma-style backbone with Multi-Query Attention
@@ -558,7 +573,7 @@ class JetFormer(nn.Module):
         if isinstance(self.transformer, nn.ModuleList):
             for layer in self.transformer:
                 if self.grad_checkpoint_transformer and self.training:
-                    x = checkpoint.checkpoint(layer, x, attn_mask, position_ids, None)[0]
+                    x = checkpoint.checkpoint(layer, x, attn_mask, position_ids, None, use_reentrant=False)[0]
                 else:
                     x, _ = layer(x, attn_mask, position_ids)
             if not self.per_modality_final_norm:
@@ -836,7 +851,7 @@ class JetFormer(nn.Module):
         if isinstance(self.transformer, nn.ModuleList):
             for layer in self.transformer:
                 if self.grad_checkpoint_transformer and self.training:
-                    x = checkpoint.checkpoint(layer, x, attn_mask, position_ids, None)[0]
+                    x = checkpoint.checkpoint(layer, x, attn_mask, position_ids, None, use_reentrant=False)[0]
                 else:
                     x, _ = layer(x, attn_mask, position_ids)
             if not self.per_modality_final_norm:

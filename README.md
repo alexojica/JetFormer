@@ -180,7 +180,9 @@ requirements.txt         # project dependencies
 - Run quality checks before PRs:
 ```bash
 ruff check jetformer scripts
+vulture jetformer scripts --min-confidence 80
 python -m compileall -q jetformer scripts/sample_from_checkpoint.py
+python -m build --sdist --wheel
 ```
 
 ### Troubleshooting

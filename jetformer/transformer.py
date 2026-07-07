@@ -78,7 +78,8 @@ class MultiHeadAttention(nn.Module):
         self.n_heads = n_heads
         self.d_k = d_model // n_heads
         
-        assert self.d_k % 2 == 0, "Head dimension must be even for RoPE"
+        if self.d_k % 2 != 0:
+            raise ValueError("Head dimension must be even for RoPE.")
         
         self.w_q = nn.Linear(d_model, d_model, bias=False)
         self.w_k = nn.Linear(d_model, d_model, bias=False)
@@ -125,8 +126,10 @@ class MultiQueryAttention(nn.Module):
         self.query_pre_attn_norm = (str(query_pre_attn_norm).lower() if query_pre_attn_norm is not None else None)
         self.attn_logits_softcap = float(attn_logits_softcap) if attn_logits_softcap is not None else None
         
-        assert self.d_k % 2 == 0, "Head dimension must be even for RoPE"
-        assert n_heads % n_kv_heads == 0, "Number of heads must be divisible by number of KV heads"
+        if self.d_k % 2 != 0:
+            raise ValueError("Head dimension must be even for RoPE.")
+        if n_heads % n_kv_heads != 0:
+            raise ValueError("Number of heads must be divisible by number of KV heads.")
         
         self.head_repeats = n_heads // n_kv_heads
         

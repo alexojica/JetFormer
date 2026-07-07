@@ -32,7 +32,9 @@ eval = [
     "torch-fidelity>=0.3.0",
 ]
 dev = [
+    "build>=1.2.0",
     "ruff>=0.14.0",
+    "vulture>=2.14",
 ]
 
 [project.scripts]

@@ -5,7 +5,9 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
+from jetformer.utils.logging import get_logger
 
+logger = get_logger(__name__)
 
 # Legacy direct sampler removed in favor of CFG sampler; use generate_text_to_image_samples_cfg
 
@@ -128,8 +130,13 @@ def generate_text_to_image_samples_cfg(
     temperature_probs: float | None = None,
     sample_method: str = "sample",
 ):
+    del fast_mixture_first
     model.eval()
     samples = []
+    cfg_mode_l = str(cfg_mode).lower()
+    if cfg_mode_l == "density" and int(getattr(model, "image_ar_dim", 1)) != 1:
+        logger.warning("Density CFG only supports image_ar_dim=1; using interp CFG for multidimensional image tokens.")
+        cfg_mode_l = "interp"
 
     default_prompts = [
         "a car", "a cat", "a dog", "a house", "a mountain", "a city",
@@ -162,7 +169,7 @@ def generate_text_to_image_samples_cfg(
                 base_mask = tok['text_mask'].unsqueeze(0).to(device)
                 prompt_value = prompt_text
 
-            do_cfg = bool(cfg_strength) and (str(cfg_mode).lower() in {"density", "interp"})
+            do_cfg = bool(cfg_strength) and (cfg_mode_l in {"density", "interp"})
             if do_cfg:
                 text_tokens = torch.cat([base_text, base_text], dim=0)  # [2, T]
                 text_mask = torch.cat([base_mask, base_mask], dim=0)    # [2, T]
@@ -211,7 +218,7 @@ def generate_text_to_image_samples_cfg(
                     # Split cond/uncond from doubled batch
                     logits_c = logits_all[0:1]
                     logits_u = logits_all[1:2]
-                    if str(cfg_mode).lower() == "density":
+                    if cfg_mode_l == "density":
                         pdf_c = model.get_pdf(logits_c, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
                         pdf_u = model.get_pdf(logits_u, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
                         guided = CFGDensity(pdf_c, pdf_u, w=float(cfg_strength))
@@ -251,8 +258,6 @@ def generate_text_to_image_samples_cfg(
             samples.append({'prompt': prompt_value, 'image': image_pil})
 
         except Exception as e:
-            from jetformer.utils.logging import get_logger
-            logger = get_logger(__name__)
             logger.error(f"Error during sampling for prompt '{prompt_text}': {e}", exc_info=True)
             continue
             
@@ -271,10 +276,15 @@ def generate_class_conditional_samples(base,
                                        temperature_scales: float | None = None,
                                        temperature_probs: float | None = None,
                                        sample_method: str = "sample") -> List[Dict[str, Any]]:
+    del fast_mixture_first
     samples: List[Dict[str, Any]] = []
     # Ensure deterministic sampling (disable dropout, etc.)
     was_training = base.training
     base.eval()
+    cfg_mode_l = str(cfg_mode).lower()
+    if cfg_mode_l == "density" and int(getattr(base, "image_ar_dim", 1)) != 1:
+        logger.warning("Density CFG only supports image_ar_dim=1; using interp CFG for multidimensional image tokens.")
+        cfg_mode_l = "interp"
 
     def _mixture_log_prob(mix_logits, means, scales, x):
         B, k = mix_logits.shape
@@ -319,7 +329,7 @@ def generate_class_conditional_samples(base,
             # --- 1) Build text batch (maybe doubled for CFG) ---
             base_text = torch.full((1, 1), int(cls), dtype=torch.long, device=device)
             base_mask = torch.ones(1, 1, dtype=torch.bool, device=device)
-            do_cfg = bool(cfg_strength) and (str(cfg_mode).lower() in {"density", "interp"})
+            do_cfg = bool(cfg_strength) and (cfg_mode_l in {"density", "interp"})
             if do_cfg:
                 text_tokens = torch.cat([base_text, base_text], dim=0)
                 text_mask = torch.cat([base_mask, base_mask], dim=0)
@@ -364,7 +374,7 @@ def generate_class_conditional_samples(base,
                 if do_cfg:
                     logits_c = logits_all[0:1]
                     logits_u = logits_all[1:2]
-                    if str(cfg_mode).lower() == "density":
+                    if cfg_mode_l == "density":
                         pdf_c = base.get_pdf(logits_c, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
                         pdf_u = base.get_pdf(logits_u, temperature_scales=temperature_scales, temperature_probs=temperature_probs)
                         guided = CFGDensity(pdf_c, pdf_u, w=float(cfg_strength))
@@ -402,8 +412,6 @@ def generate_class_conditional_samples(base,
             prompt_str = str(prompt_name) if (prompt_name is not None) else f'class_{int(cls)}'
             samples.append({'prompt': prompt_str, 'image': Image.fromarray((img*255).clip(0,255).astype('uint8'))})
         except Exception as e:
-            from jetformer.utils.logging import get_logger
-            logger = get_logger(__name__)
             logger.error(f"Failed to generate sample for class {cls}: {e}", exc_info=True)
             continue
     # Restore original training state

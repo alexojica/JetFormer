@@ -8,6 +8,8 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from jetformer.utils.training_helpers import train_step as _train_step
+
 
 def _metric_float(value, default: float = 0.0) -> float:
     if value is None:
@@ -58,7 +60,6 @@ def evaluate_one_epoch(model_obj: torch.nn.Module,
         except Exception:
             pass
         
-        from jetformer.utils.training_helpers import train_step as _train_step
         out = _train_step(model_obj, batch, step=0, total_steps=1, config=config)
         
         bsz = batch['image'].size(0)
@@ -272,11 +273,14 @@ def compute_and_log_fid_is(
 
 
 def compute_fid(generated_dir: Path | str, ref_dir: Path | str | None = None, ref_stats: Path | str | None = None) -> Optional[float]:
-    """Compute FID for images under generated_dir against ref_dir or precomputed ref_stats.
+    """Compute FID for images under generated_dir against ref_dir.
 
     Tries clean-fid first, then falls back to torch-fidelity.
+    The ref_stats argument is reserved for a future backend that can consume
+    precomputed statistics directly.
     Returns None if neither backend is available.
     """
+    del ref_stats
     gdir = Path(generated_dir)
     rdir = Path(ref_dir) if ref_dir is not None else None
     score: Optional[float] = None

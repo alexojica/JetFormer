@@ -1,10 +1,13 @@
+import itertools
+import math
+from contextlib import nullcontext
+from typing import Sequence, Tuple, Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import itertools
-import math
-from typing import Sequence, Tuple, Optional
 import torch.utils.checkpoint as checkpoint
+
 from jetformer.utils.logging import get_logger
 
 _logger = get_logger(__name__)
@@ -195,8 +198,15 @@ class ViTEncoderBlock(nn.Module):
     
 class _NoAmpAutocast:
     """Local autocast-off context without global backend toggles."""
+    def __init__(self, device_type: str):
+        self.device_type = str(device_type)
+        self.ctx = nullcontext()
+
     def __enter__(self):
-        self.ctx = torch.amp.autocast(device_type=torch.device('cuda' if torch.cuda.is_available() else 'cpu').type, enabled=False)
+        try:
+            self.ctx = torch.amp.autocast(device_type=self.device_type, enabled=False)
+        except (RuntimeError, TypeError):
+            self.ctx = nullcontext()
         self.ctx.__enter__()
         return self
 
@@ -219,7 +229,7 @@ class ViTEncoder(nn.Module):
             if self.use_grad_checkpoint and self.training:
                 # Pass non-tensor arguments as-is. Checkpoint handles tensor args.
                 # All args after the function are passed to it.
-                x = checkpoint.checkpoint(layer, x, src_key_padding_mask)
+                x = checkpoint.checkpoint(layer, x, src_key_padding_mask, use_reentrant=False)
             else:
                 x = layer(x, src_key_padding_mask=src_key_padding_mask)
         return self.norm(x)
@@ -320,7 +330,8 @@ class DNN(nn.Module):
 def get_spatial_coupling_masks_torch(depth, num_tokens, proj_kinds, grid_h, grid_w, device='cpu'):
     """Generates binary masks for spatial coupling layers based on specified projection patterns."""
     n = num_tokens
-    assert n == grid_h * grid_w, "num_tokens must equal grid_h * grid_w"
+    if n != grid_h * grid_w:
+        raise ValueError("num_tokens must equal grid_h * grid_w.")
     w = torch.zeros((depth, n, n), dtype=torch.float32, device=device)
 
     grid_indices = torch.arange(n, device=device).view(grid_h, grid_w)
@@ -360,8 +371,10 @@ def get_spatial_coupling_masks_torch(depth, num_tokens, proj_kinds, grid_h, grid
             idx1, idx2 = idx2, idx1
 
         n_half = n // 2
-        assert len(idx1) == n_half, f"Partition 1 for '{kind}' has size {len(idx1)} but expected {n_half}"
-        assert len(idx2) == n_half, f"Partition 2 for '{kind}' has size {len(idx2)} but expected {n_half}"
+        if len(idx1) != n_half:
+            raise ValueError(f"Partition 1 for '{kind}' has size {len(idx1)} but expected {n_half}.")
+        if len(idx2) != n_half:
+            raise ValueError(f"Partition 2 for '{kind}' has size {len(idx2)} but expected {n_half}.")
 
         # Map idx1 tokens to the first half of outputs, idx2 to the second half.
         w[i, idx1, torch.arange(n_half, device=device)] = 1.0
@@ -498,7 +511,7 @@ class Coupling(nn.Module):
         # --- Apply coupling logic ---
         if self.masking_mode == 'pairing':
             if self.kind_is_channel:
-                with _NoAmpAutocast():
+                with _NoAmpAutocast(x_patched.device.type):
                     P_chan = self.P_chan.to(dtype=x_patched.dtype, device=x_patched.device)
                     x_proj = x_patched @ P_chan
                 # Split features into halves
@@ -512,12 +525,12 @@ class Coupling(nn.Module):
                 # Apply affine transform to the second half of features
                 x2_prime = (x2 + bias) * scale
                 x_merged = torch.cat([x1, x2_prime], dim=-1)
-                with _NoAmpAutocast():
+                with _NoAmpAutocast(x_patched.device.type):
                     P_chan = self.P_chan.to(dtype=x_patched.dtype, device=x_patched.device)
                     x_unproj = x_merged @ P_chan.t()
             else:
                 # Spatial pairing: reorder tokens, split along token dimension
-                with _NoAmpAutocast():
+                with _NoAmpAutocast(x_patched.device.type):
                     P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
                     x_proj = torch.einsum("b n c, n m -> b m c", x_patched, P_spatial)
                 x1_tokens, x2_tokens = torch.chunk(x_proj, 2, dim=1)
@@ -527,7 +540,7 @@ class Coupling(nn.Module):
                 # Transform x2 tokens
                 x2_prime_tokens = (x2_tokens + bias) * scale
                 x_merged_tokens = torch.cat([x1_tokens, x2_prime_tokens], dim=1)
-                with _NoAmpAutocast():
+                with _NoAmpAutocast(x_patched.device.type):
                     P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
                     x_unproj = torch.einsum("b m c, m n -> b n c", x_merged_tokens, P_spatial.t())
 
@@ -551,7 +564,7 @@ class Coupling(nn.Module):
                 # This mode is only supported for ViT, checked in __init__
                 
                 # Project, then split tokens into two halves for processing
-                with _NoAmpAutocast():
+                with _NoAmpAutocast(x_patched.device.type):
                     P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
                     x_proj = torch.einsum("b n c, n m -> b m c", x_patched, P_spatial)
                 
@@ -575,7 +588,7 @@ class Coupling(nn.Module):
                 x_unrearranged = x_merged_re.view(B, 2, N, C_patched // 2).transpose(1, 2).reshape(B, N, C_patched)
                 
                 # Unproject to get original token order
-                with _NoAmpAutocast():
+                with _NoAmpAutocast(x_patched.device.type):
                     P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
                     x_unproj = torch.einsum("b m c, m n -> b n c", x_unrearranged, P_spatial.t())
 
@@ -617,7 +630,7 @@ class Coupling(nn.Module):
         # --- Apply inverse coupling logic ---
         if self.masking_mode == 'pairing':
             if self.kind_is_channel:
-                with _NoAmpAutocast():
+                with _NoAmpAutocast(x_patched.device.type):
                     P_chan = self.P_chan.to(dtype=x_patched.dtype, device=x_patched.device)
                     y_proj = x_patched @ P_chan
                 y1, y2 = torch.chunk(y_proj, 2, dim=-1)
@@ -628,11 +641,11 @@ class Coupling(nn.Module):
                 inv_logdet = inv_logdet - logdet_dnn
                 x2 = (y2 / scale) - bias
                 x_merged = torch.cat([y1, x2], dim=-1)
-                with _NoAmpAutocast():
+                with _NoAmpAutocast(x_patched.device.type):
                     P_chan = self.P_chan.to(dtype=x_patched.dtype, device=x_patched.device)
                     x_unproj = x_merged @ P_chan.t()
             else:
-                with _NoAmpAutocast():
+                with _NoAmpAutocast(x_patched.device.type):
                     P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
                     y_proj = torch.einsum("b n c, n m -> b m c", x_patched, P_spatial)
                 y1_tokens, y2_tokens = torch.chunk(y_proj, 2, dim=1)
@@ -640,7 +653,7 @@ class Coupling(nn.Module):
                 inv_logdet = inv_logdet - logdet_dnn
                 x2_tokens = (y2_tokens / scale) - bias
                 x_merged_tokens = torch.cat([y1_tokens, x2_tokens], dim=1)
-                with _NoAmpAutocast():
+                with _NoAmpAutocast(x_patched.device.type):
                     P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
                     x_unproj = torch.einsum("b m c, m n -> b n c", x_merged_tokens, P_spatial.t())
 
@@ -658,7 +671,7 @@ class Coupling(nn.Module):
                 x_unproj = torch.cat([y1, x2], dim=-1)
 
             else: # Spatial masking with einops-style rearrange
-                with _NoAmpAutocast():
+                with _NoAmpAutocast(x_patched.device.type):
                     P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
                     y_proj = torch.einsum("b n c, n m -> b m c", x_patched, P_spatial)
 
@@ -675,7 +688,7 @@ class Coupling(nn.Module):
                 x_merged_re = torch.cat([y1_re, x2_re], dim=1)
                 x_unrearranged = x_merged_re.view(B, 2, N, C_patched // 2).transpose(1, 2).reshape(B, N, C_patched)
 
-                with _NoAmpAutocast():
+                with _NoAmpAutocast(x_patched.device.type):
                     P_spatial = self.P_spatial.to(dtype=x_patched.dtype, device=x_patched.device)
                     x_unproj = torch.einsum("b m c, m n -> b n c", x_unrearranged, P_spatial.t())
         else:
@@ -892,7 +905,7 @@ class FlowCore(nn.Module):
         return None
 
 
-def load_params_from_flax_checkpoint(pytorch_model, flax_params_dict):
+def load_params_from_flax_checkpoint(_pytorch_model, _flax_params_dict):
     """Load weights from a Flax checkpoint.
 
     The PyTorch port does not currently provide a verified Flax-to-PyTorch
@@ -960,7 +973,7 @@ class CNNPredictor(nn.Module):
         x = self.conv_in(x)
         for block in self.blocks:
             if self.use_grad_checkpoint and self.training:
-                x = checkpoint.checkpoint(block, x)
+                x = checkpoint.checkpoint(block, x, use_reentrant=False)
             else:
                 x = block(x)
         x = self.conv_out(x)

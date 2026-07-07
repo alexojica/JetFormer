@@ -10,11 +10,9 @@ from torch.utils.data import DataLoader
 
 import wandb
 from PIL import Image
-from torch.nn.parallel import DistributedDataParallel as DDP
 from wandb.sdk.data_types.image import Image as WandbImage
 
 from jetformer.utils.image import to_x01, dequantize01
-from jetformer.utils.losses import compute_jetformer_pca_loss
 from jetformer.utils.logging import get_logger
 from jetformer.utils.sampling import (
     generate_text_to_image_samples_cfg,
@@ -496,37 +494,7 @@ def train_step(model: torch.nn.Module,
                step: int,
                total_steps: int,
                config: SimpleNamespace) -> Dict[str, Any]:
-    if isinstance(model, DDP):
-        return model(batch, step=step, total_steps=total_steps, config=config)
-
-    eval_no_rgb_noise = bool(batch.get('no_rgb_noise', False))
-    advanced_metrics = config.advanced_metrics
-    
-    text_loss_weight = getattr(config.training, 'text_loss_weight', 1.0)
-    image_loss_weight = getattr(config.training, 'image_loss_weight', 1.0)
-    cfg_drop_prob = config.model.drop_labels_probability
-
-    # PCA image latent training (paper path)
-    out = compute_jetformer_pca_loss(
-        model,
-        batch,
-        step,
-        total_steps,
-        text_first_prob=config.training.text_prefix_prob,
-        input_noise_std=config.training.input_noise_std,
-        cfg_drop_prob=cfg_drop_prob,
-        loss_on_prefix=config.training.loss_on_prefix,
-        stop_grad_nvp_prefix=config.training.stop_grad_nvp_prefix,
-        advanced_metrics=advanced_metrics,
-        noise_scale=config.training.noise_scale,
-        noise_min=config.training.noise_min,
-        rgb_noise_on_image_prefix=config.training.rgb_noise_on_image_prefix,
-        eval_no_rgb_noise=eval_no_rgb_noise,
-        text_loss_weight=text_loss_weight,
-        image_loss_weight=image_loss_weight,
-    )
-    
-    return out
+    return model(batch, step=step, total_steps=total_steps, config=config)
 
 @torch.no_grad()
 def rgb_cosine_sigma(

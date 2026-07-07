@@ -285,6 +285,7 @@ class TPUAccelerator:
         return train_sampler, val_sampler
 
     def wrap_dataloader(self, dataloader, is_train: bool = True):
+        del is_train
         if pl is None:
             return dataloader
         return pl.MpDeviceLoader(dataloader, self.device)
