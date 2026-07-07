@@ -26,7 +26,14 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -e ".[dev]"
+    - name: Test
+      run: pytest -q
     - name: Lint
-      run: ruff check jetformer scripts
+      run: ruff check jetformer scripts tests
+    - name: Dead-code check
+      run: vulture jetformer scripts tests --min-confidence 80
     - name: Compile
-      run: python -m compileall -q jetformer scripts/sample_from_checkpoint.py
+      run: python -m compileall -q jetformer scripts tests
+    - name: Build package
+      if: matrix.python-version == '3.12'
+      run: python -m build --sdist --wheel
