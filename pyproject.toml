@@ -33,6 +33,7 @@ eval = [
 ]
 dev = [
     "build>=1.2.0",
+    "pytest>=8.0.0",
     "ruff>=0.14.0",
     "vulture>=2.14",
 ]
@@ -51,6 +52,9 @@ ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "scripts/sample_from_checkpoint.py" = ["E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 where = ["."]
