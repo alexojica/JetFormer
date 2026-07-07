@@ -37,9 +37,10 @@ python scripts/sample_from_checkpoint.py \
 - Avoid committing large artifacts (datasets, weights, logs). See `.gitignore`.
 - Run the repository quality checks before opening a PR:
 ```bash
-ruff check jetformer scripts
-vulture jetformer scripts --min-confidence 80
-python -m compileall -q jetformer scripts/sample_from_checkpoint.py
+pytest -q
+ruff check jetformer scripts tests
+vulture jetformer scripts tests --min-confidence 80
+python -m compileall -q jetformer scripts tests
 python -m build --sdist --wheel
 ```
 
