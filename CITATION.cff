@@ -1,10 +1,45 @@
 cff-version: 1.2.0
-message: "If you use this software, please cite it as below."
+message: "If you use this software, please cite it as below, together with the papers it implements."
+title: "JetFormer PyTorch"
+abstract: "A PyTorch implementation of the Jet normalizing flow and the JetFormer autoregressive image model, with a validated CIFAR-10 recipe and published weights."
 authors:
   - family-names: "Ojica"
     given-names: "Alexandru"
-title: "JetFormer: An Autoregressive Generative Model of Raw Images and Text (a Pytorch implementation)"
 version: "0.1.0"
-date-released: "2025-08-21"
-license: MIT
+date-released: "2026-09-13"
+license:
+  - MIT
+  - Apache-2.0
+type: software
 repository-code: "https://github.com/alexojica/JetFormer"
+url: "https://github.com/alexojica/JetFormer"
+keywords:
+  - generative-modeling
+  - normalizing-flows
+  - autoregressive-models
+  - pytorch
+references:
+  - type: article
+    title: "JetFormer: An Autoregressive Generative Model of Raw Images and Text"
+    authors:
+      - family-names: "Tschannen"
+        given-names: "Michael"
+      - family-names: "Susano Pinto"
+        given-names: "André"
+      - family-names: "Kolesnikov"
+        given-names: "Alexander"
+    year: 2024
+    doi: "10.48550/arXiv.2411.19722"
+    url: "https://arxiv.org/abs/2411.19722"
+  - type: article
+    title: "Jet: A Modern Transformer-Based Normalizing Flow"
+    authors:
+      - family-names: "Kolesnikov"
+        given-names: "Alexander"
+      - family-names: "Susano Pinto"
+        given-names: "André"
+      - family-names: "Tschannen"
+        given-names: "Michael"
+    year: 2024
+    doi: "10.48550/arXiv.2412.15129"
+    url: "https://arxiv.org/abs/2412.15129"

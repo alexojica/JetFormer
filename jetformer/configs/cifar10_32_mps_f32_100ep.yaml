@@ -1,0 +1,10 @@
+# Full local CIFAR-10 run on Apple MPS: the validated recipe (32 affine couplings with one ViT block
+# each, 12x384 decoder, 8 of 48 patch dimensions autoregressive, RGB noise 32 -> 0 over a 100-epoch
+# cosine schedule). About 6.5 hours on a 64 GB M5 Pro (3.7 minutes per epoch). Every value not listed here is the package
+# default, which is this recipe. Use --set image.ar_dim=16 for the 16-dimension variant.
+input: {val_max_samples_per_class: 200}
+wandb:
+  offline: true
+  project: jetformer-cifar10-32
+  run_name: CIFAR10-32-mps-f32-100ep
+  tags: [cifar10, mps, f32, curriculum, 100ep]

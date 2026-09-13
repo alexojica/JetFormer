@@ -1,24 +1,23 @@
-wandb/
-cache/
-checkpoints/
+/wandb/
+/cache/
+/checkpoints/
 __pycache__/
 *.pth
 *.pkl
-*.json
-*.csv
 *.pt
-laion_pop_cache/
-data/
-venv/
+/laion_pop_cache/
+/data/
+/venv/
 .venv/
 .env
 .env.*
+!.env.example
 .huggingface/
 .netrc
-logs/
-outputs/
-samples/
-run*/
+/logs/
+/outputs/
+/samples/
+/eval_metrics/
 *.log
 
 # IDE/editor
@@ -39,18 +38,18 @@ Thumbs.db
 *.ipynb_checkpoints
 
 # Build/dist
-build/
-dist/
+/build/
+/dist/
 *.egg-info/
 
-laion_pop_cache/
-tinystories_cache/
 sentencepiece.model
-venv/
 
 # Local reference repositories
-external/
+/external/
 
 # Tool caches
 .ruff_cache/
 .pytest_cache/
+.mypy_cache/
+.coverage
+/htmlcov/

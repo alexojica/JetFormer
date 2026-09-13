@@ -17,6 +17,9 @@ Unacceptable behavior includes:
 - Publishing others' private information
 
 ## Enforcement
-Report unacceptable behavior to the maintainers via GitHub Issues or the email listed in `SECURITY.md`. All complaints will be reviewed and investigated.
+Report unacceptable behavior privately to the maintainer through the contact details on
+[their GitHub profile](https://github.com/alexojica). Do not use the security advisory form in
+`SECURITY.md`, which is only for vulnerability reports. All complaints will be reviewed and
+investigated, and the reporter's identity will be kept confidential.
 
 This Code of Conduct is adapted from the Contributor Covenant, version 2.1.

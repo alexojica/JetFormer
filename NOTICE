@@ -1,0 +1,17 @@
+JetFormer PyTorch
+Copyright 2025-2026 JetFormer Contributors
+
+This distribution includes a PyTorch reimplementation derived in part from
+Google's Big Vision project: its JET and JetFormer models together with the
+Gemma decoder, Vision Transformer, and GIVT mixture-head components they build
+on. The upstream sources are at:
+
+  https://github.com/google-research/big_vision
+
+Copyright 2024 Big Vision Authors. The upstream work is licensed under the
+Apache License, Version 2.0. A copy is provided at
+LICENSES/Apache-2.0.txt.
+
+The upstream JAX/Flax implementation has been substantially modified and
+reimplemented for PyTorch. Original contributions in this repository are
+licensed under the MIT License in LICENSE.

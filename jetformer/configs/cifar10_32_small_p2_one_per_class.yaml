@@ -8,128 +8,22 @@
 # checkpoint is selected by held-out validation loss and is not expected to
 # memorize these ten training images.
 num_epochs: 1000
-torch_compile: false
-advanced_metrics: true
 batch_size: 10
-grad_accum_steps: 1
-log_every_batches: 1
-grad_logging: false
-
-input:
-  dataset: cifar10
-  cifar_source: hf
-  input_size: [32, 32]
-  num_classes: 10
-  num_workers: 0
-  dataloader_prefetch_factor: 2
-  max_samples_per_class: 1
-  val_max_samples_per_class: 1
-  random_flip_prob: 0.0
-  class_token_length: 1
-
-model:
-  width: 128
-  depth: 4
-  mlp_dim: 512
-  num_heads: 4
-  num_kv_heads: 1
-  head_dim: 32
-  vocab_size: 13
-  bos_id: 10
-  boi_id: 11
-  nolabel_id: 12
-  num_mixtures: 32
-  dropout: 0.0
-  drop_labels_probability: 0.0
-  head_dtype: 'fp32'
-  remat_policy: 'none'
-  num_vocab_repeats: 1
-  scale_tol: 1e-3
-  causal_mask_on_prefix: true
-  untie_output_vocab: false
-  per_modality_final_norm: true
-  right_align_inputs: true
-  strict_special_ids: true
-  use_boi_token: true
-  max_seq_len: 320
-  rope_skip_pad: true
-
-patch_pca:
-  model:
-    depth_to_seq: 1
-    patch_size: 2
-    codeword_dim: 12
-    noise_std: 0.0
-    add_dequant_noise: false
-    skip_pca: true
-    whiten: true
-
-use_adaptor: true
-adaptor:
-  model:
-    depth: 4
-    block_depth: 1
-    emb_dim: 128
-    num_heads: 4
-    actnorm: false
-    invertible_dense: false
-    flow_grad_checkpoint: false
-    ps: 1
-    kinds: ["channels"]
-    channels_coupling_projs: ["random"]
-    spatial_coupling_projs: ["checkerboard", "checkerboard-inv"]
-  latent_noise_dim: 0
-  kind: 'jet'
-
-optimizer:
-  name: adamw
-  lr: 0.001
-  wd: 0.00001
-  b1: 0.9
-  b2: 0.95
-  grad_clip_norm: 1.0
-
-ema_decay: 0.0
-
-schedule:
-  warmup_percent: 0.03
-  decay_type: 'cosine'
-
-training:
-  input_noise_std: 0.0
-  noise_scale: 0.0
-  noise_min: 0.0
-  text_prefix_prob: 1.0
-  loss_on_prefix: false
-  stop_grad_nvp_prefix: false
-  rgb_noise_on_image_prefix: true
-  text_loss_weight: 1.0
-  image_loss_weight: 1.0
-
-sampling:
-  cfg_inference_weight: 0.0
-  cfg_mode: "interp"
-  temperature: 1.0
-  temperature_probs: 1.0
-
-eval:
-  val_every_epochs: 100
-  sample_every_epochs: 0
-  sample_every_batches: 0
-  eval_no_rgb_noise: true
-  fid_every_epochs: 0
-  is_every_epochs: 0
-  fid_is_num_samples: 0
-
+input: {max_samples_per_class: 1, val_max_samples_per_class: 1, random_flip_prob: 0.0}
+model: {width: 128, depth: 4, mlp_dim: 512, num_heads: 4, num_mixtures: 32, scale_tol: 0.001, dropout: 0.0, drop_labels_probability: 0.0,
+  num_class_repeats: 1}
+image: {patch_size: 2, ar_dim: 12}
+flow: {depth: 16, emb_dim: 128, num_heads: 4}
+optimizer: {lr: 0.001, wd: 1.0e-05}
+schedule: {warmup_percent: 0.03}
+training: {input_noise_std: 0.0, noise_scale: 0.0}
+sampling: {temperature: 1.0, cfg_weight: 0.0}
+eval: {val_every_epochs: 100, sample_every_epochs: 0}
+logging: {every_batches: 1, advanced_metrics: true}
 wandb:
   enabled: false
   offline: true
-  project: "jetformer-cifar10-32"
-  run_name: "CIFAR10-32-small-p2-one-per-class"
-  tags: ["cifar10", "small", "p2", "one-per-class", "overfit"]
-
-accelerator:
-  name: auto
-  device: auto
-  precision: fp32
-  distributed: false
+  project: jetformer-cifar10-32
+  run_name: CIFAR10-32-small-p2-one-per-class
+  tags: [cifar10, small, p2, one-per-class, overfit]
+accelerator: {precision: fp32}
