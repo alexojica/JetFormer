@@ -21,7 +21,7 @@ from jetformer.model.jetformer import JetFormer, count_parameters
 from jetformer.paths import RunPaths
 from jetformer.rng import SEED_SAMPLES, capture_rng_state, preserved_rng_state, restore_rng_state, seed_everything
 from jetformer.sampling import balanced_class_ids, sample_images, save_samples
-from jetformer.training.accelerator import Accelerator
+from jetformer.training.accelerator import Accelerator, to_device
 from jetformer.training.checkpoint import (
     compact_metadata,
     load_checkpoint,
@@ -342,9 +342,7 @@ class Trainer:
         window: list[tuple[torch.Tensor, torch.Tensor]] = []
         for index in range(skip, len(loader)):
             batch = next(iterator)
-            window.append(
-                (batch["image"].to(self.device, non_blocking=True), batch["label"].to(self.device, non_blocking=True))
-            )
+            window.append((to_device(batch["image"], self.device), to_device(batch["label"], self.device)))
             if len(window) == self.config.grad_accum_steps or index + 1 == len(loader):
                 yield index + 1, window
                 window = []

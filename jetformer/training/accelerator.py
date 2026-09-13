@@ -36,6 +36,18 @@ def resolve_device(requested: str, *, local_rank: int = 0) -> torch.device:
     return device
 
 
+def to_device(tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
+    """Move a loader tensor to ``device``, overlapping the copy only when the source is pinned.
+
+    ``non_blocking=True`` from pageable memory is unsafe: the device may read the staging buffer
+    before the host copy has finished. CUDA quietly falls back to a blocking copy, Apple MPS does
+    not, which silently corrupted the first pass over a loader (a validation run reported 2.30 bits
+    per sub-pixel instead of 3.71). Loaders pin their memory only on CUDA, so the pinned check is
+    what makes the overlap safe everywhere.
+    """
+    return tensor.to(device, non_blocking=tensor.is_pinned())
+
+
 def synchronize(device: torch.device) -> None:
     """Wait for every queued kernel on ``device`` (a no-op on CPU)."""
     if device.type == "cuda":

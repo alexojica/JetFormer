@@ -15,7 +15,7 @@ from jetformer.data.loaders import unsharded_loader
 from jetformer.model.jetformer import JetFormer
 from jetformer.rng import SEED_METRICS, SEED_VALIDATION, preserved_rng_state
 from jetformer.sampling import balanced_class_ids, generate_in_chunks, save_samples
-from jetformer.training.accelerator import Accelerator, synchronize
+from jetformer.training.accelerator import Accelerator, synchronize, to_device
 
 VALIDATION_KEYS = ("loss", "ar_bpd", "residual_bpd", "flow_bpd")
 
@@ -49,8 +49,8 @@ def validate(
         with preserved_rng_state(device):
             torch.manual_seed(seed + SEED_VALIDATION + accelerator.rank)
             for batch in iterator:
-                images = batch["image"].to(device, non_blocking=True)
-                labels = batch["label"].to(device, non_blocking=True)
+                images = to_device(batch["image"], device)
+                labels = to_device(batch["label"], device)
                 with accelerator.autocast():
                     output = objective(images, labels, step_tensor, total_steps, rgb_noise=rgb_noise)
                 count = images.shape[0]

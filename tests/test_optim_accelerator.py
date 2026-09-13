@@ -11,6 +11,7 @@ from jetformer.training.accelerator import (
     memory_stats,
     resolve_device,
     synchronize,
+    to_device,
 )
 from jetformer.training.optim import clip_grad_norm_, create_adamw, create_scheduler, grad_norm
 
@@ -157,6 +158,24 @@ def test_distributed_flags_must_agree_with_torchrun(monkeypatch):
     if torch.backends.mps.is_available():
         with pytest.raises(RuntimeError, match="CPU and CUDA"):
             Accelerator(AcceleratorConfig(device="mps", distributed=True))
+
+
+def test_to_device_overlaps_only_from_pinned_memory(monkeypatch):
+    """non_blocking from pageable memory lets MPS read the staging buffer early and corrupts a batch."""
+    calls = []
+    original = torch.Tensor.to
+
+    def spy(self, *args, **kwargs):
+        calls.append(kwargs.get("non_blocking"))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "to", spy)
+    pageable = torch.zeros(2, 3)
+    assert to_device(pageable, torch.device("cpu")) is not None
+    assert calls == [False]
+    monkeypatch.setattr(torch.Tensor, "is_pinned", lambda self: True)
+    to_device(pageable, torch.device("cpu"))
+    assert calls == [False, True]
 
 
 def test_device_helpers_are_no_ops_on_cpu():

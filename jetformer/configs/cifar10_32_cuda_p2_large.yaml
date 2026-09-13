@@ -2,8 +2,7 @@
 #
 # NOT validated for quality locally: only its construction, a few optimizer steps, and the memory/throughput
 # benchmark were run on Apple silicon, where the 256-token sequence is 3.3x slower than patch 4. It keeps
-# every recipe element the local 42M run validated (32-coupling Jet flow, one third of the patch dims
-# autoregressive, 256 mixtures, CFG dropout, RGB noise 32 -> 0, teacher-forcing latent noise, absolute
+# every recipe element the local 42M run validated (32-coupling Jet flow, 256 mixtures, CFG dropout, RGB noise 32 -> 0, teacher-forcing latent noise, absolute
 # weight decay) and scales what the local machine could not: 2x2 patches (256 tokens, the paper's sequence
 # length), a 512-wide two-block coupling ViT, and a 16x768 transformer. The learning rate follows the
 # paper's square-root batch scaling from the validated 3e-4 at batch 128 (global batch 256 here; the

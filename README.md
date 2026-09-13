@@ -115,7 +115,9 @@ These two recipe configs log to Weights & Biases, so they need the `wandb` extra
 unavailable. Configs are also resolved by name once the package is installed, so
 `--config cifar10_32_tiny.yaml` works from any directory.
 
-The 30-epoch run reaches 3.93 clean validation bits per sub-pixel and the 100-epoch run 3.71. With
+The 30-epoch run reaches 3.93 clean validation bits per sub-pixel and the 100-epoch run 3.706, both
+on the class-balanced 2,000-image validation subset those runs tracked; the 100-epoch weights score
+3.698 on the complete 10,000-image test split. With
 density CFG 2 and Gaussian scale temperature 0.7 (the defaults), the 100-epoch model scores FID 22.6 /
 Inception Score 7.95 on 5,000 class-balanced samples against the CIFAR-10 training set
 (torch-fidelity); the 30-epoch model scores 35.2 at CFG 3. An 8-coupling flow saturates the coupling

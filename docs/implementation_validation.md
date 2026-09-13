@@ -270,8 +270,8 @@ metrics run only on rank zero after the generation workers exit.
 
 ## Local gate
 
-After the parity and distributed fixes, the repository gate completed with 136 tests (the rewritten
-suite now has 198), Ruff check and format, Vulture, `compileall`, pre-commit and
+After the parity and distributed fixes, the repository gate completed with 136 tests (the suite has since been
+rewritten and grown), Ruff check and format, Vulture, `compileall`, pre-commit and
 tracked-source secret scans, a wheel rebuilt from a clean sdist, Twine metadata
 checks, and isolated import, CLI, and benchmark checks from that wheel. The CUDA runbook adds device,
 compile, memory, interconnect, checkpoint, resume, budget, and quality gates that

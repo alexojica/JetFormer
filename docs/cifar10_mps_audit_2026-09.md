@@ -26,7 +26,7 @@ Re-read side by side with `big_vision/models/proj/jetformer/jetformer.py`, `proj
   on kernels only via `wd / lr`, linear warmup then cosine decay.
 
 The 136 tests that existed at the time (137 after this audit) pass; the suite has since been
-rewritten and now has 198 tests.
+rewritten and grown substantially.
 
 ## Findings
 
@@ -130,7 +130,9 @@ M5 Pro. Clean validation bits per subpixel by epoch (RGB sigma in parentheses):
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | val bpd | 6.49 | 6.22 | 5.70 | 4.83 | 4.28 | 3.96 | 3.80 | 3.72 | **3.71** |
 
-The final model passes the 30-epoch model's 3.93 at epoch 86 and ends at 3.706. Latent diagnostic:
+The final model passes the 30-epoch model's 3.93 at epoch 86 and ends at 3.706. That curve is
+measured on the class-balanced 2,000-image validation subset (`val_max_samples_per_class: 200`); the
+same weights score 3.698 on the complete 10,000-image test split. Latent diagnostic:
 residual dimensions whitened (std 0.999), flow log-determinant 3.85 nats per subpixel (35% of the
 32-coupling cap), AR latent scale 4.4, 58 effective prior mixture components; the transformer saves
 1.96 bits per subpixel on the eight AR dimensions.
@@ -259,8 +261,8 @@ kernel-bound. The changes that matter for other devices and for correctness:
 - Packaging and CI: Hugging Face and W&B are optional extras (`[hf]`, `[wandb]`), a lint job (ruff,
   vulture, detect-secrets, build + twine) and a 3.10-3.12 CPU test matrix.
 
-The rewritten test suite (190 tests, about fifteen seconds on CPU) found three defects in the second
-pass before they reached a run: checkpoint saving referenced the serialization config under the
+The rewritten test suite (about fifteen seconds on CPU) found three defects in the second pass
+before they reached a run: checkpoint saving referenced the serialization config under the
 wrong module path, the NumPy RNG state was stored as an array that `weights_only` loading rejects,
 and the FID real-image read advanced the training RNG streams.
 

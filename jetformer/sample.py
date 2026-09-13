@@ -98,7 +98,7 @@ def resolve_artifacts(args: argparse.Namespace, parser: argparse.ArgumentParser)
         except ImportError:  # pragma: no cover - exercised only without the optional dependency
             parser.error(
                 "Hugging Face downloads require huggingface_hub: pip install huggingface_hub "
-                '(the "[hf]" extra of this project)'
+                '(the "[hub]" extra of this project)'
             )
 
         print(f"Fetching from Hugging Face Hub: repo={args.hf_repo}, revision={args.hf_revision or 'default'}")

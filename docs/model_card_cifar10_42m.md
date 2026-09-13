@@ -29,8 +29,8 @@ model-index:
             value: 7.95
             name: Inception Score (same samples)
           - type: bits_per_dim
-            value: 3.706
-            name: Clean validation bits per sub-pixel (test split)
+            value: 3.698
+            name: Clean validation bits per sub-pixel (full 10,000-image test split)
 ---
 
 # JetFormer CIFAR-10 32x32, 42M parameters
@@ -106,8 +106,11 @@ jetformer-export --ckpt checkpoints/jetformer_CIFAR10-32-mps-f32-100ep_best.pt \
 
 ## Training
 
-- Data: CIFAR-10 training split (50,000 images) with random horizontal flips; the test split is the
-  validation set. Pixels are mapped to [-1, 1] with uniform dequantisation noise.
+- Data: CIFAR-10 training split (50,000 images) with random horizontal flips. Training-time
+  validation used a fixed class-balanced 2,000-image subset of the test split
+  (`input.val_max_samples_per_class: 200`); the figure quoted above is a separate evaluation of the
+  released weights on the complete 10,000-image test split. Pixels are mapped to [-1, 1] with
+  uniform dequantisation noise.
 - Model: 42.2M parameters. Flow: 32 channel couplings with random channel permutations, each parameterised by
   one ViT block (width 192, 3 heads) on the 8x8 grid of 4x4 patches; the affine scale is bounded by 2.
   Decoder: 12 Gemma-style blocks (width 384, 6 query heads, 1 key/value head, MLP 1536, RoPE, dropout 0.1),
@@ -122,11 +125,42 @@ jetformer-export --ckpt checkpoints/jetformer_CIFAR10-32-mps-f32-100ep_best.pt \
 
 ## Evaluation
 
-Clean validation bits per sub-pixel by epoch (RGB noise sigma in parentheses):
+Clean bits per sub-pixel of the released weights on the complete 10,000-image CIFAR-10 test split,
+with no RGB noise and seeded dequantisation noise: **3.698** (3.697 in float32). The
+training run tracked a fixed class-balanced 2,000-image subset of that split, on which the same
+weights score 3.706; its curve by epoch was (RGB noise sigma in parentheses):
 
 | Epoch | 10 (31) | 30 (25) | 50 (16) | 70 (6.6) | 80 (3.1) | 90 (0.8) | 100 (0) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | val bpd | 6.49 | 6.22 | 5.70 | 4.83 | 4.28 | 3.80 | **3.706** |
+
+Reproduce that figure from the published checkpoint, which carries everything the evaluation needs:
+
+```python
+import torch
+from jetformer.config import config_from_dict
+from jetformer.data.loaders import build_datasets, build_loaders
+from jetformer.evaluation import validate
+from jetformer.model.jetformer import JetFormer
+from jetformer.training.accelerator import Accelerator
+from jetformer.training.checkpoint import load_checkpoint, load_model_state
+from jetformer.training.objective import JetFormerObjective
+
+checkpoint = load_checkpoint("jetformer_cifar10_32_42m_100ep.pt")
+stored = checkpoint["config"]
+# Evaluate on the complete test split rather than the subset the training run tracked.
+config = config_from_dict({**stored, "input": {**stored["input"], "val_max_samples_per_class": None}})
+accelerator = Accelerator(config.accelerator)
+model = JetFormer.from_config(config, accelerator.device)
+load_model_state(model, checkpoint)
+train, val = build_datasets(config)
+_, loader = build_loaders(config, train, val, rank=0, world_size=1, pin_memory=accelerator.device.type == "cuda")
+objective = JetFormerObjective(model, config.training, dequant_noise=config.image.dequant_noise).eval()
+metrics = validate(objective, loader, accelerator, step=39000, total_steps=39000, rgb_noise=False, seed=config.seed)
+print(f"{len(loader.dataset)} test images: {metrics['loss']:.4f} bits per sub-pixel")
+```
+
+It prints `10000 test images: 3.6978 bits per sub-pixel`.
 
 FID (Inception Score) on 5,000 class-balanced samples against the CIFAR-10 training set (torch-fidelity):
 

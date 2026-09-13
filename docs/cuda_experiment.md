@@ -307,7 +307,8 @@ understood before stage 2.
 
 `cifar10_32_cuda_p2_large.yaml` keeps every validated recipe element and changes only what the local
 machine could not afford: 2x2 patches (256 tokens, the paper's sequence length), 4 of 12 patch
-dimensions autoregressive (the validated one-third ratio), a 32 x 2 coupling ViT at width 512, a
+dimensions autoregressive (one third, deliberately wider than the one sixth of the validated 42M
+recipe, which models 8 of 48 dimensions), a 32 x 2 coupling ViT at width 512, a
 16x768 transformer, and global batch 256 with the learning rate scaled by the square root of the
 batch ratio from the validated 3e-4 at 128. The per-rank batch is `256 / world_size`; the YAML
 assumes four GPUs at 64 each.
