@@ -417,3 +417,38 @@ Every feature byte and consumed CPU/MPS RNG state matches the first extraction
 across all warm-up and measured calls. This uses the existing sequential reader
 and keeps PNG input memory bounded by its batches. CUDA directory inputs continue to
 use workers; tensor inputs already load in-process.
+
+MPS checkpoint saving can queue storage transfers and wait once before writing
+the archive. The native PyTorch serializer still constructs every tensor,
+metadata, alias and device-location record; copies start only after all pickle
+reducers finish. A private Pickler delegate preserves those records while staging
+each unique MPS storage on CPU. CPU and CUDA model checkpoints use native pickle.
+
+Four interleaved complete-save pairs on an actual format-6 checkpoint after two
+isolated batch-8 optimizer updates measured **427.389 -> 120.882 ms**, with
+interquartile spreads of 2.470/22.534 ms. Mean paired saving was 301.465 ms
+(standard deviation 22.369 ms), a 71.7% reduction in the save pause. These warm
+buffered filename writes include close and atomic replacement, without fsync;
+they do not measure durable-disk latency or change optimizer-step throughput.
+Staging temporarily retains CPU memory equal to the full MPS checkpoint payload:
+506,679,992 bytes (about 483 MiB) for this measured state.
+
+Every archive byte matched in all four pairs. Full format-5 and format-6 contents,
+device tags, tensor/storage aliases, strided views, metadata and a resumed update
+with identical recorded gradients also matched exactly. Three queued changed-state
+saves kept their first/later values and CPU metadata exact. A failed pickle starts
+no copies; a failure after the first queued transfer still waits before cleanup.
+The serializer's existing error-path storage cycle remains owned by native
+PyTorch and is released by cyclic garbage collection. Tests require actual copy
+dispatch, rather than inferring activation from archive equality, and cover later
+reducer mutation and native shared-storage dtype rejection. This helper depends
+on PyTorch's native ZIP Pickler/storage protocol, so those contract checks must
+remain part of upgrade validation. The checkpoint format and loading paths are
+unchanged.
+
+Final installed-code validation repeated four interleaved pairs using the actual
+`save_checkpoint` entry point: **448.998 -> 142.604 ms**, interquartile spreads
+6.289/24.539 ms, mean paired saving 297.804 ms (standard deviation 32.551 ms),
+a 68.2% median reduction. All archive, resume-state, copy-dispatch and queued
+error-path checks passed. The earlier 71.7% result above measured the equivalent
+prototype; release figures use this installed-code measurement.

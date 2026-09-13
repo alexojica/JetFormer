@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import os
+import pickle
 import re
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from torch.utils.serialization import config as serialization_config
 
 from jetformer.config import Config, deep_update
 from jetformer.data.datasets import CIFAR10_CLASSES
+from jetformer.training._checkpoint_staging import _mps_pickle_module
 
 CHECKPOINT_FORMAT_VERSION = 6
 _MIGRATABLE_FORMATS = {5, 6}
@@ -95,9 +97,14 @@ def save_checkpoint(
         if scaler is not None and scaler.is_enabled():
             payload["scaler_state_dict"] = scaler.state_dict()
     temporary = target.with_name(f"{target.name}.tmp-{os.getpid()}")
+    pickle_module = (
+        _mps_pickle_module()
+        if any(torch.is_tensor(value) and value.device.type == "mps" for value in payload["model_state_dict"].values())
+        else pickle
+    )
     try:
         with serialization_config.patch({"save.compute_crc32": False}):
-            torch.save(payload, temporary)
+            torch.save(payload, temporary, pickle_module=pickle_module)
         temporary.replace(target)
     finally:
         temporary.unlink(missing_ok=True)
