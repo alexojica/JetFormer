@@ -132,11 +132,11 @@ class Trainer:
             load_model_state(self.model, load_checkpoint(self.config.init_from))
         self.parameter_counts = count_parameters(self.model)
         self.objective, self.compiled = build_objective(self.model, self.config, self.acc)
+        flow_parameters = list(self.model.flow.parameters())
+        flow_parameter_ids = {id(p) for p in flow_parameters}
         self.components = {
-            "flow": list(self.model.flow.parameters()),
-            "transformer": [
-                p for p in self.model.parameters() if not any(p is q for q in self.model.flow.parameters())
-            ],
+            "flow": flow_parameters,
+            "transformer": [p for p in self.model.parameters() if id(p) not in flow_parameter_ids],
         }
 
     def _build_optimization(self) -> None:

@@ -338,3 +338,12 @@ retained exact parameters, nonpersistent buffers, RNG state, and every diagnosti
 across three queued objective calls. DDP and optimizer construction still follow
 the device transfer, so their parameter references remain current.
 The full trained-checkpoint CPU/MPS regression and the 202-test gate pass.
+
+Trainer setup also caches the flow parameter list and its identity set when building
+the component groups used for gradient diagnostics. This replaces a fresh traversal
+of the flow for every model parameter. On all 686 tensors in the validated model,
+seven interleaved CPU benchmark pairs measured **97.071 -> 0.584 ms**, with
+interquartile spreads of 0.306/0.009 ms. Every parameter identity and list position
+remains exact, with complete, disjoint groups; no tensor arithmetic changes. The
+temporary identity set is about 52 KB. This saves 96.5 ms during trainer setup;
+the complete startup contribution was not separately timed.
