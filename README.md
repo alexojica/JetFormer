@@ -317,6 +317,9 @@ Jacobians, mixture likelihoods against `torch.distributions`, teacher forcing ag
 decoding), bit-exact resume from epoch and mid-epoch checkpoints, a two-process gloo DDP run, the
 compiled training step, and every command-line entry point.
 
+The [September framework audit](docs/framework_audit_2026-09.md) records tested library versions,
+paired runtime measurements, compiler checks, and numerical limits of upgrading the validated stack.
+
 The implementation is research software. Reproducing paper-scale ImageNet results requires the
 original data, substantial compute, and independent metric verification.
 
