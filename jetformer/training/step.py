@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import nullcontext
 
 import torch
+from torch._functorch import config as autograd_config
 
 from jetformer.config import Config
 from jetformer.model.jetformer import JetFormer
@@ -63,16 +64,25 @@ def optimizer_step(
         step_tensor = torch.zeros((), device=accelerator.device)
     step_tensor.fill_(float(step))
     outputs: list[dict[str, torch.Tensor]] = []
-    for index, (images, labels) in enumerate(microbatches):
-        last = index + 1 == len(microbatches)
-        no_sync = objective.no_sync() if hasattr(objective, "no_sync") and not last else nullcontext()
-        with no_sync, accelerator.autocast():
-            if compiled and accelerator.device.type == "cuda":
-                torch.compiler.cudagraph_mark_step_begin()
-            output = objective(images, labels, step_tensor, total_steps, diagnostics=diagnostics and last)
-            loss = output["loss"] / len(microbatches)
-        scaler.scale(loss).backward()
-        outputs.append({key: value.detach() for key, value in output.items()})
+    # AOTAutograd traces backward during lazy forward compilation, including new diagnostics graphs.
+    # Backward runs outside autocast here; its default assumption would downcast the fp32 flow-head gradients.
+    # PyTorch 2.7/2.8 lack this setting; preserve their existing compile behavior.
+    backward_policy = (
+        autograd_config.patch(backward_pass_autocast="off")
+        if compiled and hasattr(autograd_config, "backward_pass_autocast")
+        else nullcontext()
+    )
+    with backward_policy:
+        for index, (images, labels) in enumerate(microbatches):
+            last = index + 1 == len(microbatches)
+            no_sync = objective.no_sync() if hasattr(objective, "no_sync") and not last else nullcontext()
+            with no_sync, accelerator.autocast():
+                if compiled and accelerator.device.type == "cuda":
+                    torch.compiler.cudagraph_mark_step_begin()
+                output = objective(images, labels, step_tensor, total_steps, diagnostics=diagnostics and last)
+                loss = output["loss"] / len(microbatches)
+            scaler.scale(loss).backward()
+            outputs.append({key: value.detach() for key, value in output.items()})
     window: dict[str, torch.Tensor] = {}
     for key in outputs[-1]:
         values = [output[key] for output in outputs if key in output]

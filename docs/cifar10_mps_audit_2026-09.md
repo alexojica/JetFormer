@@ -304,3 +304,25 @@ six and four times in ten repetitions. Every loss term, diagnostic, and gradient
 exactly equal. MPS embedding backward uses a repeated-index MPSGraph scatter-add. The local
 regression accepts only those two observed full-state fingerprints for this fixed probe;
 it does not widen a general parameter tolerance or relax any scalar checks.
+
+A CPU `aot_eager` audit found a compiled-backward precision mismatch: forward runs
+under autocast, but backward runs outside it. PyTorch 2.12.1 assumes backward uses
+the forward autocast context unless told otherwise, which downcast the flow affine
+head's intended fp32 gradients. With nonzero trained paths and stochastic layers
+disabled, the first accumulated update differed from eager by 0.00168 relative L2
+in its gradients. The step now scopes the compiler's backward-autocast policy to
+`off` while lazy forward/backward tracing can occur, including later diagnostics
+variants, and restores the ambient setting afterward. The targeted CPU bf16
+regression requires exact metrics, gradients, and parameters across accumulated
+updates and both graph variants. This fixes a precision contract; no CUDA speed
+claim is made, and the eager MPS calculation is unchanged.
+
+The compiler setting is available from PyTorch 2.9. The package's supported 2.7/2.8
+versions retain their existing compilation behavior; this fix cannot correct their
+backward-autocast assumption through that API.
+
+A separate CPU bf16 dropout lowering difference remains: compiled backward retains
+the inverse keep-probability scale in fp32, while eager rounds it to bf16 before
+multiplication. A dropout-only probe had exact forward values and RNG state but
+different gradients. This is independent of the autocast setting; these CPU checks
+do not establish CUDA kernel parity, and dropout has not been changed.
