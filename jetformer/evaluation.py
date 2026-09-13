@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -212,7 +213,8 @@ def generate_and_score(
     """Generate ``eval_cfg.fid_is_num_samples`` class-balanced images and score them in memory.
 
     The generated images are also written as PNGs under ``output_dir`` for inspection. Reference
-    Inception statistics are cached under ``reference_key`` so later evaluations reuse them.
+    Inception statistics are cached under ``reference_key`` plus the reference image content
+    digest, so only identical ordered references reuse them. All metric work preserves RNG state.
     """
     num_samples = eval_cfg.fid_is_num_samples
     if num_samples <= 0:
@@ -221,6 +223,12 @@ def generate_and_score(
     with preserved_rng_state(device):
         # Even a sequential DataLoader draws a base seed from the global generator when iterated.
         reference = real_images(val_loader, num_samples) if fid else None
+        reference_cache_name = None
+        if reference is not None:
+            # real_images returns contiguous CPU uint8 data; hash its buffer without a full copy.
+            digest = hashlib.sha256(f"uint8:{tuple(reference.shape)}".encode("ascii"))
+            digest.update(memoryview(reference.numpy()))
+            reference_cache_name = f"{reference_key}-n{num_samples}-{digest.hexdigest()}"
         torch.manual_seed(seed + SEED_METRICS)
         chunks = []
         for start, images in generate_in_chunks(
@@ -229,15 +237,15 @@ def generate_and_score(
             save_samples(images, class_ids[start : start + images.shape[0]], [str(i) for i in range(model.num_classes)],
                          output_dir, start_index=start, grid=False)  # fmt: skip
             chunks.append(images)
-    generated = torch.cat(chunks)
-    synchronize(device)
-    return compute_torch_fidelity_metrics(
-        generated,
-        reference=reference,
-        fid=fid,
-        kid=False,
-        inception_score=inception_score,
-        device=device,
-        batch_size=eval_cfg.metric_batch_size,
-        reference_cache_name=f"{reference_key}-n{num_samples}" if fid else None,
-    )
+        generated = torch.cat(chunks)
+        synchronize(device)
+        return compute_torch_fidelity_metrics(
+            generated,
+            reference=reference,
+            fid=fid,
+            kid=False,
+            inception_score=inception_score,
+            device=device,
+            batch_size=eval_cfg.metric_batch_size,
+            reference_cache_name=reference_cache_name,
+        )

@@ -1,8 +1,10 @@
 import math
+import random
 import signal
 import sys
 import types
 
+import numpy as np
 import pytest
 import torch
 from torch.utils.data import DataLoader
@@ -21,7 +23,7 @@ from jetformer.evaluation import (
 )
 from jetformer.model.jetformer import JetFormer
 from jetformer.paths import RunPaths, safe_name
-from jetformer.rng import SEED_VALIDATION
+from jetformer.rng import SEED_VALIDATION, capture_rng_state
 from jetformer.training.accelerator import Accelerator
 from jetformer.training.checkpoint import load_checkpoint
 from jetformer.training.objective import JetFormerObjective
@@ -235,11 +237,17 @@ def test_cuda_redirect_swaps_and_restores_methods():
 
 def test_generate_and_score_generates_balanced_images(monkeypatch, tmp_path, model):
     seen = {}
-    monkeypatch.setattr(
-        evaluation_module,
-        "compute_torch_fidelity_metrics",
-        lambda generated, **kwargs: (seen.update(generated=generated, **kwargs), {"fid": 1.0})[1],
-    )
+
+    def metrics(generated, **kwargs):
+        seen.update(generated=generated, **kwargs)
+        random.random()
+        np.random.rand()
+        torch.rand(2)
+        # Native DataLoader iteration also consumes its base seed without an explicit generator.
+        next(iter(DataLoader(TensorImages(generated), batch_size=3)))
+        return {"fid": 1.0}
+
+    monkeypatch.setattr(evaluation_module, "compute_torch_fidelity_metrics", metrics)
     loader = DataLoader(SyntheticImages(8, train=False), batch_size=4)
     eval_cfg = EvalConfig(fid_is_num_samples=6, generation_batch_size=4, metric_batch_size=3)
     sampling = SamplingConfig(cfg_weight=0.0, sample_method="mean")
@@ -255,16 +263,97 @@ def test_generate_and_score_generates_balanced_images(monkeypatch, tmp_path, mod
     torch.manual_seed(9)
     expected_draw = torch.rand(1)
     torch.manual_seed(9)
+    before = capture_rng_state(torch.device("cpu"))
     assert generate_and_score(model.eval(), loader, sampling, eval_cfg, **common) == {"fid": 1.0}
+    assert capture_rng_state(torch.device("cpu")) == before
     assert torch.equal(torch.rand(1), expected_draw)
     assert seen["generated"].shape == (6, 3, 32, 32) and seen["generated"].dtype == torch.uint8
-    assert seen["reference"].shape == (6, 3, 32, 32) and seen["reference_cache_name"] == "k-n6"
+    assert seen["reference"].shape == (6, 3, 32, 32)
+    assert seen["reference_cache_name"].startswith("k-n6-")
+    assert len(seen["reference_cache_name"].removeprefix("k-n6-")) == 64
     assert seen["batch_size"] == 3 and seen["inception_score"] is False and seen["kid"] is False
     assert len(list((tmp_path / "m").glob("*.png"))) == 6 and not (tmp_path / "m" / "_grid.png").exists()
     generate_and_score(model, loader, sampling, eval_cfg, **{**common, "fid": False, "inception_score": True})
     assert seen["reference"] is None and seen["reference_cache_name"] is None
     with pytest.raises(ValueError, match="fid_is_num_samples"):
         generate_and_score(model, loader, sampling, EvalConfig(), **common)
+
+
+def test_generate_and_score_restores_rng_after_metric_failure(monkeypatch, tmp_path, model):
+    images = torch.zeros(2, 3, 32, 32, dtype=torch.uint8)
+    monkeypatch.setattr(evaluation_module, "generate_in_chunks", lambda *args, **kwargs: iter([(0, images)]))
+    monkeypatch.setattr(evaluation_module, "save_samples", lambda *args, **kwargs: None)
+
+    def failing_metrics(*args, **kwargs):
+        random.random()
+        np.random.rand()
+        torch.rand(2)
+        raise RuntimeError("metric failed")
+
+    monkeypatch.setattr(evaluation_module, "compute_torch_fidelity_metrics", failing_metrics)
+    before = capture_rng_state(torch.device("cpu"))
+    with pytest.raises(RuntimeError, match="metric failed"):
+        generate_and_score(
+            model,
+            DataLoader(SyntheticImages(2, train=False), batch_size=2),
+            SamplingConfig(),
+            EvalConfig(fid_is_num_samples=2),
+            fid=False,
+            inception_score=True,
+            output_dir=tmp_path,
+            device=torch.device("cpu"),
+            autocast_dtype=None,
+            seed=0,
+            reference_key="k",
+        )
+    assert capture_rng_state(torch.device("cpu")) == before
+
+
+def test_metric_reference_cache_tracks_pixels_order_shape_and_namespace(monkeypatch, tmp_path, model):
+    images = torch.zeros(2, 3, 32, 32, dtype=torch.uint8)
+    source = SyntheticImages(6, train=False)
+    loader = DataLoader(source, batch_size=3)
+    monkeypatch.setattr(evaluation_module, "generate_in_chunks", lambda *args, **kwargs: iter([(0, images)]))
+    monkeypatch.setattr(evaluation_module, "save_samples", lambda *args, **kwargs: None)
+    cache, names = {}, []
+
+    def cached_metrics(generated, *, reference, reference_cache_name, **kwargs):
+        names.append(reference_cache_name)
+        # Mirrors a named feature/statistics cache: its caller must identify the actual reference.
+        if reference_cache_name not in cache:
+            cache[reference_cache_name] = float(reference.sum())
+        return {"fid": cache[reference_cache_name]}
+
+    monkeypatch.setattr(evaluation_module, "compute_torch_fidelity_metrics", cached_metrics)
+    options = dict(
+        fid=True,
+        inception_score=False,
+        output_dir=tmp_path,
+        device=torch.device("cpu"),
+        autocast_dtype=None,
+        seed=0,
+        reference_key="same-selection-name",
+    )
+
+    def score(**overrides):
+        return generate_and_score(
+            model, loader, SamplingConfig(), EvalConfig(fid_is_num_samples=6), **{**options, **overrides}
+        )
+
+    original = score()
+    assert score() == original and names[-1] == names[-2]
+    source.images[0, 0, 0, 0].bitwise_xor_(1)
+    changed = score()
+    assert changed["fid"] == float(source.images.sum()) and changed != original
+    assert names[-1] != names[-2]
+    source.images = source.images.flip(0)
+    assert score() == changed and names[-1] != names[-2]
+    assert score(reference_key="other-namespace") == changed and names[-1].startswith("other-namespace-n6-")
+    assert names[-1] != names[-2]
+    before_shape = names[-2]
+    monkeypatch.setattr(evaluation_module, "real_images", lambda *args: source.images.reshape(6, 3, 16, 64))
+    assert score() == changed and names[-1] != before_shape
+    assert len(cache) == 5
 
 
 # ---- trainer ------------------------------------------------------------------------------------
