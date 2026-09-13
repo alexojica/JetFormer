@@ -7,13 +7,11 @@ which found that their 8- and 16-coupling flows saturate the affine scale cap; t
 and throughput measurements remain valid for those shapes, but the recommended configurations now use
 32 couplings.
 
-**Status.** The measurements below were made against the code base as it stood before the September
-2026 restructuring, and they are kept as the record behind the CUDA plan. Three things have changed
-since: the text modality and the PatchPCA latent stage were removed (the model is class-conditional
-over raw patches), the checkpoint format moved from 5 to 6, and the compile/DDP wrapper order was
-inverted. Parity rows and paragraphs that mention text sequences, tied text logits, PatchPCA, or
-per-modality normalisation therefore describe subsystems that no longer exist; every other check
-still applies to the current code. Statements about the current code are marked where they differ.
+**Status.** These measurements were made before the September 2026 restructuring and are kept as the
+record behind the CUDA plan. Checks that covered subsystems since removed (the text modality, the
+PatchPCA latent stage, per-modality normalisation) have been dropped from this note; what remains
+applies to the current class-conditional model. Where a statement describes how the code behaved
+then rather than now, it says so.
 
 ## References
 
@@ -35,12 +33,10 @@ float32 to avoid accelerator precision effects.
 | Path | Maximum absolute error |
 | --- | ---: |
 | Two-layer JetFormer backbone | 2.15e-6 |
-| Tied text logits | 5.72e-6 |
 | GMM image-head logits | 2.98e-7 |
 | JetFormer parameter gradients | 2.50e-6 |
 | Complete primary objective | 0.00 |
 | Primary-objective parameter gradients | 3.91e-8 |
-| Integrated PatchPCA -> JET -> JetFormer objective | 0.00 |
 | Integrated intermediate activations | 6.11e-7 |
 | Integrated gradients across 62 trainable tensors | 4.94e-8 |
 | Six-step optimizer trajectory | 1.19e-7 |
@@ -50,10 +46,9 @@ float32 to avoid accelerator precision effects.
 | JET inverse reconstruction | 1.19e-7 |
 | JET trainable-parameter gradients | 4.77e-7 |
 
-The JetFormer comparison exercises BOI insertion, two repeated vocabularies,
-text-first and image-first layouts, text padding, conditioning dropout,
-noncausal prefix attention, Gemma GQA/RoPE, modality slicing, tied text output,
-and the diagonal-GMM head. The scanned-cache comparison exercises irregular
+The JetFormer comparison exercises BOI insertion, repeated class vocabularies,
+conditioning dropout, noncausal prefix attention, Gemma GQA/RoPE, and the
+diagonal-GMM head. The scanned-cache comparison exercises irregular
 padding, conditional/unconditional prefixes, right alignment, logical RoPE
 positions, physical cache writes, and autoregressive extension.
 
@@ -89,55 +84,41 @@ nontrainable persistent buffers instead.
 
 The differential and distributed audits found these implementation defects:
 
-1. `causal_mask_on_prefix=false` selected shifted prefix masks with a pre-shift
-   selector length and crashed. The selector now broadcasts directly from the
-   per-example modality order.
-2. Whitened PatchPCA used the floored forward standard deviation in its inverse
-   transform. Big Vision floors only the forward divisor and uses the original
-   scale for inverse transform. The implementation and default float32 epsilon
-   now match the reference.
-3. PyTorch AdamW had been passed Big Vision's `wd` directly. PyTorch multiplies
+1. PyTorch AdamW had been passed Big Vision's `wd` directly. PyTorch multiplies
    that value by the learning rate, whereas Big Vision applies `wd` independently
    and then applies the common schedule. Kernel groups now use `wd / lr`; a
    six-step Optax comparison covering clipping, Adam moments, warmup, cosine
    decay, kernel decay, and bias exclusion agrees within 1.19e-7.
-4. Percentage-derived warmup steps were truncated. They are now rounded like
+2. Percentage-derived warmup steps were truncated. They are now rounded like
    Big Vision, with explicit validation that warmup leaves a scheduled update.
-5. A command-line override such as `model.remat_policy=none` (today `model.grad_checkpoint=false`) was parsed as a
-   null value even when the destination field was a string. Literal `none` is
-   now preserved for string fields; `null` and `~` remain the explicit ways to
-   clear optional values.
-6. Per-modality final normalization registered an additional shared
-   `final_norm.scale` that the forward path never used. This made DDP correctly
-   reject the graph with `find_unused_parameters=false`. The model now
-   registers only the active shared norm or the two active modality norms.
-   Early v5 per-modality checkpoints get a targeted weight migration; their
-   incompatible optimizer groups are rejected with instructions to initialize
-   weights or reset optimizer state.
-7. Fresh DDP workers were correctly seeded differently after initialization,
+3. A command-line override such as `model.remat_policy=none` (today
+   `model.grad_checkpoint=false`) was parsed as a null value even when the
+   destination field was a string. Literal `none` is now preserved for string
+   fields; `null` and `~` remain the explicit ways to clear optional values.
+4. Fresh DDP workers were correctly seeded differently after initialization,
    but the initial-validation RNG reset returned every rank to the same seed.
    Both pre- and post-validation resets now use `seed + rank`, while parameter
    initialization still uses the common seed before DDP synchronization.
-8. Distributed RNG checkpoints used tensors inside `all_gather_object`. On
+5. Distributed RNG checkpoints used tensors inside `all_gather_object`. On
    PyTorch 2.12, deserializing those objects could fail through an
    `UntypedStorage.dtype` access. The NumPy key state and the Torch, CUDA, and MPS
    RNG states are all stored as bytes, which `torch.load(weights_only=True)`
    accepts; restoration still reads the legacy tensor and list payloads.
-9. Multiple ranks could concurrently download and extract CIFAR-10. Rank zero
+6. Multiple ranks could concurrently download and extract CIFAR-10. Rank zero
    now prepares both splits, all ranks synchronize, and the remaining workers
    reopen the resident dataset with downloads disabled.
-10. `DistributedSampler` used PyTorch's default seed zero instead of the run
-    seed. Distributed shuffle order now receives `config.seed` explicitly and
-    still advances deterministically through `set_epoch`.
-11. A strict tensor load did not detect same-shaped changes to batch size,
-    optimizer, schedule, curriculum, masking, compile policy, or precision.
-    Stateful resume now compares those resolved mathematical config sections;
-    nonmathematical run controls remain adjustable and intentional changes use
-    weight-only initialization.
-12. A `torchrun` environment silently enabled DDP even when the resolved config
-    said `accelerator.distributed: false`. Multi-process training and
-    benchmarking now require explicit opt-in, preventing accidental paid
-    multi-GPU launches. The sharded sampler opts in internally.
+7. `DistributedSampler` used PyTorch's default seed zero instead of the run
+   seed. Distributed shuffle order now receives `config.seed` explicitly and
+   still advances deterministically through `set_epoch`.
+8. A strict tensor load did not detect same-shaped changes to batch size,
+   optimizer, schedule, curriculum, masking, compile policy, or precision.
+   Stateful resume now compares those resolved mathematical config sections;
+   nonmathematical run controls remain adjustable and intentional changes use
+   weight-only initialization.
+9. A `torchrun` environment silently enabled DDP even when the resolved config
+   said `accelerator.distributed: false`. Multi-process training and
+   benchmarking now require explicit opt-in, preventing accidental paid
+   multi-GPU launches. The sharded sampler opts in internally.
 
 Intentional differences are narrow and tested. The image-head mean biases use
 a zero-mean perturbation to break exact deterministic GMM component symmetry.
@@ -174,7 +155,7 @@ more expensive than its transformer depth alone suggests:
 | 90.2M | 59,785,216 (66.28%) | 25,842,432 (28.65%) | 4,465,152 (4.95%) | 13.513G | 40.537G |
 | 779.4M | 355,516,416 (45.62%) | 405,784,064 (52.07%) | 17,843,200 (2.29%) | 111.559G | 334.677G |
 
-The small remainder is the text/image embedding and preprocessing surface.
+The small remainder is the embedding and preprocessing surface.
 The PyTorch operator counter includes `mm`, `bmm`, and `addmm`, but not
 elementwise transforms, normalization, RoPE, softmax, distribution objects, or
 PNG/data work; these are comparable counted matrix FLOPs rather than complete
@@ -239,8 +220,7 @@ The final training and benchmark paths were exercised with two CPU ranks under
 PyTorch's real Gloo process group, not a mocked DDP wrapper. The benchmark ran
 two accumulation microbatches per optimizer step, used `no_sync()` exactly on
 the first microbatch, reduced elapsed time by the slowest rank, and reported a
-finite global loss and effective global batch eight. Both shared and
-per-modality final-norm configurations completed with unused-parameter
+finite global loss and effective global batch eight, with unused-parameter
 detection disabled.
 
 The production training loop then ran a synthetic CIFAR-shaped dataset at two

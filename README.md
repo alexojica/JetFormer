@@ -297,7 +297,6 @@ jetformer/
 | [`docs/cuda_experiment.md`](docs/cuda_experiment.md) | The runbook for a rented GPU: staged configurations, benchmark and budget gates, DDP and compile checks, resume and evaluation protocol. |
 | [`docs/implementation_validation.md`](docs/implementation_validation.md) | Numerical parity against the reference JAX implementation, compute accounting, local capacity measurements, and distributed validation. |
 | [`docs/model_card_cifar10_42m.md`](docs/model_card_cifar10_42m.md) | The model card published with the CIFAR-10 weights. |
-| [`docs/cifar10_mps_experiment.md`](docs/cifar10_mps_experiment.md) | Superseded: the earlier 34M experiment, kept as the record that motivated the audit. |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release notes. |
 
 ## Development
