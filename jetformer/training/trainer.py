@@ -124,7 +124,8 @@ class Trainer:
         )
 
     def _build_model(self) -> None:
-        self.model = JetFormer.from_config(self.config, self.device)
+        # Load weights on CPU; build_objective transfers the populated model through wrap_model.
+        self.model = JetFormer.from_config(self.config, "cpu")
         if self.checkpoint is not None:
             load_model_state(self.model, self.checkpoint)
         elif self.config.init_from:

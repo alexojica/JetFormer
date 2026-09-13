@@ -388,6 +388,11 @@ def test_init_from_starts_a_new_schedule_from_saved_weights(tmp_path):
     config = run_config(tmp_path / "child", init_from=last, num_epochs=1, eval={"sample_every_epochs": 0})
     trainer = Trainer(config, Accelerator(config.accelerator))
     torch.testing.assert_close(checksum(trainer.model), checksum(donor.model), atol=0, rtol=0)
+    torch.testing.assert_close(dict(trainer.model.named_buffers()), dict(donor.model.named_buffers()), atol=0, rtol=0)
+    optimizer_parameters = [parameter for group in trainer.optimizer.param_groups for parameter in group["params"]]
+    model_parameters = list(trainer.model.parameters())
+    assert len(optimizer_parameters) == len(model_parameters)
+    assert {id(parameter) for parameter in optimizer_parameters} == {id(parameter) for parameter in model_parameters}
     assert trainer.step == 0 and trainer.start_epoch == 0 and trainer.checkpoint_meta is None
     trainer.fit()
     assert trainer.step == 4 and not RunPaths(tmp_path / "child", "tiny-test").samples("init_val").exists()

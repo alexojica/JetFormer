@@ -281,11 +281,12 @@ def test_export_writes_a_weights_only_checkpoint(checkpoint, tmp_path, capsys):
     assert {k: v for k, v in exported["model_state_dict"].items()}.keys() == source["model_state_dict"].keys()
     for key, value in source["model_state_dict"].items():
         assert torch.equal(exported["model_state_dict"][key], value)
-    # The exported file samples exactly like the source checkpoint it came from.
+    # Checkpoint construction cannot alter the explicit sampling seed.
     images = []
-    for path in (checkpoint, out):
+    for index, path in enumerate((checkpoint, out)):
+        torch.manual_seed(100 + index)
         argv = ["--ckpt", str(path), "--out-dir", str(tmp_path / path.stem), "--num-images", "2", "--device", "cpu"]
-        sample_main([*argv, "--sample-method", "mean", "--cfg-weight", "0", "--grid-images", "0"])
+        sample_main([*argv, "--seed", "42", "--sample-method", "mean", "--cfg-weight", "0", "--grid-images", "0"])
         images.append(sorted(p.read_bytes() for p in (tmp_path / path.stem / "images").glob("*.png")))
     assert images[0] == images[1]
 

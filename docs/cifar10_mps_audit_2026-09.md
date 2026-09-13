@@ -326,3 +326,15 @@ the inverse keep-probability scale in fp32, while eager rounds it to bf16 before
 multiplication. A dropout-only probe had exact forward values and RNG state but
 different gradients. This is independent of the autocast setting; these CPU checks
 do not establish CUDA kernel parity, and dropout has not been changed.
+
+Checkpoint startup now loads weights on CPU before transferring the model to its
+device. Previously startup transferred random initial weights and then overwrote
+them from the CPU checkpoint. Eight interleaved pairs measured warm model
+construction, weight loading/migration, and device transfer (excluding checkpoint
+file opening): format 5 improved from **1.158 to 1.065 s**, with interquartile
+spreads of 2.5/3.8 ms; format 6 improved from **1.166 to 1.078 s**, with spreads of
+4.1/4.1 ms. This saves 88–92 ms, or 7.5–8.0% of that setup phase. Both formats
+retained exact parameters, nonpersistent buffers, RNG state, and every diagnostic
+across three queued objective calls. DDP and optimizer construction still follow
+the device transfer, so their parameter references remain current.
+The full trained-checkpoint CPU/MPS regression and the 202-test gate pass.

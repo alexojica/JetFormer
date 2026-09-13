@@ -178,11 +178,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     device, rank, world_size = accelerator.device, accelerator.rank, accelerator.world_size
     main_process = rank == 0
 
-    model = JetFormer.from_config(config, device)
+    # Load CPU checkpoint weights before transferring the populated model to the device.
+    model = JetFormer.from_config(config, "cpu")
     load_model_state(model, checkpoint)
     metadata = compact_metadata(checkpoint)
     del checkpoint
-    model.eval()
+    model.to(device).eval()
     # Parameter initialization and checkpoint loading must not advance the user-visible sampling stream.
     torch.manual_seed(args.seed + rank)
 
