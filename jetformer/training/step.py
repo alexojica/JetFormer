@@ -78,7 +78,9 @@ def optimizer_step(
         if compiled and hasattr(autograd_config, "backward_pass_autocast")
         else nullcontext()
     )
-    with backward_policy:
+    # Weights remain unchanged across microbatches; retain their autocast casts until this window ends.
+    # Backward explicitly disables autocast, and the cache expires before any optimizer update.
+    with backward_policy, accelerator.autocast():
         for index, (images, labels) in enumerate(microbatches):
             last = index + 1 == len(microbatches)
             no_sync = objective.no_sync() if hasattr(objective, "no_sync") and not last else nullcontext()
@@ -87,7 +89,8 @@ def optimizer_step(
                     torch.compiler.cudagraph_mark_step_begin()
                 output = objective(images, labels, step_tensor, total_steps, diagnostics=diagnostics and last)
                 loss = output["loss"] / len(microbatches)
-            scaler.scale(loss).backward()
+            with torch.autocast(accelerator.device.type, enabled=False):
+                scaler.scale(loss).backward()
             outputs.append({key: value.detach() for key, value in output.items()})
     window: dict[str, torch.Tensor] = {}
     for key in outputs[-1]:

@@ -463,3 +463,17 @@ three updates, diagnostics transitions, and checkpointing both on and off.
 Losses, RNG, gradients, parameters, optimizer and scheduler states match eager
 exactly, with reductions only on the final microbatch. This repairs execution;
 CUDA kernel speed and NCCL overlap still require the documented hardware gate.
+
+The framework audit also measured autocast cache reuse over gradient accumulation.
+Keeping an outer autocast scope until the microbatch window ends, with backward
+explicitly disabled and the cache expired before optimizer updates, reduced a
+four-by-32-image update from 884.260 to 803.713 ms (9.109%). Two ABBA blocks gave
+savings of 80.547 and 80.182 ms; reference/candidate run-median SDs were
+0.835/1.744 ms. The validated one-by-128 case was unchanged within noise
+(559.891/559.700 ms); this is not a recipe or effective-batch change.
+CPU fp32/bf16 and checkpoint on/off update tests match exactly on both runtimes.
+On the full MPS model, fixed-gradient replay compares 41,854 tensors exactly
+across three updates and four precision/accumulation cases. Natural trajectories
+retain the independently observed embedding-backward variation, including in
+reference repeats; no tolerance was widened. The original complete trained
+CPU/MPS regression passes with the installed change.

@@ -1,3 +1,4 @@
+import copy
 import math
 import random
 import signal
@@ -27,7 +28,7 @@ from jetformer.rng import SEED_VALIDATION, capture_rng_state
 from jetformer.training.accelerator import Accelerator
 from jetformer.training.checkpoint import load_checkpoint
 from jetformer.training.objective import JetFormerObjective
-from jetformer.training.optim import create_scheduler
+from jetformer.training.optim import create_adamw, create_scheduler
 from jetformer.training.step import optimizer_step
 from jetformer.training.trainer import Trainer, _GracefulStop, train
 from tests.conftest import SyntheticImages, synthetic_datasets, tiny_config
@@ -95,6 +96,67 @@ def test_non_finite_gradients_skip_the_update():
     )
     assert not updated and objective.weight.grad is None and torch.equal(objective.weight.detach(), torch.ones(3))
     assert torch.isnan(window["grad_norm"]) and kwargs["scheduler"].last_epoch == 0
+
+
+@pytest.mark.parametrize("grad_checkpoint", [False, True])
+@pytest.mark.parametrize("precision", ["fp32", "bf16"])
+def test_accumulation_autocast_cache_expires_before_weight_updates(grad_checkpoint, precision):
+    torch.manual_seed(27)
+    config = tiny_config(
+        model={"dropout": 0.1, "drop_labels_probability": 0.1, "grad_checkpoint": grad_checkpoint},
+        flow={"grad_checkpoint": grad_checkpoint},
+        image={"dequant_noise": True},
+        training={"input_noise_std": 0.1, "noise_scale": 32.0},
+    )
+    model = JetFormer.from_config(config, "cpu")
+    with torch.no_grad():
+        model.image_head.weight.normal_(std=0.01)
+        for coupling in model.flow.couplings:
+            coupling.net.final_proj.weight.normal_(std=0.01)
+    cached = JetFormerObjective(model, config.training, dequant_noise=True, drop_labels_probability=0.1).train()
+    uncached = copy.deepcopy(cached)
+    accelerator = Accelerator(AcceleratorConfig(device="cpu", precision=precision))
+    options = []
+
+    def check_backward_dtype(gradient):
+        assert not torch.is_autocast_enabled("cpu")
+        return gradient
+
+    for objective in (cached, uncached):
+        objective.model.image_head.weight.register_hook(check_backward_dtype)
+        optimizer = create_adamw(objective, config.optimizer)
+        options.append(
+            dict(
+                optimizer=optimizer,
+                scheduler=create_scheduler(optimizer, config.schedule, 10),
+                scaler=accelerator.grad_scaler(),
+                accelerator=accelerator,
+                total_steps=10,
+                grad_clip_norm=config.optimizer.grad_clip_norm,
+                step_tensor=torch.zeros(()),
+                compiled=False,
+            )
+        )
+    microbatches = [(torch.randint(256, (2, 3, 32, 32), dtype=torch.uint8), torch.tensor([0, 3])) for _ in range(4)]
+    for step, diagnostics in enumerate((False, True, False)):
+        rng = torch.get_rng_state()
+        actual, updated = optimizer_step(cached, microbatches, step=step, diagnostics=diagnostics, **options[0])
+        actual_rng = torch.get_rng_state()
+        torch.set_rng_state(rng)
+        # With caching disabled every forward and checkpoint recomputation reads current fp32 weights.
+        with torch.autocast("cpu", enabled=False, cache_enabled=False):
+            expected, expected_updated = optimizer_step(
+                uncached, microbatches, step=step, diagnostics=diagnostics, **options[1]
+            )
+        assert updated and expected_updated and torch.equal(actual_rng, torch.get_rng_state())
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        for parameter, reference in zip(cached.parameters(), uncached.parameters(), strict=True):
+            torch.testing.assert_close(parameter.grad, reference.grad, rtol=0, atol=0)
+            torch.testing.assert_close(parameter, reference, rtol=0, atol=0)
+        torch.testing.assert_close(
+            options[0]["optimizer"].state_dict(), options[1]["optimizer"].state_dict(), rtol=0, atol=0
+        )
+        assert options[0]["scheduler"].state_dict() == options[1]["scheduler"].state_dict()
 
 
 # ---- validation and quality metrics --------------------------------------------------------------
