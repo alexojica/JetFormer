@@ -379,3 +379,27 @@ MPS variation. Strided and bf16 gradients, single-gradient inputs, active clippi
 and queued first/later calls are covered; CPU and CUDA retain their existing path.
 The complete trained-checkpoint regression passes with that reviewed reduction
 expectation, unchanged validation/sample figures, and the 203-test gate.
+
+Fp32 MPS inference can fold the decoder's query heads into the query sequence for
+the two attention matrix products. This avoids materializing broadcast copies of
+the single key/value head. Scaling, masking and fp32 softmax remain shared with
+the existing explicit attention implementation. The branch requires disabled
+gradient recording and autocast, fp32 inputs and equal batch sizes; training,
+bf16 inference and multiple key/value heads retain their existing arithmetic.
+
+Six interleaved sampling pairs on 100 class-balanced images measured
+**919.137 -> 667.315 ms**, with interquartile spreads of 12.314/9.339 ms and mean
+paired saving 256.112 ms (standard deviation 13.511 ms). This is an fp32 sampling
+result, not an optimizer-step gain. The integrated implementation matches the
+measured prototype bit-for-bit on 30 trained prefill, cache and full-sequence
+attention calls. Both matrix products satisfy independently specified fp64
+reference error bounds for fp32 accumulation and output rounding. Eight seeded
+sample batches retain the existing 1/255 statistics tolerance; the largest
+changed pixel differs by one 8-bit level. RNG, queued repetitions and bf16
+fallback samples are exact. Repeated subset/full validation preserves every
+loss term, including full-test fp32 loss **3.697344140625**.
+The full regression preserves its existing rules for every other result; the
+MPS update matches all 686 parameter tensors in a previously recorded native
+invocation exactly. This is observed native repeatability, with no parameter
+tolerance or extension of the earlier gradient-norm replay. The complete gate
+passes 226 tests, Ruff and Vulture.
