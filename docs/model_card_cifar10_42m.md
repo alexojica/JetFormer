@@ -61,7 +61,7 @@ Install the implementation with its Hugging Face extra, then sample with the com
 checkpoint carries its config, so nothing else is needed:
 
 ```bash
-pip install "jetformer[hub] @ git+https://github.com/alexojica/JetFormer.git@v0.1.0"
+pip install "jetformer[hub] @ git+https://github.com/alexojica/JetFormer.git@v0.1.1"
 jetformer-sample --hf-repo mojique/jetformer-cifar10-32-42m \
   --hf-ckpt jetformer_cifar10_32_42m_100ep.pt \
   --out-dir samples/cifar10 --num-images 100 --batch-size 100
