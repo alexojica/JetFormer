@@ -143,6 +143,27 @@ def test_tensor_images_and_real_images():
         real_images(loader, 8)
 
 
+def test_validation_autocast_cache_leaves_training_gradients_and_updated_weights_visible(config, model):
+    accelerator = Accelerator(AcceleratorConfig(device="cpu", precision="bf16"))
+    objective = JetFormerObjective(model, config.training, dequant_noise=False).train()
+    dataset = SyntheticImages(6, train=False)
+    loader = DataLoader(dataset, batch_size=4)
+    options = dict(step=0, total_steps=10, rgb_noise=False, seed=0)
+    first = validate(objective, loader, accelerator, **options)
+    # No-grad cached casts from validation must not leak into the next training forward.
+    with accelerator.autocast():
+        output = objective(dataset.images, torch.tensor(dataset.labels), torch.tensor(0.0), 10, rgb_noise=False)
+    output["loss"].backward()
+    assert model.image_head.weight.grad is not None and model.image_head.weight.grad.abs().sum() > 0
+    with torch.no_grad():
+        model.image_head.weight.add_(0.01)
+    second = validate(objective, loader, accelerator, **options)
+    assert second != first
+    # Disabling cast caching provides a reference using the current parameters.
+    with torch.autocast("cpu", dtype=torch.bfloat16, cache_enabled=False):
+        assert validate(objective, loader, accelerator, **options) == second
+
+
 def test_fidelity_argument_validation(tmp_path):
     kwargs = dict(reference=None, fid=False, kid=False, inception_score=True, device=torch.device("cpu"))
     with pytest.raises(ValueError, match="At least one"):

@@ -266,3 +266,25 @@ before they reached a run: checkpoint saving referenced the serialization config
 wrong module path, the NumPy RNG state was stored as an array that `weights_only` loading rejects,
 and the FID real-image read advanced the training RNG streams.
 
+## Continuous performance experiments (2026-09-13)
+
+The next local baseline on PyTorch 2.12.1 measured 641.5, 577.2, and 566.9 ms per optimizer
+step over three runs (three warmup steps, ten measured steps, unchanged validated recipe).
+The large initial drift makes interleaved comparisons necessary. Synchronized phase measurements
+at 567.3 ms per step attributed 69.4 ms to flow forward, 114.9 ms to decoder forward,
+335.4 ms to backward, 17.4 ms to clipping, and 10.6 ms to fused AdamW.
+
+Validation now keeps one autocast context for the complete pass, allowing its unchanged weights
+to reuse their bf16 casts. On the trained checkpoint's 2,000-image validation subset, five
+interleaved original/updated pairs measured median **2.707 -> 2.338 s** (13.6% less time,
+15.8% higher throughput), with interquartile spreads of 17.7 and 13.5 ms. A separate profile
+counted 5,580 fewer conversions per pass, consistent with retaining about 79 MiB of bf16 weight
+casts until validation ends. The transfer helper and seeded dequantisation stream are unchanged.
+
+All three repeated validation calls remained exactly equal: 3.705682 bits per sub-pixel on the
+subset, 3.697755 on the full test split in bf16, and 3.697344 in fp32. Every trained-checkpoint
+fp32 objective diagnostic, gradient norm, and post-update parameter checksum matched the
+pre-change CPU and MPS records exactly. Unsynchronized repeated transfer and KV-cache probes,
+seeded sample statistics, and format-5/6 weight equality also passed. A CPU bf16 test checks
+that validation's cache cannot hide updated weights or suppress subsequent training gradients;
+the complete gate passes with 201 tests. The training step implementation is unchanged.
