@@ -15,10 +15,11 @@ from jetformer.training.optim import clip_grad_norm_, grad_norm
 
 
 def build_objective(model: JetFormer, config: Config, accelerator: Accelerator) -> tuple[torch.nn.Module, bool]:
-    """Wrap the model in the loss module, then in DDP, then (on CUDA/CPU) in ``torch.compile``.
+    """Build the objective and optional DDP shell, then compile the objective on CUDA/CPU.
 
-    DDP goes inside the compiled module so its gradient buckets can all-reduce while the compiled
-    backward is still running. Returns ``(objective, compiled)``.
+    DDP bookkeeping remains eager: its reducer cannot be traced with ``fullgraph=True``. Compiling
+    its owned module still lets Dynamo partition backward at the active DDP bucket boundaries.
+    Returns ``(objective, compiled)``.
     """
     objective: torch.nn.Module = JetFormerObjective(
         model,
@@ -31,7 +32,12 @@ def build_objective(model: JetFormer, config: Config, accelerator: Accelerator) 
     if compiled:
         if accelerator.device.type == "mps":
             raise ValueError("torch.compile is not supported on the MPS training path.")
-        objective = torch.compile(objective, mode=config.torch_compile_mode, fullgraph=True, dynamic=False)
+        target = objective.module if isinstance(objective, torch.nn.parallel.DistributedDataParallel) else objective
+        target = torch.compile(target, mode=config.torch_compile_mode, fullgraph=True, dynamic=False)
+        if isinstance(objective, torch.nn.parallel.DistributedDataParallel):
+            objective.module = target
+        else:
+            objective = target
     return objective, compiled
 
 

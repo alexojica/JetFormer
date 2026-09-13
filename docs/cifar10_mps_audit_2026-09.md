@@ -452,3 +452,14 @@ Final installed-code validation repeated four interleaved pairs using the actual
 a 68.2% median reduction. All archive, resume-state, copy-dispatch and queued
 error-path checks passed. The earlier 71.7% result above measured the equivalent
 prototype; release figures use this installed-code measurement.
+
+A framework audit found that applying `fullgraph=True` to the complete DDP wrapper
+failed on its first real forward, in `Reducer._rebuild_buckets`, on both PyTorch
+2.12.1 and 2.14.0. The previous distributed test only constructed that wrapper.
+DDP now retains an eager shell and compiles its owned objective after wrapping;
+Dynamo still sees the active DDP context and partitions backward at bucket boundaries.
+Two-rank CPU bf16 checks use multiple communication buckets, two microbatches,
+three updates, diagnostics transitions, and checkpointing both on and off.
+Losses, RNG, gradients, parameters, optimizer and scheduler states match eager
+exactly, with reductions only on the final microbatch. This repairs execution;
+CUDA kernel speed and NCCL overlap still require the documented hardware gate.

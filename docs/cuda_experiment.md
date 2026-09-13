@@ -200,10 +200,11 @@ PY
 
 `tests/test_compile.py` requires the complete training loss to compile to one static graph
 (`fullgraph=True, dynamic=False`); the advanced-diagnostics variant of the step is a second static
-graph, so `logging.advanced_metrics` costs one extra compilation, not recompilations. The wrapper
-order is objective, then DDP, then `torch.compile`, so DDP's bucketed all-reduces overlap the compiled
-backward. Validation runs through the eager module, so a compiled run never traces eval-mode or
-ragged-batch variants.
+graph, so `logging.advanced_metrics` costs one extra compilation, not recompilations. The objective
+is wrapped in DDP before its owned module is compiled, so DDP's bucketed all-reduces can overlap the
+compiled backward. The DDP shell remains eager because reducer bookkeeping cannot be traced with
+`fullgraph=True`. Validation runs through the eager module, so a compiled run never traces eval-mode
+or ragged-batch variants.
 
 ## Schedule decision
 
