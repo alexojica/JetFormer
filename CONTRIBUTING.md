@@ -3,12 +3,8 @@
 Thank you for considering contributing to JetFormer! This document outlines how to set up your environment, coding style, and our PR process.
 
 ## Environment
-- Python 3.10+
-- Install dependencies:
-```bash
-pip install -r requirements.txt
-```
-- For editable development installs:
+- Python 3.10 or newer, PyTorch 2.7 or newer
+- Install an editable development environment:
 ```bash
 pip install -e ".[dev,eval]"
 ```
@@ -24,11 +20,11 @@ jetformer-train --config jetformer/configs/cifar10_32_tiny.yaml
 ```
 - Sample from a checkpoint:
 ```bash
-python scripts/sample_from_checkpoint.py \
-  --config jetformer/configs/cifar10_32_tiny.yaml \
+jetformer-sample \
   --ckpt checkpoints/jetformer_CIFAR10-32-tiny-smoke_last.pt \
-  --out_dir samples/tiny --num_images 8 --class_ids 0,1,2,3
+  --out-dir samples/tiny --num-images 8 --class-ids 0,1,2,3
 ```
+The checkpoint carries its training config; pass `--config` to sample under a different one.
 
 ## Style and quality
 - Follow PEP8 and write clear, explicit names.
@@ -38,11 +34,27 @@ python scripts/sample_from_checkpoint.py \
 - Run the repository quality checks before opening a PR:
 ```bash
 pytest -q
-ruff check jetformer scripts tests
-vulture jetformer scripts tests --min-confidence 80
-python -m compileall -q jetformer scripts tests
-python -m build --sdist --wheel
+ruff check jetformer tests
+ruff format --check jetformer tests
+vulture jetformer tests --min-confidence 60 --ignore-names "forward,synthetic_data"
+python -m compileall -q jetformer tests
+rm -rf build dist && python -m build --sdist --wheel   # a stale build/ tree would be packaged
+twine check dist/*
+pre-commit run --all-files
 ```
+
+The suite is CPU-only and takes about fifteen seconds. `tests/test_distributed.py` starts two gloo
+processes, so it needs a free loopback port.
+
+## Releasing
+1. Bump `version` in `pyproject.toml` and `CITATION.cff`, and set `date-released` to the release date.
+   `tests/test_imports.py` checks that the two agree with the installed package version.
+2. Add the release section and its link to `CHANGELOG.md`.
+3. Run the quality block above; it must be clean.
+4. Tag and push: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
+5. Create the GitHub release from that tag, pasting the changelog section.
+6. If the release publishes weights, export them with `jetformer-export` and upload them to the
+   Hugging Face Hub with the model card from `docs/`.
 
 ## Git workflow
 1. Create a feature branch from `main`.

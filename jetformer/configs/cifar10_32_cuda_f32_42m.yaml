@@ -1,0 +1,17 @@
+# CUDA reproduction of the locally validated CIFAR-10 recipe (server stage 1 in docs/cuda_experiment.md).
+#
+# Identical mathematics to jetformer/configs/cifar10_32_mps_f32_100ep.yaml: 32 affine couplings with one
+# ViT block each, 12x384 transformer, 8 autoregressive dims of 48, 256 mixtures, batch 128, lr 3e-4,
+# 100-epoch cosine schedule, RGB noise 32 -> 0. It exists to check that a rented GPU reproduces the local
+# validation curve and FID before any larger model is trained there. Single GPU; keep batch_size=128 and
+# accelerator.distributed=false so the optimizer trajectory matches the local run.
+torch_compile: true
+input: {val_max_samples_per_class: 200}
+optimizer: {fused: true}
+eval: {generation_batch_size: 128}
+wandb:
+  offline: true
+  project: jetformer-cifar10-32
+  run_name: CIFAR10-32-cuda-f32-42m
+  tags: [cifar10, cuda, f32, 42m, reproduction]
+accelerator: {device: cuda}

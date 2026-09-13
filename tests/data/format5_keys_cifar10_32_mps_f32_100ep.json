@@ -1,0 +1,2714 @@
+{
+"adaptor.flow.couplings.0.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.0.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.0.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.0.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.0.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.0.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.0.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.0.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.0.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.0.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.0.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.0.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.0.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.0.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.0.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.0.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.0.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.0.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.0.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.0.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.0.permutation": [
+48
+],
+"adaptor.flow.couplings.1.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.1.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.1.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.1.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.1.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.1.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.1.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.1.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.1.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.1.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.1.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.1.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.1.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.1.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.1.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.1.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.1.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.1.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.1.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.1.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.1.permutation": [
+48
+],
+"adaptor.flow.couplings.10.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.10.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.10.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.10.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.10.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.10.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.10.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.10.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.10.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.10.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.10.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.10.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.10.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.10.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.10.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.10.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.10.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.10.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.10.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.10.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.10.permutation": [
+48
+],
+"adaptor.flow.couplings.11.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.11.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.11.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.11.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.11.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.11.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.11.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.11.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.11.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.11.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.11.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.11.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.11.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.11.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.11.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.11.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.11.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.11.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.11.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.11.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.11.permutation": [
+48
+],
+"adaptor.flow.couplings.12.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.12.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.12.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.12.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.12.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.12.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.12.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.12.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.12.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.12.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.12.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.12.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.12.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.12.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.12.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.12.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.12.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.12.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.12.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.12.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.12.permutation": [
+48
+],
+"adaptor.flow.couplings.13.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.13.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.13.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.13.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.13.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.13.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.13.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.13.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.13.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.13.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.13.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.13.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.13.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.13.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.13.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.13.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.13.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.13.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.13.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.13.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.13.permutation": [
+48
+],
+"adaptor.flow.couplings.14.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.14.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.14.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.14.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.14.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.14.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.14.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.14.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.14.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.14.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.14.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.14.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.14.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.14.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.14.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.14.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.14.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.14.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.14.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.14.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.14.permutation": [
+48
+],
+"adaptor.flow.couplings.15.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.15.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.15.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.15.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.15.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.15.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.15.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.15.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.15.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.15.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.15.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.15.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.15.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.15.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.15.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.15.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.15.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.15.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.15.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.15.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.15.permutation": [
+48
+],
+"adaptor.flow.couplings.16.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.16.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.16.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.16.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.16.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.16.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.16.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.16.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.16.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.16.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.16.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.16.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.16.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.16.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.16.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.16.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.16.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.16.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.16.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.16.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.16.permutation": [
+48
+],
+"adaptor.flow.couplings.17.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.17.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.17.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.17.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.17.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.17.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.17.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.17.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.17.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.17.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.17.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.17.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.17.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.17.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.17.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.17.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.17.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.17.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.17.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.17.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.17.permutation": [
+48
+],
+"adaptor.flow.couplings.18.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.18.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.18.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.18.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.18.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.18.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.18.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.18.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.18.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.18.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.18.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.18.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.18.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.18.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.18.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.18.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.18.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.18.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.18.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.18.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.18.permutation": [
+48
+],
+"adaptor.flow.couplings.19.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.19.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.19.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.19.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.19.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.19.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.19.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.19.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.19.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.19.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.19.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.19.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.19.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.19.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.19.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.19.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.19.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.19.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.19.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.19.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.19.permutation": [
+48
+],
+"adaptor.flow.couplings.2.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.2.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.2.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.2.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.2.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.2.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.2.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.2.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.2.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.2.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.2.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.2.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.2.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.2.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.2.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.2.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.2.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.2.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.2.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.2.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.2.permutation": [
+48
+],
+"adaptor.flow.couplings.20.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.20.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.20.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.20.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.20.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.20.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.20.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.20.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.20.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.20.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.20.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.20.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.20.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.20.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.20.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.20.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.20.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.20.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.20.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.20.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.20.permutation": [
+48
+],
+"adaptor.flow.couplings.21.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.21.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.21.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.21.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.21.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.21.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.21.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.21.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.21.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.21.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.21.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.21.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.21.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.21.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.21.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.21.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.21.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.21.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.21.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.21.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.21.permutation": [
+48
+],
+"adaptor.flow.couplings.22.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.22.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.22.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.22.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.22.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.22.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.22.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.22.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.22.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.22.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.22.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.22.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.22.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.22.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.22.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.22.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.22.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.22.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.22.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.22.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.22.permutation": [
+48
+],
+"adaptor.flow.couplings.23.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.23.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.23.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.23.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.23.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.23.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.23.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.23.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.23.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.23.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.23.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.23.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.23.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.23.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.23.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.23.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.23.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.23.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.23.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.23.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.23.permutation": [
+48
+],
+"adaptor.flow.couplings.24.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.24.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.24.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.24.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.24.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.24.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.24.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.24.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.24.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.24.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.24.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.24.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.24.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.24.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.24.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.24.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.24.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.24.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.24.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.24.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.24.permutation": [
+48
+],
+"adaptor.flow.couplings.25.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.25.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.25.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.25.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.25.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.25.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.25.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.25.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.25.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.25.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.25.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.25.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.25.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.25.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.25.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.25.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.25.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.25.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.25.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.25.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.25.permutation": [
+48
+],
+"adaptor.flow.couplings.26.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.26.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.26.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.26.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.26.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.26.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.26.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.26.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.26.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.26.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.26.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.26.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.26.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.26.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.26.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.26.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.26.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.26.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.26.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.26.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.26.permutation": [
+48
+],
+"adaptor.flow.couplings.27.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.27.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.27.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.27.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.27.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.27.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.27.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.27.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.27.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.27.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.27.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.27.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.27.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.27.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.27.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.27.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.27.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.27.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.27.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.27.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.27.permutation": [
+48
+],
+"adaptor.flow.couplings.28.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.28.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.28.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.28.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.28.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.28.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.28.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.28.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.28.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.28.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.28.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.28.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.28.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.28.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.28.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.28.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.28.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.28.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.28.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.28.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.28.permutation": [
+48
+],
+"adaptor.flow.couplings.29.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.29.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.29.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.29.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.29.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.29.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.29.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.29.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.29.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.29.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.29.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.29.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.29.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.29.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.29.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.29.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.29.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.29.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.29.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.29.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.29.permutation": [
+48
+],
+"adaptor.flow.couplings.3.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.3.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.3.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.3.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.3.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.3.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.3.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.3.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.3.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.3.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.3.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.3.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.3.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.3.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.3.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.3.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.3.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.3.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.3.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.3.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.3.permutation": [
+48
+],
+"adaptor.flow.couplings.30.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.30.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.30.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.30.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.30.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.30.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.30.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.30.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.30.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.30.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.30.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.30.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.30.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.30.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.30.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.30.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.30.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.30.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.30.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.30.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.30.permutation": [
+48
+],
+"adaptor.flow.couplings.31.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.31.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.31.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.31.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.31.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.31.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.31.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.31.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.31.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.31.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.31.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.31.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.31.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.31.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.31.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.31.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.31.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.31.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.31.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.31.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.31.permutation": [
+48
+],
+"adaptor.flow.couplings.4.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.4.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.4.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.4.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.4.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.4.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.4.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.4.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.4.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.4.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.4.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.4.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.4.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.4.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.4.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.4.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.4.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.4.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.4.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.4.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.4.permutation": [
+48
+],
+"adaptor.flow.couplings.5.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.5.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.5.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.5.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.5.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.5.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.5.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.5.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.5.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.5.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.5.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.5.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.5.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.5.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.5.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.5.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.5.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.5.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.5.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.5.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.5.permutation": [
+48
+],
+"adaptor.flow.couplings.6.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.6.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.6.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.6.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.6.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.6.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.6.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.6.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.6.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.6.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.6.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.6.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.6.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.6.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.6.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.6.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.6.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.6.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.6.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.6.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.6.permutation": [
+48
+],
+"adaptor.flow.couplings.7.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.7.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.7.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.7.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.7.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.7.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.7.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.7.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.7.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.7.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.7.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.7.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.7.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.7.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.7.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.7.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.7.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.7.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.7.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.7.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.7.permutation": [
+48
+],
+"adaptor.flow.couplings.8.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.8.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.8.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.8.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.8.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.8.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.8.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.8.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.8.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.8.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.8.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.8.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.8.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.8.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.8.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.8.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.8.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.8.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.8.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.8.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.8.permutation": [
+48
+],
+"adaptor.flow.couplings.9.dnn.final_proj.bias": [
+48
+],
+"adaptor.flow.couplings.9.dnn.final_proj.weight": [
+48,
+192
+],
+"adaptor.flow.couplings.9.dnn.init_proj.bias": [
+192
+],
+"adaptor.flow.couplings.9.dnn.init_proj.weight": [
+192,
+24
+],
+"adaptor.flow.couplings.9.dnn.posemb": [
+1,
+64,
+192
+],
+"adaptor.flow.couplings.9.dnn.vit_encoder.layers.0.attn.in_proj_bias": [
+576
+],
+"adaptor.flow.couplings.9.dnn.vit_encoder.layers.0.attn.in_proj_weight": [
+576,
+192
+],
+"adaptor.flow.couplings.9.dnn.vit_encoder.layers.0.attn.out_proj.bias": [
+192
+],
+"adaptor.flow.couplings.9.dnn.vit_encoder.layers.0.attn.out_proj.weight": [
+192,
+192
+],
+"adaptor.flow.couplings.9.dnn.vit_encoder.layers.0.mlp.fc1.bias": [
+768
+],
+"adaptor.flow.couplings.9.dnn.vit_encoder.layers.0.mlp.fc1.weight": [
+768,
+192
+],
+"adaptor.flow.couplings.9.dnn.vit_encoder.layers.0.mlp.fc2.bias": [
+192
+],
+"adaptor.flow.couplings.9.dnn.vit_encoder.layers.0.mlp.fc2.weight": [
+192,
+768
+],
+"adaptor.flow.couplings.9.dnn.vit_encoder.layers.0.norm1.bias": [
+192
+],
+"adaptor.flow.couplings.9.dnn.vit_encoder.layers.0.norm1.weight": [
+192
+],
+"adaptor.flow.couplings.9.dnn.vit_encoder.layers.0.norm2.bias": [
+192
+],
+"adaptor.flow.couplings.9.dnn.vit_encoder.layers.0.norm2.weight": [
+192
+],
+"adaptor.flow.couplings.9.dnn.vit_encoder.norm.bias": [
+192
+],
+"adaptor.flow.couplings.9.dnn.vit_encoder.norm.weight": [
+192
+],
+"adaptor.flow.couplings.9.inverse_permutation": [
+48
+],
+"adaptor.flow.couplings.9.permutation": [
+48
+],
+"final_norm.scale": [
+384
+],
+"image_emb.bias": [
+384
+],
+"image_emb.weight": [
+384,
+8
+],
+"img_head.bias": [
+4352
+],
+"img_head.weight": [
+4352,
+384
+],
+"patch_pca.pca_inv_proj": [
+48,
+48
+],
+"patch_pca.pca_mean": [
+48
+],
+"patch_pca.pca_proj": [
+48,
+48
+],
+"text_emb.weight": [
+208,
+384
+],
+"transformer.0.attention.w_k.weight": [
+64,
+384
+],
+"transformer.0.attention.w_o.weight": [
+384,
+384
+],
+"transformer.0.attention.w_q.weight": [
+384,
+384
+],
+"transformer.0.attention.w_v.weight": [
+64,
+384
+],
+"transformer.0.feed_forward.w_gate.weight": [
+1536,
+384
+],
+"transformer.0.feed_forward.w_linear.weight": [
+384,
+1536
+],
+"transformer.0.feed_forward.w_up.weight": [
+1536,
+384
+],
+"transformer.0.norm1.scale": [
+384
+],
+"transformer.0.norm2.scale": [
+384
+],
+"transformer.1.attention.w_k.weight": [
+64,
+384
+],
+"transformer.1.attention.w_o.weight": [
+384,
+384
+],
+"transformer.1.attention.w_q.weight": [
+384,
+384
+],
+"transformer.1.attention.w_v.weight": [
+64,
+384
+],
+"transformer.1.feed_forward.w_gate.weight": [
+1536,
+384
+],
+"transformer.1.feed_forward.w_linear.weight": [
+384,
+1536
+],
+"transformer.1.feed_forward.w_up.weight": [
+1536,
+384
+],
+"transformer.1.norm1.scale": [
+384
+],
+"transformer.1.norm2.scale": [
+384
+],
+"transformer.10.attention.w_k.weight": [
+64,
+384
+],
+"transformer.10.attention.w_o.weight": [
+384,
+384
+],
+"transformer.10.attention.w_q.weight": [
+384,
+384
+],
+"transformer.10.attention.w_v.weight": [
+64,
+384
+],
+"transformer.10.feed_forward.w_gate.weight": [
+1536,
+384
+],
+"transformer.10.feed_forward.w_linear.weight": [
+384,
+1536
+],
+"transformer.10.feed_forward.w_up.weight": [
+1536,
+384
+],
+"transformer.10.norm1.scale": [
+384
+],
+"transformer.10.norm2.scale": [
+384
+],
+"transformer.11.attention.w_k.weight": [
+64,
+384
+],
+"transformer.11.attention.w_o.weight": [
+384,
+384
+],
+"transformer.11.attention.w_q.weight": [
+384,
+384
+],
+"transformer.11.attention.w_v.weight": [
+64,
+384
+],
+"transformer.11.feed_forward.w_gate.weight": [
+1536,
+384
+],
+"transformer.11.feed_forward.w_linear.weight": [
+384,
+1536
+],
+"transformer.11.feed_forward.w_up.weight": [
+1536,
+384
+],
+"transformer.11.norm1.scale": [
+384
+],
+"transformer.11.norm2.scale": [
+384
+],
+"transformer.2.attention.w_k.weight": [
+64,
+384
+],
+"transformer.2.attention.w_o.weight": [
+384,
+384
+],
+"transformer.2.attention.w_q.weight": [
+384,
+384
+],
+"transformer.2.attention.w_v.weight": [
+64,
+384
+],
+"transformer.2.feed_forward.w_gate.weight": [
+1536,
+384
+],
+"transformer.2.feed_forward.w_linear.weight": [
+384,
+1536
+],
+"transformer.2.feed_forward.w_up.weight": [
+1536,
+384
+],
+"transformer.2.norm1.scale": [
+384
+],
+"transformer.2.norm2.scale": [
+384
+],
+"transformer.3.attention.w_k.weight": [
+64,
+384
+],
+"transformer.3.attention.w_o.weight": [
+384,
+384
+],
+"transformer.3.attention.w_q.weight": [
+384,
+384
+],
+"transformer.3.attention.w_v.weight": [
+64,
+384
+],
+"transformer.3.feed_forward.w_gate.weight": [
+1536,
+384
+],
+"transformer.3.feed_forward.w_linear.weight": [
+384,
+1536
+],
+"transformer.3.feed_forward.w_up.weight": [
+1536,
+384
+],
+"transformer.3.norm1.scale": [
+384
+],
+"transformer.3.norm2.scale": [
+384
+],
+"transformer.4.attention.w_k.weight": [
+64,
+384
+],
+"transformer.4.attention.w_o.weight": [
+384,
+384
+],
+"transformer.4.attention.w_q.weight": [
+384,
+384
+],
+"transformer.4.attention.w_v.weight": [
+64,
+384
+],
+"transformer.4.feed_forward.w_gate.weight": [
+1536,
+384
+],
+"transformer.4.feed_forward.w_linear.weight": [
+384,
+1536
+],
+"transformer.4.feed_forward.w_up.weight": [
+1536,
+384
+],
+"transformer.4.norm1.scale": [
+384
+],
+"transformer.4.norm2.scale": [
+384
+],
+"transformer.5.attention.w_k.weight": [
+64,
+384
+],
+"transformer.5.attention.w_o.weight": [
+384,
+384
+],
+"transformer.5.attention.w_q.weight": [
+384,
+384
+],
+"transformer.5.attention.w_v.weight": [
+64,
+384
+],
+"transformer.5.feed_forward.w_gate.weight": [
+1536,
+384
+],
+"transformer.5.feed_forward.w_linear.weight": [
+384,
+1536
+],
+"transformer.5.feed_forward.w_up.weight": [
+1536,
+384
+],
+"transformer.5.norm1.scale": [
+384
+],
+"transformer.5.norm2.scale": [
+384
+],
+"transformer.6.attention.w_k.weight": [
+64,
+384
+],
+"transformer.6.attention.w_o.weight": [
+384,
+384
+],
+"transformer.6.attention.w_q.weight": [
+384,
+384
+],
+"transformer.6.attention.w_v.weight": [
+64,
+384
+],
+"transformer.6.feed_forward.w_gate.weight": [
+1536,
+384
+],
+"transformer.6.feed_forward.w_linear.weight": [
+384,
+1536
+],
+"transformer.6.feed_forward.w_up.weight": [
+1536,
+384
+],
+"transformer.6.norm1.scale": [
+384
+],
+"transformer.6.norm2.scale": [
+384
+],
+"transformer.7.attention.w_k.weight": [
+64,
+384
+],
+"transformer.7.attention.w_o.weight": [
+384,
+384
+],
+"transformer.7.attention.w_q.weight": [
+384,
+384
+],
+"transformer.7.attention.w_v.weight": [
+64,
+384
+],
+"transformer.7.feed_forward.w_gate.weight": [
+1536,
+384
+],
+"transformer.7.feed_forward.w_linear.weight": [
+384,
+1536
+],
+"transformer.7.feed_forward.w_up.weight": [
+1536,
+384
+],
+"transformer.7.norm1.scale": [
+384
+],
+"transformer.7.norm2.scale": [
+384
+],
+"transformer.8.attention.w_k.weight": [
+64,
+384
+],
+"transformer.8.attention.w_o.weight": [
+384,
+384
+],
+"transformer.8.attention.w_q.weight": [
+384,
+384
+],
+"transformer.8.attention.w_v.weight": [
+64,
+384
+],
+"transformer.8.feed_forward.w_gate.weight": [
+1536,
+384
+],
+"transformer.8.feed_forward.w_linear.weight": [
+384,
+1536
+],
+"transformer.8.feed_forward.w_up.weight": [
+1536,
+384
+],
+"transformer.8.norm1.scale": [
+384
+],
+"transformer.8.norm2.scale": [
+384
+],
+"transformer.9.attention.w_k.weight": [
+64,
+384
+],
+"transformer.9.attention.w_o.weight": [
+384,
+384
+],
+"transformer.9.attention.w_q.weight": [
+384,
+384
+],
+"transformer.9.attention.w_v.weight": [
+64,
+384
+],
+"transformer.9.feed_forward.w_gate.weight": [
+1536,
+384
+],
+"transformer.9.feed_forward.w_linear.weight": [
+384,
+1536
+],
+"transformer.9.feed_forward.w_up.weight": [
+1536,
+384
+],
+"transformer.9.norm1.scale": [
+384
+],
+"transformer.9.norm2.scale": [
+384
+]
+}

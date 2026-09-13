@@ -1,0 +1,24 @@
+# Scaled CIFAR-10 candidate for a rented multi-GPU node (server stage 2 in docs/cuda_experiment.md).
+#
+# NOT validated for quality locally: only its construction, a few optimizer steps, and the memory/throughput
+# benchmark were run on Apple silicon, where the 256-token sequence is 3.3x slower than patch 4. It keeps
+# every recipe element the local 42M run validated (32-coupling Jet flow, one third of the patch dims
+# autoregressive, 256 mixtures, CFG dropout, RGB noise 32 -> 0, teacher-forcing latent noise, absolute
+# weight decay) and scales what the local machine could not: 2x2 patches (256 tokens, the paper's sequence
+# length), a 512-wide two-block coupling ViT, and a 16x768 transformer. The learning rate follows the
+# paper's square-root batch scaling from the validated 3e-4 at batch 128 (global batch 256 here; the
+# per-rank batch is global / world size). Benchmark memory and throughput before launching.
+batch_size: 64
+torch_compile: true
+input: {val_max_samples_per_class: 384}
+model: {width: 768, depth: 16, mlp_dim: 3072, num_heads: 12}
+image: {patch_size: 2, ar_dim: 4}
+flow: {block_depth: 2, emb_dim: 512, num_heads: 8}
+optimizer: {lr: 0.000424, fused: true}
+eval: {sample_every_epochs: 5, generation_batch_size: 128}
+wandb:
+  offline: true
+  project: jetformer-cifar10-32
+  run_name: CIFAR10-32-cuda-p2-large
+  tags: [cifar10, cuda, p2, large, unvalidated]
+accelerator: {device: cuda, distributed: true}

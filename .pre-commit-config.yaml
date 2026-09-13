@@ -21,3 +21,5 @@ repos:
     rev: v0.15.20
     hooks:
       - id: ruff-check
+        args: [--fix]
+      - id: ruff-format

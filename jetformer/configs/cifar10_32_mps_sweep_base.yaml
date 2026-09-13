@@ -1,0 +1,13 @@
+# Short local sweep base for CIFAR-10 on MPS. Full 3-epoch cosine schedule, no RGB noise
+# curriculum, so the clean validation BPD is a fair architecture comparison signal.
+num_epochs: 3
+input: {val_max_samples_per_class: 200}
+flow: {depth: 8, block_depth: 2}
+training: {noise_scale: 0.0}
+eval: {val_every_epochs: 1, sample_every_epochs: 3, sample_num_images: 10, checkpoint_every_epochs: 3}
+wandb:
+  enabled: false
+  offline: true
+  project: jetformer-cifar10-32
+  run_name: sweep-base
+  tags: [cifar10, mps, sweep]
