@@ -78,17 +78,24 @@ def test_scheduler_warms_up_then_decays():
         create_scheduler(optimizer, ScheduleConfig(warmup_percent=1.0), 10)
 
 
-def test_gradient_norm_and_clipping_match_torch_utilities():
+@pytest.mark.parametrize("device", ["cpu", "mps"])
+def test_gradient_norm_and_clipping_match_torch_utilities(device):
+    if device == "mps" and not torch.backends.mps.is_available():
+        pytest.skip("MPS is unavailable")
     torch.manual_seed(0)
     params = [
-        torch.nn.Parameter(torch.randn(3, 4)),
-        torch.nn.Parameter(torch.randn(5)),
-        torch.nn.Parameter(torch.randn(2)),
+        torch.nn.Parameter(torch.randn(4, 3, device=device).t()),
+        torch.nn.Parameter(torch.randn(5, device=device)),
+        torch.nn.Parameter(torch.randn(2, device=device)),
     ]
     for parameter in params[:2]:
         parameter.grad = torch.randn_like(parameter)
     expected = torch.sqrt(sum(parameter.grad.square().sum() for parameter in params[:2]))
-    torch.testing.assert_close(grad_norm(params), expected)
+    norms = [grad_norm(params) for _ in range(3)]
+    for norm in norms:
+        assert torch.equal(norm, norms[0])
+        torch.testing.assert_close(norm, expected)
+    torch.testing.assert_close(grad_norm([params[1]]), params[1].grad.square().sum().sqrt())
     assert grad_norm([params[2]]).item() == 0.0 and grad_norm([]).item() == 0.0
     reference = [parameter.detach().clone().requires_grad_() for parameter in params[:2]]
     for parameter, twin in zip(params[:2], reference, strict=True):
@@ -101,6 +108,12 @@ def test_gradient_norm_and_clipping_match_torch_utilities():
     assert grad_norm(params) <= 0.5 + 1e-6 and params[2].grad is None
     untouched = clip_grad_norm_(params, 1e6)  # nothing exceeds a huge bound
     torch.testing.assert_close(untouched, grad_norm(params))
+    if device == "mps":
+        low_precision = [torch.nn.Parameter(torch.zeros(1, device=device, dtype=torch.bfloat16)) for _ in range(2)]
+        for parameter, value in zip(low_precision, (3.0, 4.0), strict=True):
+            parameter.grad = torch.full_like(parameter, value)
+        norm = grad_norm(low_precision)
+        assert norm.dtype == torch.float32 and norm.item() == 5.0
 
 
 # ---- accelerator --------------------------------------------------------------------------------

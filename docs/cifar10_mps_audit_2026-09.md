@@ -356,3 +356,26 @@ interquartile spreads of 1.0/3.9 MiB. Five pairs also injected tensor-valued RNG
 metadata sharing source storage; it was released as well. Every model-state hash,
 class name and exported progress field remained exact. This is a 161 MiB reduction
 at the save boundary, not a measured process peak or serialization-time gain.
+
+MPS gradient clipping now concatenates fp32 gradients and computes one dot product
+for their global norm. This replaces 686 separate dot products and a scalar
+reduction, at the cost of a **161 MiB temporary** for this model. Four interleaved
+full-recipe benchmark pairs measured original medians of 574.1–581.1 ms and
+updated medians of 566.0–570.6 ms. Paired savings averaged **10.5 ms**, with
+2.0 ms standard deviation; the median paired improvement was 1.79%. Per-run
+interquartile spreads were 1.0–4.0 ms. The gain is below the 2% rule of thumb,
+but exceeds three times the paired variation and simplifies the reduction.
+
+The validated bf16 batch-128 probe retained exact loss terms, diagnostics and
+norm. The fixed fp32 batch-8 regression changed its norm by one ULP,
+9.0257720947 -> 9.0257711411. An independent fp64 reference bounds the true norm
+near 9.0257715140: both results are adjacent representable values around it,
+and the updated result rounds to nearest. Three same-gradient optimizer replays
+reproduced the historical whole-model states with the old norm and the candidate
+states bit-for-bit with the new norm. This establishes the source of the changed
+post-update rounding without introducing a general parameter tolerance. The local
+regression records those exact derived expectations separately from unchanged-code
+MPS variation. Strided and bf16 gradients, single-gradient inputs, active clipping,
+and queued first/later calls are covered; CPU and CUDA retain their existing path.
+The complete trained-checkpoint regression passes with that reviewed reduction
+expectation, unchanged validation/sample figures, and the 203-test gate.
