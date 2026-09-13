@@ -288,3 +288,19 @@ pre-change CPU and MPS records exactly. Unsynchronized repeated transfer and KV-
 seeded sample statistics, and format-5/6 weight equality also passed. A CPU bf16 test checks
 that validation's cache cannot hide updated weights or suppress subsequent training gradients;
 the complete gate passes with 201 tests. The training step implementation is unchanged.
+
+Interpolation-guided sampling now evaluates the mixture head once per token and constructs
+only the distribution it consumes. At batch 100, 60 interleaved pairs measured median
+**1.073 -> 1.055 s** (1.7% less time; per-call interquartile spreads 27.2/20.9 ms).
+Across six blocks of ten pairs, mean savings were 16.7 ms with 2.8 ms standard deviation;
+every block improved. This small gain also simplifies the sampling loop. All seeded MPS
+pixels and RNG states matched, as did 72 CPU comparisons spanning sampling methods,
+guidance modes and weights, fp32/bf16, and nondefault temperatures. The full regression and
+201-test gate pass; density-guided and unguided sampling perform the same work as before.
+
+Repeated unchanged-code optimizer probes also exposed a small intrinsic MPS variation:
+one BOS embedding weight differed by 1.46e-11 between two whole-model checksums, observed
+six and four times in ten repetitions. Every loss term, diagnostic, and gradient norm was
+exactly equal. MPS embedding backward uses a repeated-index MPSGraph scatter-add. The local
+regression accepts only those two observed full-state fingerprints for this fixed probe;
+it does not widen a general parameter tolerance or relax any scalar checks.

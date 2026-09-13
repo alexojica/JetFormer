@@ -95,15 +95,13 @@ def sample_batch(
             hidden, cache = model.prefill(labels)
         tokens = []
         for position in range(model.image_seq_len):
-            pdf = model.pdf_from_logits(model.head_logits(hidden), **temperatures)
+            logits = model.head_logits(hidden)
+            if guided and sampling.cfg_mode != "density":
+                logits = logits[0::2] + sampling.cfg_weight * (logits[0::2] - logits[1::2])
+            pdf = model.pdf_from_logits(logits, **temperatures)
             if guided and sampling.cfg_mode == "density":
-                token = _draw(CFGDensity(pdf[0::2], pdf[1::2], sampling.cfg_weight), sampling.sample_method)
-            elif guided:
-                logits = model.head_logits(hidden)
-                interpolated = logits[0::2] + sampling.cfg_weight * (logits[0::2] - logits[1::2])
-                token = _draw(model.pdf_from_logits(interpolated, **temperatures), sampling.sample_method)
-            else:
-                token = _draw(pdf, sampling.sample_method)
+                pdf = CFGDensity(pdf[0::2], pdf[1::2], sampling.cfg_weight)
+            token = _draw(pdf, sampling.sample_method)
             tokens.append(token.float())
             if position + 1 < model.image_seq_len:
                 hidden = model.decode_step(token.repeat_interleave(2, dim=0) if guided else token, cache)
