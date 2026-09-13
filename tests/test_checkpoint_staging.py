@@ -2,6 +2,7 @@
 
 import io
 import pickle
+import zipfile
 from collections import OrderedDict
 from types import SimpleNamespace
 
@@ -138,18 +139,18 @@ def test_native_dtype_conflict_with_distinct_storage_wrappers(monkeypatch):
 
 
 @pytest.mark.parametrize("elements", [4, 12], ids=["shrink", "grow"])
-def test_later_storage_resize_retains_native_archive_and_load_failure(monkeypatch, elements):
+def test_later_storage_resize_retains_native_archive(monkeypatch, elements):
     monkeypatch.setattr(staging, "_is_mps_storage", lambda source: source.device.type == "cpu")
     archives = []
     for save in (_native, _save):
         value = torch.arange(8, dtype=torch.float32)[:2]
         archives.append(save([value, _ResizeEarlierStorage(value, elements)]))
     assert archives[0] == archives[1]
-    # Native writes the resized bytes with earlier pickle metadata, then rejects
-    # that invalid record on load. Preserve its behavior, including the error.
-    for archive in archives:
-        with pytest.raises(RuntimeError, match=r"record size .* does not match expected size"):
-            torch.load(io.BytesIO(archive), weights_only=True)
+    # Native records resized bytes with earlier pickle metadata. Older readers
+    # do not validate this mismatch, so inspect the deliberately invalid archive
+    # directly instead of loading it through a version-dependent reader.
+    with zipfile.ZipFile(io.BytesIO(archives[1])) as archive:
+        assert archive.read("archive/data/0") == np.arange(elements, dtype=np.float32).tobytes()
 
 
 def test_pickle_failure_never_starts_transfers(monkeypatch):
