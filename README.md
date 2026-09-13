@@ -220,8 +220,9 @@ Training writes these files atomically under `checkpoints/`:
 - `jetformer_<run_name>_best.pt`: validation-best model weights.
 - `jetformer_<run_name>_last.pt`: rolling model, optimizer, scheduler, and per-rank RNG state.
 - `jetformer_<run_name>_recovery.pt`: mid-epoch state when `eval.checkpoint_every_steps` is positive
-  or a graceful stop is requested (a first `SIGINT`/`SIGTERM` finishes the window and saves; a
-  second interrupts).
+  or a graceful stop is requested. A first `SIGINT`/`SIGTERM` finishes the optimizer window and
+  saves; DDP waits until the next shared logging window or the final window of the epoch so all
+  ranks stop together. A second signal interrupts.
 
 The current format is 6. Format-5 checkpoints (the module layout before September 2026) load for
 sampling and `--init-from` with an automatic parameter-key migration; a stateful `--resume-from`

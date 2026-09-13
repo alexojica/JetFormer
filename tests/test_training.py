@@ -338,8 +338,8 @@ def test_resume_from_the_last_checkpoint_reproduces_the_run(tmp_path, grad_accum
 
 
 def test_recovery_checkpoint_resumes_mid_epoch(tmp_path, monkeypatch):
-    reference = fit(run_config(tmp_path / "ref"))
-    config = run_config(tmp_path / "split", eval={"checkpoint_every_steps": 3})
+    reference = fit(run_config(tmp_path / "ref", logging={"every_batches": 3}))
+    config = run_config(tmp_path / "split", eval={"checkpoint_every_steps": 3}, logging={"every_batches": 3})
     trainer = Trainer(config, Accelerator(config.accelerator))
     original = trainer_module.optimizer_step
 
@@ -359,7 +359,10 @@ def test_recovery_checkpoint_resumes_mid_epoch(tmp_path, monkeypatch):
     monkeypatch.setattr(trainer_module, "optimizer_step", original)
     resumed = fit(
         run_config(
-            tmp_path / "split", eval={"checkpoint_every_steps": 3}, resume_from=str(paths.checkpoint("recovery"))
+            tmp_path / "split",
+            eval={"checkpoint_every_steps": 3},
+            logging={"every_batches": 3},
+            resume_from=str(paths.checkpoint("recovery")),
         )
     )
     assert resumed.resume_batches == 2 and resumed.step == reference.step

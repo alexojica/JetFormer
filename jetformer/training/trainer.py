@@ -407,16 +407,18 @@ class Trainer:
             if sample_every and consumed % sample_every == 0:
                 self._log_samples(f"epoch{epoch + 1}_batch{consumed}")
                 self.acc.barrier()
-            # Poll the stop flag collectively on the logging cadence (or as soon as this rank saw a signal).
-            if (log_due or self.stop.requested) and self.acc.any_process(self.stop.requested):
+            # DDP ranks must poll together; a rank-local signal cannot insert an extra collective.
+            # Check the final window too, so a pending request stops before epoch-end evaluation.
+            poll_stop = log_due or consumed == total or (self.stop.requested and not self.acc.distributed)
+            if poll_stop and self.acc.any_process(self.stop.requested):
                 self.stop.requested = True
                 progress.close()
+                self._save_recovery(epoch, consumed)
                 if self.main:
                     logger.info(
                         "Received %s; wrote a recovery checkpoint and stopped.",
                         self.stop.signal_name or "a stop request",
                     )
-                self._save_recovery(epoch, consumed)
                 self.acc.barrier()
                 return True
         progress.close()

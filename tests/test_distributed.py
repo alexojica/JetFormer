@@ -1,7 +1,9 @@
 """Two-process gloo training on CPU: collectives, DDP wrapping, and multi-rank checkpoints."""
 
 import os
+import signal
 import socket
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -22,6 +24,61 @@ def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+def _check_rank_local_stop(accelerator, root, *, every_batches, grad_accum_steps, signal_rank, expected_step):
+    import jetformer.training.trainer as trainer_module
+    from tests.conftest import tiny_config
+
+    config = tiny_config(
+        output_dir=str(root), num_epochs=1, batch_size=1, grad_accum_steps=grad_accum_steps,
+        accelerator={"device": "cpu", "precision": "fp32", "distributed": True},
+        logging={"every_batches": every_batches}, eval={"sample_every_epochs": 0, "checkpoint_every_steps": expected_step},
+    )  # fmt: skip
+    trainer = Trainer(config, accelerator)
+    original_step = trainer_module.optimizer_step
+    original_save = trainer._save
+    recovery_saves = []
+
+    def signal_after_second_window(*args, **kwargs):
+        result = original_step(*args, **kwargs)
+        if kwargs["step"] == 1 and accelerator.rank == signal_rank:
+            signal.raise_signal(signal.SIGTERM)
+        return result
+
+    def record_save(kind, **kwargs):
+        if kind == "recovery":
+            recovery_saves.append((kwargs["epoch"], kwargs["batches_seen"]))
+        return original_save(kind, **kwargs)
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(trainer_module, "optimizer_step", signal_after_second_window)
+        monkeypatch.setattr(trainer, "_save", record_save)
+        trainer.fit()
+
+    consumed = expected_step * grad_accum_steps
+    assert trainer.stop.requested and trainer.step == expected_step
+    assert recovery_saves == [(0, consumed)]  # periodic save and stop at the same window write once
+    progress = accelerator.gather_objects((trainer.step, trainer._last_recovery))
+    assert progress == [(expected_step, (0, consumed))] * accelerator.world_size
+    paths = RunPaths(root, "tiny-test")
+    recovery_path = paths.checkpoint("recovery")
+    recovery = load_checkpoint(recovery_path)
+    assert (
+        recovery["global_step"] == expected_step
+        and recovery["batches_seen_in_epoch"] == consumed
+        and recovery["epoch"] == recovery["next_epoch"] == 0
+        and len(recovery["rng_state_by_rank"]) == accelerator.world_size
+    )
+    assert not paths.checkpoint("last").exists()  # stop skips epoch-end evaluation/checkpoint hooks
+
+    resumed = Trainer(replace(config, resume_from=str(recovery_path)), accelerator)
+    assert resumed.resume_batches == consumed and resumed.step == expected_step
+    resumed.fit()
+    assert not resumed.stop.requested and resumed.step == resumed.total_steps
+    last = load_checkpoint(paths.checkpoint("last"))
+    assert last["global_step"] == resumed.total_steps and last["next_epoch"] == 1
+    assert last["batches_seen_in_epoch"] == 0
 
 
 def _worker(rank: int, world_size: int, port: int, root: str) -> None:
@@ -76,6 +133,14 @@ def _worker(rank: int, world_size: int, port: int, root: str) -> None:
             validate_resume_config(checkpoint, config, world_size=2)
             fresh = JetFormer.from_config(config, "cpu")
             assert isinstance(fresh, JetFormer)
+        accelerator.barrier()
+        # Signals arrive only on one rank, after a window outside the shared logging cadence.
+        _check_rank_local_stop(
+            accelerator, Path(root) / "stop-log", every_batches=3, grad_accum_steps=1, signal_rank=1, expected_step=4
+        )
+        _check_rank_local_stop(
+            accelerator, Path(root) / "stop-final", every_batches=50, grad_accum_steps=2, signal_rank=0, expected_step=4
+        )
     finally:
         accelerator.cleanup()
 
