@@ -42,7 +42,7 @@ model is a 32-coupling [Jet](https://arxiv.org/abs/2412.15129) normalizing flow 
 8 of the 48 channels of every patch token; the remaining 40 channels are factored out under a unit Gaussian.
 No pretrained tokenizer is involved: the model is a likelihood model of raw pixels.
 
-![Class-conditional samples, CFG 2, temperature 0.7 (rows cycle through the ten classes)](https://huggingface.co/alexojica/jetformer-cifar10-32-42m/resolve/main/samples_cfg2_t0.7.png)
+![Class-conditional samples, CFG 2, temperature 0.7 (rows cycle through the ten classes)](https://huggingface.co/mojique/jetformer-cifar10-32-42m/resolve/main/samples_cfg2_t0.7.png)
 
 ## Files
 
@@ -62,7 +62,7 @@ checkpoint carries its config, so nothing else is needed:
 
 ```bash
 pip install "jetformer[hub] @ git+https://github.com/alexojica/JetFormer.git@v0.1.0"
-jetformer-sample --hf-repo alexojica/jetformer-cifar10-32-42m \
+jetformer-sample --hf-repo mojique/jetformer-cifar10-32-42m \
   --hf-ckpt jetformer_cifar10_32_42m_100ep.pt \
   --out-dir samples/cifar10 --num-images 100 --batch-size 100
 ```
@@ -82,7 +82,7 @@ from jetformer.config import SamplingConfig, config_from_dict
 from jetformer.sampling import sample_images
 from jetformer.training.checkpoint import load_checkpoint, load_model_state
 
-path = hf_hub_download("alexojica/jetformer-cifar10-32-42m", "jetformer_cifar10_32_42m_100ep.pt")
+path = hf_hub_download("mojique/jetformer-cifar10-32-42m", "jetformer_cifar10_32_42m_100ep.pt")
 checkpoint = load_checkpoint(path)
 model = JetFormer.from_config(config_from_dict(checkpoint["config"]), "cuda")  # or "mps" / "cpu"
 load_model_state(model, checkpoint)

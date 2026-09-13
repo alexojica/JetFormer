@@ -135,13 +135,13 @@ python -m jetformer.train --config jetformer/configs/cifar10_32_mps_f32_100ep.ya
 
 The validated 42M CIFAR-10 model (100 epochs; 3.71 clean validation bits per sub-pixel; FID 22.6 and
 Inception Score 7.95 at CFG 2, temperature 0.7) is published on the Hugging Face Hub as
-[`alexojica/jetformer-cifar10-32-42m`](https://huggingface.co/alexojica/jetformer-cifar10-32-42m) with its
+[`mojique/jetformer-cifar10-32-42m`](https://huggingface.co/mojique/jetformer-cifar10-32-42m) with its
 config, a sample grid, and a [model card](docs/model_card_cifar10_42m.md). The checkpoint is format 6 and
 carries its training config, so sampling needs nothing else:
 
 ```bash
 python -m pip install -e ".[hub]"
-jetformer-sample --hf-repo alexojica/jetformer-cifar10-32-42m \
+jetformer-sample --hf-repo mojique/jetformer-cifar10-32-42m \
   --hf-ckpt jetformer_cifar10_32_42m_100ep.pt \
   --out-dir samples/cifar10 --num-images 100 --batch-size 100
 ```
