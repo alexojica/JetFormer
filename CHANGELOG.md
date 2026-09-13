@@ -4,6 +4,48 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.3] - 2026-09-13
+
+### Fixed
+
+- Compiled training now preserves the intended fp32 backward calculation when forward uses autocast.
+  The compiler policy is scoped to each training step, including lazy compilation and later diagnostic
+  variants. This fix uses an API available in PyTorch 2.9 and newer; 2.7/2.8 keep their existing behavior.
+- Distributed graceful stops now coordinate at shared logging or final windows. A signal received by
+  one rank between logging windows no longer inserts a stop collective ahead of another rank's DDP
+  update, allowing ranks to save matching recovery state.
+
+### Changed
+
+- Fp32 MPS sampling folds the single key/value attention head without materializing broadcast copies,
+  reducing measured sampling latency by 27.4%. The optimized path requires disabled gradient recording
+  and autocast; bf16 sampling and training retain their existing attention calculation.
+- Validation reuses autocast weight conversions across the complete pass, reducing measured latency
+  on the 2,000-image CIFAR-10 subset by 13.6%, while retaining about 79 MiB of weight casts until it ends.
+- Interpolation-guided sampling evaluates the mixture head once per token, reducing measured sampling
+  latency by 1.7% and simplifying the decode loop.
+- MPS gradient clipping uses one concatenated dot product for its norm. This saves 10.5 ms per measured
+  optimizer step with a 161 MiB temporary for the validated model. Its fp32 reduction rounding is checked
+  against an independent fp64 reference and exact same-gradient optimizer replays; CPU and CUDA are unchanged.
+- Checkpoint-backed model setup loads weights on CPU before transferring the populated model, reducing
+  measured warm setup time by 7.5–8.0% for format-5 and format-6 files, excluding checkpoint file opening.
+- Trainer setup caches flow parameter membership, saving 96.5 ms while preserving parameter group order.
+- Export releases the source checkpoint mapping before serialization, reducing resident memory at the
+  save boundary by 161 MiB in the measured format-5 export.
+- MPS checkpoint saving batches device-to-host storage copies and waits before the native archive
+  write. Measured complete-save latency falls by 68.2%, at a staging cost of about 483 MiB for the tested
+  optimizer checkpoint. These are warm buffered writes, not durable disk latency; format, storage aliases,
+  device tags and resume state remain compatible.
+- Directory-based MPS quality scoring decodes PNGs in the main process. Loading and extracting Inception
+  features for 2,000 PNGs takes 81.2% less time, with exact features and RNG state. This measurement includes
+  loader setup and teardown but excludes Inception construction and FID covariance calculations.
+
+Performance figures are from interleaved local measurements on an Apple M5 Pro with PyTorch 2.12.1
+and the validated CIFAR-10 model; see the [performance audit](docs/cifar10_mps_audit_2026-09.md)
+for configurations, spreads and correctness checks. They measure separate workloads and are not
+additive. The architecture, validated recipe, precision policy and checkpoint format remain unchanged;
+format 6 loads directly and format-5 weights still migrate.
+
 ## [0.1.2] - 2026-09-13
 
 ### Fixed
@@ -46,6 +88,7 @@ First public release.
 - Validated 42M-parameter CIFAR-10 recipe (3.71 clean validation bits per sub-pixel; FID 22.6 and
   Inception Score 7.95 at CFG 2, temperature 0.7) with published weights on the Hugging Face Hub.
 
+[0.1.3]: https://github.com/alexojica/JetFormer/releases/tag/v0.1.3
 [0.1.2]: https://github.com/alexojica/JetFormer/releases/tag/v0.1.2
 [0.1.1]: https://github.com/alexojica/JetFormer/releases/tag/v0.1.1
 [0.1.0]: https://github.com/alexojica/JetFormer/releases/tag/v0.1.0
