@@ -221,6 +221,11 @@ def validate_resume_config(
     if not isinstance(previous, dict):
         raise RuntimeError("Checkpoint is missing the resolved training config required for a strict resume.")
     states = checkpoint.get("rng_state_by_rank")
+    if "optimizer_state_dict" not in checkpoint and not states:
+        raise RuntimeError(
+            "This checkpoint carries weights only (no optimizer, scheduler, or RNG state), as published "
+            "exports do; use --init-from to start a new run from these weights."
+        )
     if not isinstance(states, list) or len(states) != world_size:
         raise RuntimeError(
             f"Checkpoint holds RNG state for {len(states) if isinstance(states, list) else 0} ranks, "

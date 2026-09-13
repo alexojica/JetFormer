@@ -48,7 +48,8 @@ processes, so it needs a free loopback port.
 
 ## Releasing
 1. Bump `version` in `pyproject.toml` and `CITATION.cff`, and set `date-released` to the release date.
-   `tests/test_imports.py` checks that the two agree with the installed package version.
+   `tests/test_imports.py` checks that the two files agree with each other, and that the installed
+   package reports a real version.
 2. Add the release section and its link to `CHANGELOG.md`.
 3. Run the quality block above; it must be clean.
 4. Tag and push: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.

@@ -40,10 +40,18 @@ biases (`model.gmm_mean_init_std: 0.02`); set it to `0` for literal parity.
 Python 3.10 or newer and PyTorch 2.7 or newer are required.
 
 ```bash
+git clone https://github.com/alexojica/JetFormer.git
+cd JetFormer
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e .
+```
+
+To use the package without a clone, install it from a release tag:
+
+```bash
+python -m pip install "jetformer[hub] @ git+https://github.com/alexojica/JetFormer.git@v0.1.2"
 ```
 
 Optional dependencies are grouped by use case:
@@ -142,7 +150,7 @@ config, a sample grid, and a [model card](docs/model_card_cifar10_42m.md). The c
 carries its training config, so sampling needs nothing else:
 
 ```bash
-python -m pip install -e ".[hub]"
+python -m pip install "jetformer[hub] @ git+https://github.com/alexojica/JetFormer.git@v0.1.2"
 jetformer-sample --hf-repo mojique/jetformer-cifar10-32-42m \
   --hf-ckpt jetformer_cifar10_32_42m_100ep.pt \
   --out-dir samples/cifar10 --num-images 100 --batch-size 100
@@ -244,7 +252,7 @@ jetformer-sample \
   --config jetformer/configs/cifar10_32_mps_f32_100ep.yaml \
   --ckpt checkpoints/jetformer_CIFAR10-32-mps-f32-100ep_last.pt \
   --out-dir eval_metrics/cifar10 --num-images 50000 --batch-size 64 \
-  --fid --kid --is --reference cifar10-train
+  --fid --kid --is --reference cifar10-train --datasets-root data/cifar10
 ```
 
 Launch the same command with `torchrun --nproc-per-node=N -m jetformer.sample` to shard the global
@@ -272,13 +280,13 @@ jetformer/
   paths.py / rng.py    run output locations; seeding and RNG capture/restore
   model/               flow.py (Jet couplings), transformer.py (Gemma blocks, KV cache),
                        attention.py (device-aware kernel), gmm.py (mixture head, CFG density),
-                       patches.py, jetformer.py
+                       patches.py, init.py, jetformer.py
   data/                datasets.py, loaders.py, image.py
   training/            accelerator.py, objective.py (the loss), step.py (one optimizer update),
                        optim.py, checkpoint.py, tracking.py (W&B), trainer.py (the loop)
   sampling.py          class-conditional generation with CFG
   evaluation.py        validation likelihood, torch-fidelity metrics
-  train.py / sample.py / benchmark.py   command-line entry points
+  train.py / sample.py / benchmark.py / export.py   command-line entry points
 ```
 
 ## Documents
