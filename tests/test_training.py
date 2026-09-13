@@ -182,21 +182,23 @@ def test_fidelity_argument_validation(tmp_path):
         compute_torch_fidelity_metrics(tmp_path, **kwargs)
 
 
-def test_fidelity_metrics_are_renamed_and_checked(monkeypatch, tmp_path):
+@pytest.mark.parametrize("device", ["cpu", "mps", "cuda"])
+def test_fidelity_metrics_are_renamed_and_checked(monkeypatch, tmp_path, device):
     calls = []
     module = types.ModuleType("torch_fidelity")
     raw = {"frechet_inception_distance": 3.0, "inception_score_mean": 2.0, "inception_score_std": 0.1, "other": 1}
     module.calculate_metrics = lambda **kwargs: (calls.append(kwargs), dict(raw))[1]
     monkeypatch.setitem(sys.modules, "torch_fidelity", module)
     images = torch.zeros(4, 3, 8, 8, dtype=torch.uint8)
-    common = dict(reference=images, fid=True, kid=False, inception_score=True, device=torch.device("cpu"))
+    common = dict(reference=images, fid=True, kid=False, inception_score=True, device=torch.device(device))
     metrics = compute_torch_fidelity_metrics(
         images, **common, cache_root=tmp_path / "cache", reference_cache_name="ref-1"
     )
     assert metrics == {"fid": 3.0, "is_mean": 2.0, "is_std": 0.1}
     kwargs = calls[0]
     assert isinstance(kwargs["input1"], TensorImages) and isinstance(kwargs["input2"], TensorImages)
-    assert kwargs["cuda"] is False and kwargs["save_cpu_ram"] is True and kwargs["input2_cache_name"] == "ref-1"
+    assert kwargs["cuda"] is (device != "cpu")
+    assert kwargs["save_cpu_ram"] is True and kwargs["input2_cache_name"] == "ref-1"
     assert kwargs["cache_root"] == str(tmp_path / "cache") and (tmp_path / "cache").is_dir()
     for image in range(2):
         (tmp_path / f"{image}.png").write_bytes(b"")
@@ -209,6 +211,7 @@ def test_fidelity_metrics_are_renamed_and_checked(monkeypatch, tmp_path):
         and calls[-1]["datasets_root"] == str(tmp_path)
     )
     assert "cache_root" not in calls[-1]
+    assert calls[-1]["save_cpu_ram"] is (device != "cuda")
     module.calculate_metrics = lambda **kwargs: {"inception_score_mean": 2.0}
     with pytest.raises(RuntimeError, match="requested"):
         compute_torch_fidelity_metrics(images, **common, cache_root=None)

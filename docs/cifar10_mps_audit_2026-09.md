@@ -403,3 +403,17 @@ MPS update matches all 686 parameter tensors in a previously recorded native
 invocation exactly. This is observed native repeatability, with no parameter
 tolerance or extension of the earlier gradient-norm replay. The complete gate
 passes 226 tests, Ruff and Vulture.
+
+Directory-based MPS quality scoring now decodes PNGs in the main process. The
+four DataLoader workers previously selected by torch-fidelity added substantial
+cost on this macOS runtime. Four interleaved pairs with the same cached Inception
+extractor, image order and batch size 64 measured **21.791 -> 0.689 s** for 256
+32x32 PNGs (interquartile spreads 0.016/0.031 s), and **28.372 -> 5.329 s** for
+2,000 PNGs (spreads 0.050/0.031 s). The larger case saves 23.040 s on average,
+with 0.060 s standard deviation across pairs, an 81.2% median improvement.
+These timings cover PNG loading and feature extraction, including worker setup
+and teardown; they exclude Inception construction and FID covariance algebra.
+Every feature byte and consumed CPU/MPS RNG state matches the first extraction
+across all warm-up and measured calls. This uses the existing sequential reader
+and keeps PNG input memory bounded by its batches. CUDA directory inputs continue to
+use workers; tensor inputs already load in-process.

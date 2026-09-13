@@ -153,10 +153,10 @@ def compute_torch_fidelity_metrics(
         "kid": bool(kid),
         "batch_size": int(batch_size),
         "samples_find_deep": False,
-        # torch-fidelity derives its worker count from this flag: false means four forked loader
-        # processes. They only pay off when the inputs are image files to decode, and forking after
-        # Metal is initialised kills them, so in-memory tensors always feed the extractor in-process.
-        "save_cpu_ram": device.type == "cpu" or torch.is_tensor(generated) or torch.is_tensor(reference),
+        # False starts four DataLoader workers. Measured MPS PNG feature passes save 21-23 s
+        # with in-process loading, also used for resident tensors. CUDA image files
+        # retain workers to overlap decoding with feature extraction.
+        "save_cpu_ram": device.type != "cuda" or torch.is_tensor(generated) or torch.is_tensor(reference),
         "verbose": False,
     }
     if datasets_root is not None:
