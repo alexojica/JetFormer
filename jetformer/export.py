@@ -17,7 +17,6 @@ from jetformer.model.jetformer import JetFormer, count_parameters
 from jetformer.training.checkpoint import (
     CHECKPOINT_FORMAT_VERSION,
     checkpoint_class_names,
-    compact_metadata,
     load_checkpoint,
     load_model_state,
     save_checkpoint,
@@ -50,24 +49,27 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     model = JetFormer.from_config(config, "cpu")
     load_model_state(model, source)
-    metadata = compact_metadata(source)
-    epoch = int(metadata.get("epoch") or 0)
+    class_names = checkpoint_class_names(source, config)
+    epoch = int(source.get("epoch") or 0)
+    progress = {
+        "epoch": epoch,
+        "next_epoch": epoch + 1,
+        "batches_seen_in_epoch": 0,
+        "global_step": int(source.get("global_step") or 0),
+        "best_val_loss": float(source.get("best_val_loss", math.inf)),
+    }
+    # Keep only export metadata so the source mapping, including any tensor RNG records, can close.
+    del source, stored
     path = save_checkpoint(
         args.out,
         model=model,
         optimizer=None,
         scheduler=None,
         config=config,
-        progress={
-            "epoch": epoch,
-            "next_epoch": epoch + 1,
-            "batches_seen_in_epoch": 0,
-            "global_step": int(metadata.get("global_step") or 0),
-            "best_val_loss": float(metadata.get("best_val_loss", math.inf)),
-        },
+        progress=progress,
         # No RNG state: a published checkpoint starts new runs (--init-from), it does not resume one.
         rng_state_by_rank=[],
-        class_names=checkpoint_class_names(source, config),
+        class_names=class_names,
     )
     counts = count_parameters(model)
     print(

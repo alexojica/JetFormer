@@ -347,3 +347,12 @@ interquartile spreads of 0.306/0.009 ms. Every parameter identity and list posit
 remains exact, with complete, disjoint groups; no tensor arithmetic changes. The
 temporary identity set is about 52 KB. This saves 96.5 ms during trainer setup;
 the complete startup contribution was not separately timed.
+
+Export now extracts its class names and scalar progress before releasing the source
+checkpoint, so serialization does not overlap the populated CPU model with the
+source memory mapping. Ten interleaved process pairs on the trained format-5 file
+measured resident memory at the save boundary of **605.2 -> 444.3 MiB**, with
+interquartile spreads of 1.0/3.9 MiB. Five pairs also injected tensor-valued RNG
+metadata sharing source storage; it was released as well. Every model-state hash,
+class name and exported progress field remained exact. This is a 161 MiB reduction
+at the save boundary, not a measured process peak or serialization-time gain.

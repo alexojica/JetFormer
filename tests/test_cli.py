@@ -1,11 +1,13 @@
 import json
 import sys
 import types
+import weakref
 
 import pytest
 import torch
 import yaml
 
+import jetformer.export as export_module
 import jetformer.sample as sample_module
 import jetformer.training.trainer as trainer_module
 from jetformer.benchmark import main as benchmark_main
@@ -268,9 +270,25 @@ def test_sample_cli_requires_a_config_for_older_checkpoints(tmp_path, capsys):
 # ---- export ----
 
 
-def test_export_writes_a_weights_only_checkpoint(checkpoint, tmp_path, capsys):
+def test_export_writes_a_weights_only_checkpoint(checkpoint, tmp_path, capsys, monkeypatch):
     out = tmp_path / "published.pt"
-    export_main(["--ckpt", str(checkpoint), "--out", str(out), "--set", "wandb.enabled=false"])
+    source_tensors = []
+
+    def load_source(path):
+        source = load_checkpoint(path)
+        source_tensors.extend(weakref.ref(value) for value in source["model_state_dict"].values())
+        # Metadata must not keep a source storage alive after export has copied the weights.
+        source["rng_state_by_rank"] = [{"cpu": next(iter(source["model_state_dict"].values()))}]
+        return source
+
+    def save_export(*args, **kwargs):
+        assert source_tensors and all(reference() is None for reference in source_tensors)
+        return save_checkpoint(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(export_module, "load_checkpoint", load_source)
+        patch.setattr(export_module, "save_checkpoint", save_export)
+        export_main(["--ckpt", str(checkpoint), "--out", str(out), "--set", "wandb.enabled=false"])
     assert "weights only" in capsys.readouterr().out
     exported = load_checkpoint(out)
     assert exported["format_version"] == 6 and exported["rng_state_by_rank"] == []
