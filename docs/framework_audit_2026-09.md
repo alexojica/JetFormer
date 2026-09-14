@@ -210,6 +210,33 @@ All returned the same scalar, with relative error 5.85e-9 against CPU fp64, and 
 across three queued calls. Keep the existing MPS workaround; a newer API name is not evidence
 of a faster kernel. The concatenation's 161 MiB temporary remains an explicit tradeoff.
 
+## Native fp32 MPS attention proposal
+
+PyTorch 2.14's native no-grad attention passes the tested causal, input/cache and queued-repeat
+guards. An independent CPU fp64 calculation on 19 captured fp32 cases finds comparable error for
+native and current attention: maximum trained absolute errors are 1.285e-6 and 1.304e-6. Both fit
+the declared, input-derived rounding envelope. That envelope is conditional on documented arithmetic
+assumptions; it does not prove opaque kernel internals or grant whole-model acceptance. Trained flow
+round-trip, cross-inverse and log-determinant checks also pass their existing tolerances.
+
+Four alternating sampling pairs on the same trained fixture measured:
+
+| Sampling 100 images | Current attention | Native fp32 proposal | Median time reduction |
+| --- | ---: | ---: | ---: |
+| fp32 | 694.275 ms (IQR 5.530) | 490.812 ms (IQR 2.409) | 29.306% |
+| bf16, retaining the fp32 flow inverse | 911.021 ms (IQR 3.768) | 901.686 ms (IQR 3.576) | 1.025%, below noise threshold |
+
+The fp32 median paired saving is 201.688 ms, with paired SD 10.160 ms. The bf16 paired SD is
+7.217 ms; its smaller apparent gain is inconclusive. This proposal changes only eligible fp32
+no-grad calls, so bf16 decoder attention and training keep their current implementations.
+
+The unchanged latest-runtime full regression still reports 31 strict mismatches in fp32 objective
+diagnostics, a cache mean and the fp32 validation AR term. Total validation loss is unchanged for
+all three split/precision checks; sample statistics satisfy the existing bounds. The proposal
+remains unadopted: these observations and a large timing gain do not erase the strict failures or
+establish a new whole-model tolerance. The isolated shape restrictions are an experiment boundary,
+not a new production dispatch policy.
+
 ## Accumulation-window autocast caching
 
 The adopted accumulation implementation keeps autocast's weight casts alive across microbatches, explicitly
