@@ -540,3 +540,39 @@ All 686 gradient tensors differ across runtimes, with aggregate relative L2 diff
 (0.1775%) and maximum absolute difference 0.000994861. These figures describe one captured case;
 they are not acceptance tolerances. The older standard-deviation failure remains preserved, as do
 the original full-regression failures. No numerical-stack migration is adopted automatically.
+
+## Compiler RNG refinement: retain native dropout
+
+The initial partial compiler's complete regression finishes with 18 strict failures, all confined to
+the MPS training update. Checkpoint migration, CPU results, eager objectives, cache/transfer guards,
+sampling and validation pass. The documented `fallback_random=True` option alone does not repair
+MPS eager equivalence: its native dropout kernel advances RNG differently from eager `F.dropout`
+and scales bf16 values differently. Focused first/cold and repeated tests preserve these failures.
+Sources: [compiler options](https://docs.pytorch.org/docs/2.14/generated/torch.compile.html),
+[native MPS dropout](https://github.com/pytorch/pytorch/blob/08187d9e0fba026dc8217405802ab5381dc88d90/aten/src/ATen/native/mps/operations/Dropout.mm).
+
+A more conservative prototype keeps all 12 dropout module forwards eager using public
+`torch.compiler.disable`, while using `fallback_random=True` for other random operations and the
+existing GMM boundary/buffer cap. Actual decoder-sized single, serial and branched dropout tests
+are byte-exact in outputs, gradients and RNG on fp32/bf16, including the first compiled call.
+
+Four process AB/BA pairs retain most of the optimizer-step gain:
+
+| Complete step, native dropout/RNG proposal | Eager | Partial compile |
+| --- | ---: | ---: |
+| Median of four run medians | 502.315 ms | 294.102 ms |
+| Interquartile range | 1.171 ms | 1.513 ms |
+| Standard deviation | 1.606 ms | 1.153 ms |
+
+This is **41.45% less step time**. Paired median saving is 207.630 ms, SD 1.220 ms. CPU and MPS RNG
+endpoint hashes after 13 updates match in all four pairs; endpoint equality alone does not prove
+assignment of every random draw to its consumer. Captured nonempty Adam updates again replay
+exactly three times per path, including all moments, parameters, clipped gradients and norms.
+
+The complete regression for this variant retains **seven strict failures**. Total fp32 loss is
+bit-identical; AR bpd and log-scale mean differ by one ULP, flow log-determinant per patch by two ULP,
+and gradient norm by one ULP. Post-update parameters also differ. Other regression sections pass.
+These results narrow the outstanding numerical question substantially, but do not automatically
+approve tolerances, new parameter states or a runtime migration. Production still uses the validated
+runtime and rejects MPS compilation. A per-model integration and its persistent-method behavior in
+validation/sampling also need review; the regression prototype restores its temporary boundaries.
