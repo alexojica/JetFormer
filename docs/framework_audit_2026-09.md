@@ -765,3 +765,44 @@ region. This narrows the investigation without identifying a unique cache/guard 
 waiving the original failure. The passing isolated cases and complete-objective diagnostic
 checks remain separately scoped evidence. No production compilation policy, dependency,
 numerical acceptance criterion or throughput claim changes.
+
+### Native flow GELU: better arithmetic agreement at a measured cost
+
+A fixed per-model 2.12 candidate keeps the existing GELU operation eager in all 32 flow
+MLPs. It preserves the operation, approximation and precision contexts while compiling
+the surrounding work. Fifteen queued trained B128 forward/backward calls retain standard
+compiled anchors, observation controls, every gradient and the 29 actual random tensors.
+All random tensors and consumer labels match. Repeated calls and observation retain only
+the previously recorded embedding-gradient variation; inputs and parameters are unchanged.
+
+| Bf16 arithmetic against eager, fixed trained batch | Existing partial compiler | With native flow GELU |
+| --- | ---: | ---: |
+| Total-loss difference, bpd | 0.000535011 | 0.000010490 |
+| All-gradient relative L2 difference | 0.1723% | 0.0549% |
+| Flow-gradient relative L2 difference | 0.1708% | 0.0508% |
+| Decoder-gradient relative L2 difference | 0.6223% | 0.5449% |
+
+The flow-gradient gap shrinks 3.36-fold, but this does not establish numerical acceptance.
+The complete original regression retains **12 strict failures** in the compiled fp32 update:
+seven metric fields, three parameter-summary fields and two existing case-certificate checks.
+Total loss changes by one ULP. Other sections pass, including checkpoint migration, queued
+transfer/cache guards, sampling and repeated validation at 3.7056821/3.6977547/3.6973441 bpd.
+Evaluation restores the trained checkpoint; it does not assess compiled-training convergence.
+
+An initial six-order, three-variant timing run suffers severe late drift, with eager worker
+medians rising from about 634 to 1,036 ms. All 18 workers remain recorded; earlier blocks
+are not selected to claim a gain. After cooling, four shorter direct AB/BA pairs show:
+
+| Compiler variant | Median step, ms | IQR of worker medians, ms | SD of worker medians, ms |
+| --- | ---: | ---: | ---: |
+| Existing partial compiler | 507.942 | 0.213 | 0.322 |
+| Native flow GELU | 524.218 | 0.355 | 0.545 |
+
+The boundary costs **3.20%**, with a paired median cost of 16.356 ms, IQR 0.254 ms and
+SD 0.347 ms. Each worker uses three warmup and ten synchronized timed optimizer updates.
+Its first reference worker has a larger within-run IQR of 11.638 ms; all raw samples remain
+available. RNG endpoints match in every pair. This direct comparison quantifies the cost
+against the earlier compiler proposal; it does not measure a new gain over eager execution.
+Captured-region invocations increase from 40 to 298 per objective call, although these counts
+alone do not attribute the timing cost to Python or GPU work. The candidate remains an
+unadopted arithmetic/performance tradeoff. Production source and the numerical stack are unchanged.
