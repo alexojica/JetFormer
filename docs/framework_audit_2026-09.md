@@ -678,3 +678,56 @@ every draw's assignment. Native/compiled arithmetic and actual random operands s
 attribution before accepting this option. No tolerance, baseline, parameter-state union, production
 compiler setting or dependency version changed. The successful backport reduces the migration
 requirement; it does not remove the numerical qualification requirement.
+
+## Compiler random operands and gradient attribution
+
+The next diagnostic captures native random operations inside the compiled backend callable,
+after Dynamo's guards, and inside the existing eager dropout boundaries. It delegates graph
+compilation to the installed Inductor implementation. Standard uninstrumented compiled calls,
+an uninstrumented observation backend, and eager controls verify the observer's behavior.
+The [custom-backend contract](https://docs.pytorch.org/docs/stable/user_guide/torch_compiler/torch.compiler_custom_backends.html)
+supports returning a callable for each captured FX graph; this diagnostic is not production code.
+
+Fifteen queued trained B128 forward/backward calls per runtime retain all parameter gradients.
+On **both 2.12 and 2.14, all 29 actual random-output tensors match byte-for-byte**, with identical
+operation order and dropout consumer labels across eager and compiled captures. Captured compiled
+calls execute the cached regions without further backend compilation. Uninstrumented cold calls
+are retained separately; the random-output observations are of cached execution.
+
+Metrics, RNG states and 685 of 686 gradients are unchanged by observation. The embedding gradient
+retains small differences also present in uninstrumented compiled repetitions. Those differences
+remain recorded; this is not a claim of exact transparency for that final gradient tensor.
+Parameters and input buffers remain unchanged. This rules out changed random draws as the cause
+of the observed cached-execution arithmetic gap in these cases.
+
+| Runtime, bf16 recipe at the first update | Loss difference, bpd | All-gradient relative L2 difference | Decoder-gradient relative L2 difference |
+| --- | ---: | ---: | ---: |
+| PyTorch 2.12.1 | 0.000535011 | 0.1723% | 0.6223% |
+| PyTorch 2.14.0 | 0.000000954 | 0.04845% | 0.4020% |
+
+These are descriptive comparisons of actual uninstrumented eager/compiled gradients, accumulated
+in CPU float64. They are not acceptance tolerances. A nearly identical total loss does not establish
+identical derivatives. Original strict regression failures, optimizer certificates and baselines
+remain unchanged.
+
+### Coupling localization and compilation-history guard
+
+The first trained coupling supplied an actual `[128, 64, 24]` conditioning tensor. A retained
+lease preserves its original `(3072, 48, 1)` strides and zero offset. Separate variants keep
+Linear, GELU or LayerNorm eager while compiling the remaining coupling network. Native GELU
+reduces the log-determinant RMS difference from 0.060834 to 0.001673 in this local forward test.
+Native Linear leaves the first outputs unchanged from the fully compiled coupling; native
+LayerNorm only slightly reduces the average discrepancy. Boundaries also change neighboring
+fusion, so this localizes a region without proving a unique primitive cause. The older native
+GELU constructs constants in the input dtype, while the newer implementation calls `GeluKernel`.
+Sources: [2.12 activation implementation](https://github.com/pytorch/pytorch/blob/7269437d655783a26cba32aa88195b741ff496aa/aten/src/ATen/native/mps/operations/Activation.mm),
+[2.14 activation implementation](https://github.com/pytorch/pytorch/blob/08187d9e0fba026dc8217405802ab5381dc88d90/aten/src/ATen/native/mps/operations/Activation.mm).
+
+The mixed-variant process also exposes a **first/later output failure** in three compiled
+variants. All original failures remain recorded. When each native/candidate pair runs in a
+separate process, three calls per variant are exact. Inputs, weights, native controls and each
+candidate's first output are byte-identical across both histories. This removes other compiled
+variants but also changes allocation and compilation history; it does not identify a unique
+cause. The passing isolated tests do not override the original failure. A whole-objective
+specialization check is needed before drawing broader compiler-safety conclusions. There is
+no new throughput measurement or accepted numerical tolerance from this localization work.
