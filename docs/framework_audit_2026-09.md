@@ -447,3 +447,50 @@ No JIT, GIL, allocator or GC override is adopted without workload evidence. In p
 Sources: [current Python 3.14 changes](https://docs.python.org/3.14/whatsnew/3.14.html),
 [NumPy thread safety](https://numpy.org/doc/stable/reference/thread_safety.html),
 [SciPy thread safety](https://docs.scipy.org/doc/scipy/tutorial/thread_safety.html).
+
+## Partial MPS compilation: measured diagnostic opportunity
+
+The supported fusion-buffer cap makes partial compilation executable on PyTorch 2.14. A follow-up
+screen retained every gradient tensor from three queued eager and compiled calls, then measured
+three ABBA blocks, with two warm-up and six timed forward/backward calls per group. All timer reads
+follow MPS synchronization. This control disables dropout and augmentation and performs no optimizer
+update; it measures compiler potential rather than the validated training recipe.
+
+| Deterministic forward/backward | Eager | Partial compile |
+| --- | ---: | ---: |
+| Median of six group medians | 480.580 ms | 267.531 ms |
+| Interquartile range | 2.583 ms | 0.480 ms |
+| Standard deviation | 3.133 ms | 0.350 ms |
+
+The reduction is **44.33%**; mean saving across paired ABBA blocks is 214.288 ms, SD 2.019 ms.
+The first three compiled calls, including compilation, took 30.711 s. Repeated calls within each
+path differ only in the embedding gradient. Cross-path loss terms still differ, and the complete
+gradient vector has relative L2 difference 0.000499244. These are retained numerical failures,
+not an approved tolerance. No compiler policy was changed in production. The stochastic graph,
+optimizer updates and full trained-checkpoint regression remain separate requirements.
+
+## Isolating runtime arithmetic from random draws
+
+A version-pinned diagnostic captures native random outputs before their consumers and replays them
+while still executing native RNG operations. This preserves RNG advancement and dropout's native
+multiply/divide ordering. Actual-size fp32/bf16 dropout controls pass on both runtimes, including
+nonfinite values, signed zeros, transposed inputs and three queued first/later groups.
+
+The trained bf16 control retains all parameter gradients and uninstrumented anchors. On both
+runtimes, embedding indices, outputs and incoming fp32 cotangents match exactly across native,
+capture and replay paths. Retained views and clones agree, and the embedding backward's returned
+gradient matches the parameter gradient. All other parameter gradients are exact.
+
+Nine captured embedding sums per runtime fit the pre-existing input-derived exact-dyadic rounding
+bound. Maximum bound utilization is 0.291 on 2.12 and 0.173 on 2.14. The older implementation uses
+MPSGraph ScatterND Add; 2.14 uses a direct Metal float32 atomic sum. This explains why exact
+repeatability of the reduction is not a reasonable universal assumption, but the bound remains a
+conditional arithmetic model and does not authorize different optimizer states or weights.
+Versioned sources: [2.14 embedding dispatch](https://github.com/pytorch/pytorch/blob/08187d9e0fba026dc8217405802ab5381dc88d90/aten/src/ATen/native/mps/operations/Embedding.mm),
+[Metal accumulation](https://github.com/pytorch/pytorch/blob/08187d9e0fba026dc8217405802ab5381dc88d90/aten/src/ATen/native/mps/kernels/Embedding.metal).
+
+The older runtime also produced one large standard-deviation diagnostic discrepancy (0.115418)
+in this extended control. Its actual reduction input was not captured, so this run cannot establish
+the cause; the earlier unresolved native-reduction evidence remains relevant. The latest runtime's
+diagnostics were exact in this control. Both strict comparison failures remain preserved. There is
+no new allowed-state union, broadened regression tolerance or automatic numerical-stack upgrade.
