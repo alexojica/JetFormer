@@ -845,3 +845,48 @@ Metal loads low-precision storage into float computation values and emits explic
 casts. Version 2.14 separately enables saved-output precision emulation by default. This is
 evidence for testing the existing compiler controls on MPS, not proof of their generated-code
 behavior, full-model correctness or performance. No compiler option has been adopted.
+
+### Metal precision-emulation coverage and cost
+
+Direct tests confirm that `emulate_precision_casts=True` affects Metal execution on both
+runtimes. Three synthetic bf16 cases each queue fifteen forward/backward calls across eager,
+standard compiled and observed-backend controls. Generated Metal source retains casts inside
+the fused shaders. All repeatability and observation comparisons are exact, and inputs/RNG
+remain unchanged. These focused inputs are separate from the trained-model fixture.
+
+The option makes the arithmetic-chain and RoPE outputs and gradients byte-identical to eager
+execution on both runtimes. GELU remains different on 2.12. On 2.14, the gated-GELU output
+and up-gradient are exact; the gate-gradient RMS difference falls from 0.002208 to 0.000003439,
+about 642-fold, but remains nonzero.
+
+The complete trained B128 objective shows much less improvement:
+
+| Runtime | Aggregate gradient relative L2, default → emulated | Decoder gradient relative L2, default → emulated |
+| --- | ---: | ---: |
+| 2.12.1 | 0.17231% → 0.17183% | 0.62227% → 0.62728% |
+| 2.14.0 | 0.04845% → 0.04747% | 0.40200% → 0.37411% |
+
+All 29 actual random tensors and consumer labels match. Standard compiled anchors, repeated
+calls and observed execution retain only the recorded embedding-gradient variation; inputs
+and parameters remain unchanged. Local rounding fixes therefore do not explain most of the
+full-model discrepancy.
+
+The complete original regressions still fail: eleven strict checks on 2.12 against the
+validated reference, and seven on 2.14 against its preserved same-runtime eager reference.
+On 2.14, all 439 non-time results match the previous compiler proposal exactly. On 2.12,
+only the three parameter-summary fields differ from that previous proposal; their cause is
+unassigned, and no new state variant is accepted. Original cross-runtime migration failures
+and all numerical acceptance criteria remain unchanged.
+
+After cooling, four direct AB/BA process pairs on 2.14 give:
+
+| Compiler option | Median step, ms | IQR of worker medians, ms | SD of worker medians, ms |
+| --- | ---: | ---: | ---: |
+| Default precision behavior | 303.830 | 0.781 | 0.466 |
+| Precision emulation enabled | 312.649 | 1.105 | 1.539 |
+
+The cost is **2.90%**: paired median 8.717 ms, IQR 1.122 ms and SD 1.812 ms. Each worker
+uses three warmup and ten synchronized timed optimizer updates; every pair has identical
+CPU/MPS RNG endpoints. This comparison measures the option's cost within the compiler
+proposal, not an eager speedup. The local numerical benefit does not clear the complete
+regression or remove most of the gradient gap, so the option is not adopted.
