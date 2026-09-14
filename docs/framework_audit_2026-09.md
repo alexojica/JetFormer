@@ -296,3 +296,42 @@ Exact image, label, order and RNG guards cover disabled, partial and always-on f
 indices, tail batches and validation's forced no-flip policy. The complete trained CPU/MPS regression
 passes its original rules, and all 253 tests, Ruff lint/formatting and Vulture pass. This is a small
 cleanup under the simpler-code exception, not an optimizer-step speedup.
+
+## Latest stable Python qualification
+
+Python 3.14.7, released August 5, is the latest stable release checked on September 14. An isolated
+environment installed the same 107 package versions as the Python 3.12 comparison environment.
+The actual arm64 interpreter enables tail-call dispatch, PGO and thin LTO, with the regular GIL and
+the experimental Python JIT disabled. The scientific packages supply compatible native wheels;
+rebuilding Python simply to enable tail calls would duplicate the inspected build configuration.
+Sources: [Python 3.14.7](https://www.python.org/downloads/release/python-3147/),
+[tail-call build options](https://docs.python.org/3.14/using/configure.html#cmdoption-with-tail-call-interp).
+
+The initial 249-test gate, including actual two-rank compiled execution, passes on 3.14.7. The full
+trained-checkpoint regression against Python 3.12 with the same PyTorch/NumPy versions also passes:
+all 439 non-timing scalar results and complete post-update parameter comparisons are exact. This
+qualifies the Python change separately from the unresolved PyTorch/NumPy numerical migration above.
+
+Four alternating optimizer-step pairs measured 516.606 ms on Python 3.12 and 515.837 ms on 3.14.
+The 0.149% difference is within noise: mean paired saving 0.986 ms, paired SD 0.953 ms. There is no
+meaningful Python-only training speedup. Sampling comparisons developed severe late drift on both
+runtimes (bf16 run-median SD 216/104 ms; fp32 202/104 ms), so they are inconclusive. Their full raw
+results are retained; no sampling gain is attributed to the interpreter upgrade.
+
+Actual offline smoke checks also pass for ArrayRecord random reads, TFDS example serialization and
+image decoding, Hugging Face Arrow save/reload/image-label batching, and W&B's disabled mode. These
+tiny integration checks do not substitute for real ImageNet data or an online tracking run.
+The actual Inception extractor also loads the existing weights with all 566 state tensors exact;
+the checkpoint's bytes and modification time remain unchanged. This checks loading, not FID values.
+Three queued MPS checkpoint staging/save round trips preserve tensor bytes, optimizer and scheduler
+state, RNG, aliases and device tags, including error cleanup. That small-model serializer probe
+complements the trained format-5/6 loading checks; it does not measure whole-model save time or peak
+memory. After the subsequent floor-compatibility tests, all 265 tests pass on both runtimes.
+
+The optional JIT remains experimental. Free-threaded Python does not parallelize the ordered model
+steps automatically, and NumPy/SciPy still describe their free-threaded support as experimental.
+No JIT, GIL, allocator or GC override is adopted without workload evidence. In particular, Python
+3.14.5 restored generational GC; the withdrawn incremental collector is not a 3.14.7 optimization.
+Sources: [current Python 3.14 changes](https://docs.python.org/3.14/whatsnew/3.14.html),
+[NumPy thread safety](https://numpy.org/doc/stable/reference/thread_safety.html),
+[SciPy thread safety](https://docs.scipy.org/doc/scipy/tutorial/thread_safety.html).
