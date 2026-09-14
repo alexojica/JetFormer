@@ -576,3 +576,68 @@ These results narrow the outstanding numerical question substantially, but do no
 approve tolerances, new parameter states or a runtime migration. Production still uses the validated
 runtime and rejects MPS compilation. A per-model integration and its persistent-method behavior in
 validation/sampling also need review; the regression prototype restores its temporary boundaries.
+
+## Per-model compiler integration and eager sampling cost
+
+The follow-up proposal configures each model once. Its GMM boundary is the existing
+`model.pdf_from_logits` method; dropout boundaries belong to the model's module instances.
+It does not replace a global GMM function. Parameter identities, ordering and state-dict keys
+remain unchanged. The boundaries persist through eager consumers of that same model.
+This uses the public [compiler-disable API](https://docs.pytorch.org/docs/2.14/generated/torch.compiler.disable.html).
+
+The complete regression exercises these persistent boundaries from model construction onward.
+All **439 non-time results match the previous native-RNG compiler prototype**, including the
+post-update parameter fingerprint, checkpoint migration, queued transfer/cache guards, sampling
+and validation. The same seven strict differences from eager 2.14 remain; this establishes
+integration parity with the proposal, not numerical acceptance against eager or the validated runtime.
+
+Four new AB/BA process pairs preserve the training benefit:
+
+| Complete step, per-model proposal | Eager 2.14 | Partial compile |
+| --- | ---: | ---: |
+| Median of four run medians | 438.453 ms | 253.852 ms |
+| Interquartile range | 7.932 ms | 0.547 ms |
+| Standard deviation | 8.904 ms | 0.800 ms |
+
+The paired median saving is 184.187 ms, SD 9.128 ms; the median step reduction is **42.10%**.
+CPU and MPS RNG endpoint hashes after all 13 updates match in every pair. Eager controls drifted
+upward during this session, and both paths were faster than in the preceding session. The lower
+absolute times therefore do not establish an additional improvement from moving the boundary.
+The large within-session paired saving remains clear. These are synthetic B128 inputs with the
+trained weights and unchanged optimizer-step recipe, not a new historical-baseline measurement.
+
+Four additional pairs measured eager B100 sampling with the persistent wrappers. Fp32 medians
+were 625.842/629.376 ms, IQR 3.280/6.664 ms; bf16 medians were 812.816/830.486 ms,
+IQR 10.278/23.165 ms. The candidate was 0.56% and 2.17% slower respectively, but paired
+differences were small relative to their spread: median costs 5.237/5.298 ms, SD 4.971/24.682 ms.
+This does not establish a stable sampling-cost estimate or zero overhead. Three queued first/later
+sample calls per worker, retained sample bytes, statistics and RNG endpoints matched within and
+across both paths. The same-runtime byte comparison supplements the sample-statistic guard;
+it is not a new cross-kernel bf16 hash requirement. No production compiler policy is adopted.
+
+A CPU dispatch-only check narrows the wrapper cost. Six ABBA blocks of eval-mode dropout
+measured 0.834/0.966 microseconds per module call; paired added cost was 0.130 microseconds,
+SD 0.002 microseconds. The tensor alias and RNG state were exact. Multiplying by the decoder's
+1,536 dropout calls per 64-token sample gives about 0.200 ms of isolated Python overhead.
+That projection excludes the PDF boundary and interactions with GPU execution. It does not
+explain all the noisy end-to-end difference or justify a more complicated wrapper bypass.
+
+## Native Metal matmul preference: rejected
+
+The documented `PYTORCH_MPS_PREFER_METAL=1` option changes MPS matmul dispatch.
+The version-pinned implementation checks whether the variable is present, so the reference
+worker leaves it unset. CPU fallback and fast math remain unset in both workers.
+Sources: [MPS environment variables](https://docs.pytorch.org/docs/2.14/mps_environment_variables.html),
+[2.14 matrix dispatch](https://github.com/pytorch/pytorch/blob/08187d9e0fba026dc8217405802ab5381dc88d90/aten/src/ATen/native/mps/operations/LinearAlgebra.mm).
+
+Four process AB/BA pairs tested all 24 distinct matrix shapes, dtypes and strides from the
+latest training trace, using fixed synthetic operands and synchronized `torch.utils.benchmark.Timer`.
+They represent 483 `aten::mm` calls in that trace. Every tested layout was slower with the flag:
+the ratios ranged from **1.60 to 22.61 times the default duration**. Multiplying each isolated
+median by its observed call count gave 138.889/1,592.816 ms, IQR 0.165/10.608 ms,
+SD 0.105/7.645 ms. These weighted sums are not GPU phase timings or a full-step prediction.
+
+Three queued repetitions per worker were exact and inputs remained unchanged. Output bytes
+differed between dispatch choices in all 24 cases; no numerical acceptance is claimed. The
+performance screen already refutes enabling the flag for this workload, so no trained-model
+candidate or production environment change was made. Keep the default dispatcher.
