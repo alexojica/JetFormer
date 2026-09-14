@@ -27,7 +27,11 @@ def gmm_params(
         raise ValueError(f"Expected {expected} mixture parameters, got {logits.shape[-1]}.")
     mix_logits, components = torch.split(logits, [num_mixtures, 2 * num_mixtures * dim], dim=-1)
     raw_means, raw_scales = components.reshape(*logits.shape[:-1], num_mixtures, 2, dim).unbind(-2)
-    log_scales = torch.asinh(raw_scales.float() * 0.5).clamp_min(math.log(scale_tol))
+    log_scales = torch.asinh(raw_scales.float() * 0.5)
+    floor = math.log(scale_tol)
+    # Keep the original equality gradient: PyTorch 2.14 changed scalar clamp's boundary derivative.
+    # The identity branch also propagates NaNs through the existing asinh/raw-scale gradient chain.
+    log_scales = torch.where(log_scales < floor, floor, log_scales)
     return mix_logits.float(), raw_means.float(), log_scales
 
 

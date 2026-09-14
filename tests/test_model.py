@@ -476,3 +476,49 @@ def test_gemma_block_default_layer_only_matters_with_a_cache():
     cos, sin = rotary_tables(4, 3)
     x = torch.randn(1, 3, 8)
     torch.testing.assert_close(block(x, cos, sin), block(x, cos, sin, cache=None, layer=5))
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16, torch.float64])
+def test_unit_floor_retains_original_half_derivative_at_signed_zero(dtype):
+    logits = torch.zeros(4, 3, dtype=dtype)
+    logits[:, 2] = torch.tensor([-2.0, -0.0, 0.0, 2.0], dtype=dtype)
+    logits.requires_grad_()
+    logs = gmm_params(logits, 1, 1, scale_tol=1.0)[2]
+    gradient = torch.autograd.grad(logs, logits, torch.ones_like(logs))[0][:, 2]
+    assert torch.equal(gradient[1:3], torch.full((2,), 0.5, dtype=dtype))
+    assert gradient[0].item() == 0.0
+    assert torch.equal(gradient[3], (torch.tensor(0.5) / torch.sqrt(torch.tensor(2.0))).to(dtype))
+
+
+@pytest.mark.parametrize("upstream", [1.0, -1.0, 0.0, -0.0, math.inf, -math.inf, math.nan])
+def test_nan_is_preserved_through_the_actual_raw_scale_gradient_chain(upstream):
+    logits = torch.tensor([[0.0, 0.5, math.nan]], requires_grad=True)
+    logs = gmm_params(logits, 1, 1, scale_tol=1.0)[2]
+    gradient = torch.autograd.grad(logs, logits, torch.full_like(logs, upstream))[0]
+    assert logs.isnan().all() and gradient[0, 2].isnan()
+
+
+def test_signed_zero_consumers_have_identical_outputs_and_input_gradients():
+    """Log-scale sign is exposed by component(), but exp/density/CFG arithmetic is checked here."""
+    mix = torch.tensor([[[0.25, -0.5]]])
+    means = torch.tensor([[[[0.5, -0.5], [1.0, -1.0]]]])
+    values = torch.tensor([[[0.125, -0.25]]])
+    calls = []
+    for negative in (False, True):
+        logs = torch.full_like(means, -0.0 if negative else 0.0).requires_grad_()
+        pdf = DiagonalGMM(mix, means, logs)
+        conditional = pdf
+        unconditional = DiagonalGMM(mix, means * 0.75, logs)
+        density = gmm_log_prob(mix, means, logs, values)
+        guided = CFGDensity(conditional, unconditional, 2.0)
+        location, scale = guided.guided(torch.zeros(1, 1, dtype=torch.long))
+        torch.manual_seed(74)
+        sample = pdf.sample()
+        torch.manual_seed(75)
+        guided_sample = guided.sample()
+        scalar = density.sum() + sample.sum() + guided_sample.sum() + scale.sum() + location.sum()
+        gradient = torch.autograd.grad(scalar, logs)[0]
+        calls.append((density, sample, guided_sample, location, scale, gradient))
+    for first, second in zip(*calls, strict=True):
+        assert torch.equal(first, second)
+        assert torch.equal(first.signbit(), second.signbit())

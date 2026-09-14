@@ -103,11 +103,31 @@ Before promoting the runtime, separate fixed-random-input arithmetic checks from
 validation and explicitly decide whether historical seeded replay is still required.
 
 PyTorch 2.14 also changes scalar `clamp_min`'s gradient at equality from one to zero. The GMM scale
-floor uses this API, so an upgrade must preserve its intended boundary derivative explicitly.
-A strict-less-than `where` expression preserves old CPU gradients in all 16 tested dtype/floor cases,
-including NaNs; at a unit scale floor, signed-zero representation can differ. This remains a
-compatibility proposal, not an adopted numerical change. See the
+floor now uses a strict-less-than `where` expression to preserve its original boundary derivative
+explicitly, including NaN propagation through the raw-scale gradient chain. See the
 [upstream clamp change](https://github.com/pytorch/pytorch/pull/191142).
+
+The repair matches old raw gradients byte-for-byte in 80 CPU and 60 MPS boundary cases across
+dtypes, floors, layouts and upstream gradients. At a unit floor, the exposed raw log-scale can
+retain negative zero where the original clamp returned positive zero. All tested downstream density,
+temperature, guidance, sampling, diagnostics, inverse-flow and selected-gradient consumers remain
+exact. The default floor is unchanged; three queued calls preserve inputs, RNG and repeatability.
+
+At captured trained batch-128 inputs, exclusive autograd saved storage falls from 128 to 80 MiB.
+Synchronized component live allocation after forward is 44.778 MiB lower; allocation after cleanup
+returns to the same baseline in every ABBA run. These are component lifetime measurements, not
+whole-model peak memory. On PyTorch 2.12, component forward/backward medians are 12.658/12.880 ms
+(IQR 0.092/0.035 ms), an approximately 0.240 ms cost with paired-block SD 0.029 ms. On 2.14 they are
+13.427/13.345 ms, within noise. This is a compatibility and memory repair, not a throughput gain.
+
+The full trained regression retains five original strict failures for a previously observed native
+MPS embedding-update state. A separate review verifies all 1,372 saved CPU/MPS parameter tensors
+and 439 non-timing result fields exactly against two independently checked native observations.
+Their original proof was rerun with identical archived source bytes. Acceptance applies only to
+this captured case: the strict report, baselines, tolerances and norm replay certificate remain
+unchanged. Exact final parameters are not proof of exact raw gradients. The installed function body
+matches the tested candidate, and all 265 tests plus Ruff lint/formatting and Vulture pass on the
+validated and latest runtimes.
 
 ## Compiler and reduction checks
 
@@ -219,7 +239,7 @@ limits even for its stronger legacy compatibility contract:
 | Decoder and flow | Fused QKV/gate-up projections, native LayerNorm/RMSNorm/GELU, fp32 softmax and flow affine math are deliberate. Casting residuals or positional embeddings down changes precision. New native kernels should be profiled before adding custom Metal. |
 | RoPE and patches | Existing views/permutations preserve checkpoint conventions. Complex/interleaved RoPE needs layout conversion; Unfold/einops/NumPy cannot remove an unavoidable CHW-to-token layout copy merely by expressing it differently. |
 | Autoregressive decoding | Preallocated KV storage avoids quadratic concatenation. Prefix views are intentionally strided; copying them contiguous every step would add growing memory traffic. Exponential-race mixture sampling avoids host validation synchronization. |
-| Autocast | Validation already retains casts across batches. Sampling intentionally uses `no_grad` so casts survive decode steps. Accumulation-window caching is a separate measured candidate; casts must expire before weights update and backward must remain outside autocast. |
+| Autocast | Validation already retains casts across batches. Sampling intentionally uses `no_grad` so casts survive decode steps. Adopted accumulation-window caching saves 9.109% for four microbatches; casts expire before weights update and backward remains outside autocast. |
 | Optimizer and gradients | Fused AdamW, `set_to_none=True`, unscale-before-clipping, safe nonfinite skips, pre-clip norm reporting and scheduler-on-success are appropriate. CPU fused AdamW is available upstream but requires timing/rounding evidence before changing the current policy. |
 | DDP | Bucket views, no unused-parameter traversal, no repeated buffer broadcasts and supported batched gradient copies already remove routine overhead. The compiled wrapper execution bug was repaired and tested. |
 | Activation checkpointing | Non-reentrant checkpointing is appropriate. Selective saving may help the large CUDA configuration; disabling RNG preservation is only plausible for deterministic flow regions, never decoder dropout. No change to the CIFAR recipe. |
