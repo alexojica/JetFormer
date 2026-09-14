@@ -142,8 +142,24 @@ establish execution correctness, not NCCL overlap or CUDA throughput. See the
 [DDP compiler design](https://docs.pytorch.org/docs/2.12/notes/ddp.html).
 
 Full MPS objective compilation was retried on 2.14 and failed at missing Metal `asinh` lowering,
-rather than the older buffer-limit failure. Keeping parameter unpacking/asinh/floor eager and
-compiling only `gmm_log_prob` succeeds on both runtimes:
+rather than the older buffer-limit failure. A follow-up with `fullgraph=False` and a supported
+`torch.compiler.disable` boundary around parameter conversion gets past `asinh`, but another
+generated kernel still exceeds Metal's 31-constant-buffer limit. No compiled execution or numerical
+comparison is reached in that attempt.
+
+The newer supported backend option `max_fusion_unique_io_buffers=30` addresses that exact kernel:
+it prevents fusing all 32 coupling log-determinant reductions into one oversized signature. With
+the eager GMM boundary retained, the objective compiles and executes; the first three compiled
+forward/backward calls take 31.253 seconds including compilation. This is feasibility evidence,
+not throughput. In the deterministic control, loss changes from 9.0270195 to 9.0270481 and global
+gradient relative L2 difference is 4.99e-4. Per-path metrics repeat exactly, but gradient hashes
+vary within both paths. The initial probe does not retain enough per-tensor repeat evidence to
+attribute that variation. The compiler option remains an unadopted numerical proposal. Sources:
+[compile options](https://docs.pytorch.org/docs/2.14/generated/torch.compile.html),
+[versioned fusion configuration](https://github.com/pytorch/pytorch/blob/v2.14.0/torch/_inductor/config.py).
+
+Keeping parameter unpacking/asinh/floor eager and compiling only `gmm_log_prob` also succeeds on
+both runtimes:
 
 | GMM likelihood forward + backward | Eager | Compiled |
 | --- | ---: | ---: |
@@ -189,6 +205,20 @@ microbatches took 884.260 ms before and 803.713 ms with caching: 9.109% less tim
 the experiment does not claim four microbatches compute the same arithmetic as one batch of 128.
 The installed change passes the original complete trained CPU/MPS regression without tolerance
 changes. All 249 tests pass on both runtimes, together with Ruff lint/formatting and Vulture.
+
+Extending autocast's weight-cache lifetime across multiple sampling batches was also tested.
+Trained first/later calls, input/RNG preservation, fp32 inverse precision and a later weight update
+match exactly. Three ABBA blocks for 256 images in four batches measured 3.577049/3.574315 s
+(IQR 0.054581/0.059072 s): only 0.076% median improvement, with paired-block SD 13.952 ms.
+The additional context-lifetime code is rejected because its benefit is below measurement noise.
+
+Removing the redundant inner training autocast context was also rejected. The outer context
+provides the same effective mode, and the original full regression, both 265-test gates and
+20,827 controlled multi-update tensor comparisons pass. However, two trained ABBA blocks measure
+638.350/637.621 ms at one microbatch (within noise) and 904.019/907.475 ms at four microbatches.
+The latter costs 3.008/4.501 ms across the two blocks. Fewer Python context entries did not produce
+a measured improvement; the original code was restored. Natural embedding-gradient variation
+remains visible in both unchanged and candidate repeats, separate from the exact controlled replay.
 
 Three final runs of the exact public benchmark command measured 649.64, 650.30 and 650.19 ms/step
 in the current session. A separate ABBA run substituted the frozen pre-change step into that same
@@ -281,9 +311,10 @@ machine, so an Instruments Metal System Trace was not captured.
 1. Qualify the faster native runtime: explicitly preserve the GMM floor derivative, isolate
    arithmetic from changed RNG draws, and establish acceptable statistical rather than historical
    seeded equivalence if that is the intended contract. This has the largest measured opportunity.
-2. Measure autocast cache reuse across sampling batches and qualify accumulation caching on the
-   actual large CUDA recipe. The local accumulation=4 result above does not imply a speedup for
-   accumulation=1 or quantify CUDA performance.
+2. Qualify newer native MPS no-grad attention on actual trained prefill/decode layouts. The initial
+   2.14 causal and queued-state guards pass, but outputs are not byte-exact; independent arithmetic
+   analysis and whole-model checks must precede adoption. Qualify accumulation caching separately
+   on the actual large CUDA recipe; local accumulation=4 does not quantify CUDA performance.
 3. After runtime qualification, re-profile flow elementwise chains, MPS no-grad attention at actual
    prefill/decode lengths, and per-step RoPE casts. Existing custom GEGLU prototypes remain unadopted
    until their negative-view guards and integrated payoff are revalidated against newer native kernels.
@@ -297,6 +328,13 @@ machine, so an Instruments Metal System Trace was not captured.
 6. Lower-priority recurring CPU work: batch HF label packaging and measure PNG compression/layout
    costs with exact decoded-pixel guards. A lazy
    reference cache requires an independently valid immutable source identity before it may skip reads.
+
+TFDS's public batched-read API was screened on 96 valid-input cases, including reordered/repeated
+indices, class remapping, flip probabilities and validation. Image, label, order and complete RNG
+state match the scalar path. A later malformed protobuf refutes exact error-path semantics:
+TFDS deserializes the whole batch before returning, so an earlier valid example consumes no flip
+draw before the exception; the scalar path consumes one. Unconditional batching is therefore
+rejected under the fixed data/RNG contract, without a speed claim or private-reader workaround.
 
 The audit found concrete correctness defects, measured upgrade opportunities, and cases where the
 existing implementation beats generic library recommendations. It is not a proof that every workload
