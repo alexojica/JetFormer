@@ -922,3 +922,39 @@ equivalent latents, likelihoods or training behavior.
 These results provide additional first/later coverage and expose remaining bf16 arithmetic
 differences. They do not change the original failed compiler regressions or authorize a new
 tolerance. No production change, performance gain or sample-quality result is claimed.
+
+### Native Linear and LayerNorm boundaries on PyTorch 2.14
+
+The first coupling network was checked using its actual input and downstream loss derivatives
+from the trained B128 synthetic benchmark fixture. Input strides and gradient requirements
+are preserved. Each boundary family runs in a separate process with three queued native/compiled
+forward/backward pairs. Inputs, cotangents, weights, captured objective metrics and native
+controls match exactly across processes. Within each path, repeated outputs and all 19 parameter
+gradients are exact; state and RNG remain unchanged.
+
+| Coupling-network execution | Log-determinant RMS difference from native | Parameter-gradient relative L2 difference | Observed compiled regions per call |
+| --- | ---: | ---: | ---: |
+| Compiled | 0.001124 | 0.002450% | 1 |
+| Six native Linear boundaries | 0.001124 | 0.002450% | 8 |
+| Three native LayerNorm boundaries | 0.00009203 | 0.001436% | 4 |
+
+Native Linear boundaries produce byte-identical outputs and gradients to ordinary compilation
+in this case, so they provide no numerical benefit. LayerNorm boundaries reduce local
+log-determinant RMS error about 12-fold and gradient error by 41%. Boundaries change graph
+partitions as well as dispatch; these results attribute regions, not a unique kernel cause
+or complete-objective equivalence. Region counts are not GPU kernel counts.
+
+The full-model candidate, with 96 native flow LayerNorm boundaries, fails on its first standard
+compiled bf16 forward: Inductor cannot dispatch its internal `control_deps` operator under
+`AutocastMPS`. This occurs before the instrumented comparison runs. A separate minimal
+three-repeat reproduction confirms the missing dispatch, with exact native-addition and
+autocast-disabled controls. Installed source shows neither an MPS-autocast implementation nor
+fallthrough for this operator. The compiler uses it to preserve random-operation ordering when
+`fallback_random=True`; that ordering protection has not been disabled.
+
+The complete regression separately runs its fp32 optimizer probe and retains five strict
+differences against the preserved same-runtime eager reference: two GMM diagnostics and three
+post-update parameter summaries. Other sections pass. Its compilation also hits the default
+recompilation limit for `_reorder`. The original bf16 compiler failure and all numerical
+differences remain recorded. This candidate is shelved without timing, production changes,
+library patches or altered tolerances.
