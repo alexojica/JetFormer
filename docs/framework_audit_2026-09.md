@@ -890,3 +890,35 @@ uses three warmup and ten synchronized timed optimizer updates; every pair has i
 CPU/MPS RNG endpoints. This comparison measures the option's cost within the compiler
 proposal, not an eager speedup. The local numerical benefit does not clear the complete
 regression or remove most of the gradient gap, so the option is not adopted.
+
+### Compiled flow and eager inverse compatibility
+
+A separate guard uses eight fixed real CIFAR-10 images, fixed dequantization and the trained
+checkpoint. Each runtime and forward precision runs in its own process. Three native/compiled
+pairs retain latents, log-determinants, inverse tokens and public decoded images without added
+tensor reads or explicit fences between calls. The forward keeps gradients enabled; the
+inverse uses eager execution without gradients. The public image decoder always uses fp32.
+
+Within each path, first/later outputs are byte-identical, and inputs, model state and CPU/MPS RNG remain
+unchanged. Each compiled call executes the same single cached FX region through an observation
+backend delegating to Inductor. This establishes repeatability for that observed standalone
+partition; it does not qualify the different whole-objective partition, its backward or optimizer updates.
+
+| Runtime / forward precision | Native forward + fp32 inverse token RMS error | Compiled forward + fp32 inverse token RMS error | Maximum compiled/native decoded-image difference |
+| --- | ---: | ---: | ---: |
+| 2.12.1 / fp32 | 1.013e-7 | 1.158e-7 | 4.768e-7 |
+| 2.14.0 / fp32 | 9.961e-8 | 1.026e-7 | 4.768e-7 |
+| 2.12.1 / bf16 | 0.001279 | 0.000874 | 0.005251 |
+| 2.14.0 / bf16 | 0.000891 | 0.000874 | 0.003062 |
+
+Token errors compare against the original patches in approximately `[-1, 1]`; decoded-image
+differences use the public clamped `[0, 1]` output. Keeping the inverse in bf16 as a diagnostic
+gives native/compiled token RMS errors of 0.000535/0.001322 on 2.12 and 0.000333/0.000897 on
+2.14. Log-determinants and their cancellation errors are retained separately in the local
+records. Native bf16 roundtrips already have finite-precision error, so changes relative to
+the native control matter. A smaller reconstruction error in one column does not establish
+equivalent latents, likelihoods or training behavior.
+
+These results provide additional first/later coverage and expose remaining bf16 arithmetic
+differences. They do not change the original failed compiler regressions or authorize a new
+tolerance. No production change, performance gain or sample-quality result is claimed.
