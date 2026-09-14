@@ -115,7 +115,7 @@ See the [2.13 release](https://github.com/pytorch/pytorch/releases/tag/v2.13.0) 
 [2.14 release](https://github.com/pytorch/pytorch/releases/tag/v2.14.0).
 
 The original full numerical regression reports 195 failed strict cross-version comparisons.
-Within-version repeated validation is stable and retains the published rounded reference values:
+Within-version repeated validation is stable and stays close to the published reference values:
 
 | Validation | PyTorch 2.12.1 | PyTorch 2.14.0 |
 | --- | ---: | ---: |
@@ -641,3 +641,40 @@ Three queued repetitions per worker were exact and inputs remained unchanged. Ou
 differed between dispatch choices in all 24 cases; no numerical acceptance is claimed. The
 performance screen already refutes enabling the flag for this workload, so no trained-model
 candidate or production environment change was made. Keep the default dispatcher.
+
+## Partial compiler on the validated PyTorch 2.12.1 runtime
+
+The working 2.14 integration supplied new evidence for one narrowly scoped backport experiment.
+Installed 2.12.1 also exposes `max_fusion_unique_io_buffers` and checks unique reads and writes
+before fusion. The same persistent per-model PDF/dropout boundaries, native random fallback and
+buffer cap compile successfully there. This uses the existing `.venv`; no packages were upgraded.
+The original unsuccessful whole-objective attempt remains recorded.
+
+Four complete optimizer-step AB/BA pairs measured a substantial benefit without a runtime migration:
+
+| Complete step on validated runtime | Eager 2.12.1 | Partial compile |
+| --- | ---: | ---: |
+| Median of four run medians | 564.557 ms | 443.063 ms |
+| Interquartile range | 7.123 ms | 4.813 ms |
+| Standard deviation | 5.414 ms | 3.201 ms |
+
+The reduction is **21.52%**, with paired median saving 118.759 ms, SD 5.197 ms. All four CPU/MPS
+RNG endpoint comparisons match after 13 updates. This remains the trained-weight, synthetic B128
+benchmark with the existing optimizer-step recipe; it is not a replacement primary benchmark result.
+
+The complete original regression retains **11 strict failures**: six update metrics, three
+post-update parameter summary fields, and two failed checks against the older case-specific
+gradient-norm certificate. That certificate is not applicable automatically to different upstream
+gradients. Total fp32 loss and the AR term are exact. The full update result also matches the earlier
+bounded fp32 screen exactly. All other sections pass, including persistent-boundary queue/cache
+guards, checkpoint migration, sampling and repeated validation at 3.7056821, 3.6977547 and 3.6973441
+bpd for the configured subset, full bf16 test split and full fp32 test split respectively. Evaluation
+uses eager execution after restoring the trained checkpoint; it does not assess convergence of
+newly compiled training.
+
+The bf16 timing workload's first-pair loss difference reaches 0.000535011 bpd across 13 updates,
+larger than the corresponding 2.14 compiler discrepancy. Matching RNG endpoints does not establish
+every draw's assignment. Native/compiled arithmetic and actual random operands still need separate
+attribution before accepting this option. No tolerance, baseline, parameter-state union, production
+compiler setting or dependency version changed. The successful backport reduces the migration
+requirement; it does not remove the numerical qualification requirement.
