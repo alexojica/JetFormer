@@ -731,3 +731,37 @@ variants but also changes allocation and compilation history; it does not identi
 cause. The passing isolated tests do not override the original failure. A whole-objective
 specialization check is needed before drawing broader compiler-safety conclusions. There is
 no new throughput measurement or accepted numerical tolerance from this localization work.
+
+### Supported diagnostic specializations and mixed-region execution
+
+The complete trained objective was checked on both runtimes with diagnostics set to
+`False, False, True, True, False, True, False`. Each process queues 21 forward/backward
+calls across eager, standard compiled and execution-observed compiled controls. Weights,
+the synthetic B128 fixture and initial RNG state are fixed; there are no intervening
+tensor reads or explicit synchronization calls. This covers the supported advanced-metrics
+option, which is disabled in the validated recipe.
+
+On **both runtimes**, common loss metrics, RNG endpoints and 685 of 686 gradients are
+byte-identical across the diagnostic switch and repeated calls within each execution path.
+Additional diagnostic metrics are exact across repetitions with diagnostics enabled.
+Only `token_emb.weight` gradients vary, also in eager controls. The largest within-flag
+difference is 3.638e-11 on 2.12 and 1.455e-11 on 2.14; these are observed values, not new
+tolerances. The observation backend retains the same limited embedding discrepancy against
+the standard compiler. Parameters and inputs remain unchanged.
+
+The observed backend executes 40 captured-region invocations per objective call. Its initial
+seven graphs gain one final-region specialization when diagnostics first becomes true;
+subsequent calls reuse the appropriate region sequence without further compilation.
+These are FX-region counts, **not GPU kernel counts**. This supported switch does not reproduce
+the earlier broad coupling-output change. It is not an optimizer-state or convergence test.
+
+A separate execution trace reproduces all 45 original mixed-coupling output tensors,
+the input and the complete coupling state byte-for-byte. The nominally fully compiled coupling
+first executes one region, but its next call executes four regions previously compiled while
+testing native LayerNorm boundaries; its third call executes six regions. Other variants also
+change their region sequences. Thus the original output failure accompanies a changed
+execution partition, rather than demonstrating different outputs from an unchanged compiled
+region. This narrows the investigation without identifying a unique cache/guard mechanism or
+waiving the original failure. The passing isolated cases and complete-objective diagnostic
+checks remain separately scoped evidence. No production compilation policy, dependency,
+numerical acceptance criterion or throughput claim changes.
