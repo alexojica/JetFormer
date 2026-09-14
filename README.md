@@ -51,7 +51,7 @@ python -m pip install -e .
 To use the package without a clone, install it from a release tag:
 
 ```bash
-python -m pip install "jetformer[hub] @ git+https://github.com/alexojica/JetFormer.git@v0.1.3"
+python -m pip install "jetformer[hub] @ git+https://github.com/alexojica/JetFormer.git@v0.1.4"
 ```
 
 Optional dependencies are grouped by use case:
@@ -150,7 +150,7 @@ config, a sample grid, and a [model card](docs/model_card_cifar10_42m.md). The c
 carries its training config, so sampling needs nothing else:
 
 ```bash
-python -m pip install "jetformer[hub] @ git+https://github.com/alexojica/JetFormer.git@v0.1.3"
+python -m pip install "jetformer[hub] @ git+https://github.com/alexojica/JetFormer.git@v0.1.4"
 jetformer-sample --hf-repo mojique/jetformer-cifar10-32-42m \
   --hf-ckpt jetformer_cifar10_32_42m_100ep.pt \
   --out-dir samples/cifar10 --num-images 100 --batch-size 100

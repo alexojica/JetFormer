@@ -4,6 +4,39 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.4] - 2026-09-14
+
+### Fixed
+
+- Quality scoring preserves training RNG state through generation and metric calculation. Reference
+  feature caches now include the image content identity, preventing reuse across different subsets
+  that happen to have the same number of images.
+- Distributed compilation compiles the objective owned by DDP while retaining its eager reducer shell.
+  Two-rank CPU tests verify complete-graph compilation and exact gradient and parameter agreement.
+- Optional MPS activation checkpointing now preserves dropout RNG during recomputation, including
+  repeated backward calls. The validated recipe continues to leave activation checkpointing disabled.
+- The GMM scale floor preserves the intended gradient at the floor and through NaN inputs across
+  PyTorch versions, including the changed native clamp derivative in PyTorch 2.14.
+
+### Changed
+
+- Gradient accumulation reuses autocast weight conversions across microbatches, with backward outside
+  autocast and the cache cleared before optimizer updates. A measured 4 x 32 accumulation step falls
+  from 884.3 to 803.7 ms (9.1%); the validated single-microbatch 128-image recipe has no detectable gain.
+- The GMM scale floor saves a boolean mask instead of an fp32 activation, reducing exclusive saved
+  autograd storage by 48 MiB for the measured batch. This trades about 0.24 ms of component time on
+  PyTorch 2.12 for lower memory use; it is not an end-to-end speedup claim.
+- CIFAR batches with flipping disabled skip unused flip-mask construction, reducing measured CPU
+  batching time from 17.38 to 9.93 microseconds while preserving image bytes and RNG state.
+- Development tooling uses Ruff 0.16.7. The framework audit records compatibility checks, compiler
+  limitations and measured decisions for the validated and latest isolated dependency environments.
+
+Performance figures are separate local measurements on an Apple M5 Pro, not additive gains. See the
+[framework audit](docs/framework_audit_2026-09.md) for configurations, spreads and correctness checks.
+The validated dependency environment, architecture, training recipe and precision policy are unchanged.
+MPS compilation remains disabled; experimental compiler and runtime changes are not enabled. Format 6
+checkpoints load directly and format-5 weights still migrate.
+
 ## [0.1.3] - 2026-09-13
 
 ### Fixed
@@ -88,6 +121,7 @@ First public release.
 - Validated 42M-parameter CIFAR-10 recipe (3.71 clean validation bits per sub-pixel; FID 22.6 and
   Inception Score 7.95 at CFG 2, temperature 0.7) with published weights on the Hugging Face Hub.
 
+[0.1.4]: https://github.com/alexojica/JetFormer/releases/tag/v0.1.4
 [0.1.3]: https://github.com/alexojica/JetFormer/releases/tag/v0.1.3
 [0.1.2]: https://github.com/alexojica/JetFormer/releases/tag/v0.1.2
 [0.1.1]: https://github.com/alexojica/JetFormer/releases/tag/v0.1.1
