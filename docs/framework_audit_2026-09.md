@@ -494,3 +494,49 @@ in this extended control. Its actual reduction input was not captured, so this r
 the cause; the earlier unresolved native-reduction evidence remains relevant. The latest runtime's
 diagnostics were exact in this control. Both strict comparison failures remain preserved. There is
 no new allowed-state union, broadened regression tolerance or automatic numerical-stack upgrade.
+
+## Partial compiler: complete optimizer-step follow-up
+
+The stochastic graph also compiles with the unchanged recipe's dropout and augmentation enabled.
+Three ABBA forward/backward blocks measured 485.207 to 267.257 ms, a 44.92% reduction;
+mean paired saving was 218.578 ms, SD 1.082 ms. Because eager and compiled random streams differ,
+its loss and gradient differences are not an arithmetic-only comparison.
+
+Four further process AB/BA pairs exercised the existing `optimizer_step` with the same serialized
+trained weights, synthetic uint8 batch, seed and config. Each worker performed three warm-up and
+ten timed updates, retaining the existing fused AdamW, clipping, precision policy and scheduler.
+
+| Complete optimizer step on PyTorch 2.14 | Eager | Partial compile |
+| --- | ---: | ---: |
+| Median of four run medians | 505.521 ms | 284.919 ms |
+| Interquartile range | 3.582 ms | 0.767 ms |
+| Standard deviation | 2.255 ms | 0.486 ms |
+
+This is **43.64% less step time**, with paired median saving 220.558 ms, SD 2.165 ms. It is a
+proposal measured against eager 2.14, not an adopted improvement against the historical 570 ms
+baseline. Current/driver MPS allocation after the measured updates was 0.640/7.762 GiB eager and
+0.648/6.605 GiB compiled in all four pairs; these counters do not measure peak memory.
+
+One extra update per path retained complete before/after parameters, nonempty Adam moments,
+raw and clipped gradients, scheduler state and metrics. Three queued replays of each actual gradient
+set reproduce clipping norms, all clipped gradients, every parameter, complete optimizer state and
+scheduler state exactly, with unchanged RNG. This verifies the captured downstream update. It does
+not establish that the compiler's different upstream gradients meet the numerical contract.
+
+The isolated prototype uses public `torch.compiler.disable` at the existing `gmm_params` boundary,
+`fullgraph=False`, `dynamic=False`, and the supported fusion-buffer option. Production still rejects
+MPS compilation. A maintainable integration, diagnostic-graph coverage and the complete regression
+remain necessary, alongside a justified numerical contract for the runtime/compiler changes.
+
+## Runtime arithmetic with identical random inputs
+
+The latest runtime replayed all 29 actual random-output tensors from the older bf16 control
+byte-for-byte. Three queued repetitions preserve all loss diagnostics and non-embedding gradients
+within the new runtime; embedding accumulation retains its recorded variation. With randomness
+fixed, old/new loss is 9.053886414/9.054405212 bpd, a difference of 0.000518799. AR, residual and
+flow terms differ by 0.000207067, 0.000853062 and 0.000542164 respectively.
+
+All 686 gradient tensors differ across runtimes, with aggregate relative L2 difference 0.00177501
+(0.1775%) and maximum absolute difference 0.000994861. These figures describe one captured case;
+they are not acceptance tolerances. The older standard-deviation failure remains preserved, as do
+the original full-regression failures. No numerical-stack migration is adopted automatically.
