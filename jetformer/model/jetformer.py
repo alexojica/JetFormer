@@ -11,6 +11,7 @@ autoregressively; the remaining channels are factored out under a unit Gaussian.
 from __future__ import annotations
 
 import math
+from contextlib import ExitStack, contextmanager
 
 import torch
 import torch.nn as nn
@@ -32,6 +33,38 @@ def count_parameters(model: JetFormer) -> dict[str, int]:
     total = sum(p.numel() for p in model.parameters())
     flow = sum(p.numel() for p in model.flow.parameters())
     return {"total": total, "flow": flow, "transformer": total - flow}
+
+
+class _MPSRNGReplay:
+    """Replay one checkpoint's forward RNG state, including repeated backwards."""
+
+    def __init__(self):
+        self.state = None
+        self._forks = []
+
+    def __enter__(self):
+        # A fresh fork per entry supports retain_graph and nested recomputation.
+        # ExitStack also restores the caller if entering the replay fails.
+        with ExitStack() as stack:
+            stack.enter_context(torch.random.fork_rng(device_type="mps", devices=[0]))
+            torch.mps.set_rng_state(self.state)
+            self._forks.append(stack.pop_all())
+        return self
+
+    def __exit__(self, *exc):
+        return self._forks.pop().__exit__(*exc)
+
+
+def _mps_checkpoint_contexts():
+    """Native checkpointing in torch 2.12/2.14 fails to preserve MPS dropout RNG."""
+    replay = _MPSRNGReplay()
+
+    @contextmanager
+    def forward():
+        replay.state = torch.mps.get_rng_state()
+        yield
+
+    return forward(), replay
 
 
 class JetFormer(nn.Module):
@@ -181,7 +214,9 @@ class JetFormer(nn.Module):
         sin = self.rope_sin[start : start + length].to(dtype)
         for index, block in enumerate(self.blocks):
             if self.grad_checkpoint and self.training and cache is None:
-                x = checkpoint.checkpoint(block, x, cos, sin, use_reentrant=False)
+                # MPS dropout masks must be replayed; native CPU/CUDA RNG handling stays in use.
+                contexts = {"context_fn": _mps_checkpoint_contexts} if x.device.type == "mps" else {}
+                x = checkpoint.checkpoint(block, x, cos, sin, use_reentrant=False, **contexts)
             else:
                 x = block(x, cos, sin, cache=cache, layer=index)
         if cache is not None:

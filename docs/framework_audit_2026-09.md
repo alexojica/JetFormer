@@ -63,6 +63,33 @@ Primary version sources: [PyTorch](https://pypi.org/project/torch/),
 [torchvision](https://pypi.org/project/torchvision/), [NumPy](https://pypi.org/project/numpy/),
 [SciPy](https://pypi.org/project/scipy/), [ArrayRecord](https://pypi.org/project/array-record/).
 
+## Decoder checkpoint RNG preservation
+
+The optional decoder activation-checkpoint path now explicitly preserves MPS dropout RNG through
+the public `context_fn` and `torch.random.fork_rng` APIs. In the inspected PyTorch 2.12.1 and 2.14.0
+implementations, checkpointing gates device RNG preservation on an initialization attribute that
+the MPS module does not define. A real MPS reproduction returns the same forward output but uses
+different dropout masks during recomputation: all 12 parameter-gradient tensors in a two-block
+Gemma backbone differ, and backward advances the caller's MPS RNG incorrectly. This affects the
+optional checkpointed decoder; the validated MPS recipe has checkpointing disabled.
+
+The repair uses a reusable replay context so retained-graph backward calls each restore the
+original forward state and then restore the caller's state. On both runtimes, fp32/bf16 tests of
+the actual proposed backbone match eager output, every input/parameter gradient and CPU/MPS RNG
+byte exactly across three queued repetitions and two backward calls, including caller draws
+between them. Inputs and parameters remain unchanged. CPU contract tests also cover nested
+preservation, a future native outer RNG context, body/entry exceptions and recovery. Existing
+CPU/CUDA checkpoint dispatch remains native. This is a correctness repair, not a speed claim.
+All 269 tests, Ruff lint/formatting and Vulture pass. The default-recipe trained regression retains
+five strict failures for a previously observed native MPS update variant. A separate captured-case
+review checks all 1,372 saved parameter tensors and 439 non-timing fields exactly against the
+independently verified native observation, rerunning its original proof with archived source bytes.
+The original report, baselines and tolerances remain unchanged; this does not claim raw-gradient
+identity or authorize other future states.
+Sources: [checkpoint contexts](https://docs.pytorch.org/docs/2.14/checkpoint.html),
+[versioned checkpoint implementation](https://github.com/pytorch/pytorch/blob/v2.14.0/torch/utils/checkpoint.py),
+[RNG forking](https://docs.pytorch.org/docs/2.14/random.html#torch.random.fork_rng).
+
 ## Measured runtime upgrade opportunity
 
 Four interleaved A/B and B/A process pairs used the same serialized trained weights, uint8 input
