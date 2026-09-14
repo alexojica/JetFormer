@@ -806,3 +806,42 @@ against the earlier compiler proposal; it does not measure a new gain over eager
 Captured-region invocations increase from 40 to 298 per objective call, although these counts
 alone do not attribute the timing cost to Python or GPU work. The candidate remains an
 unadopted arithmetic/performance tradeoff. Production source and the numerical stack are unchanged.
+
+### Decoder GELU screen and fp32 gradient comparison
+
+Keeping the decoder's 12 GELU operations native, in addition to the flow's 32, reduces
+the bf16 decoder-gradient difference from 0.5449% to 0.4135%. This is only a 1.32-fold
+improvement, below the prospective twofold threshold for further timing work. All 29
+actual random tensors and their consumer labels match, and queued/observation checks retain
+only the embedding-gradient variation. Inputs and parameters are unchanged. Region
+invocations rise from 298 to 322; these counts do not establish a performance cost.
+
+The autoregressive loss difference drops from 0.00003362 to 0.00000304 bpd, but the absolute
+total-loss difference increases from 0.00001049 to 0.00002098 bpd. Unchanged flow/residual
+errors now cancel less of the autoregressive error. The complete regression retains
+14 strict failures in the compiled fp32 update: nine metric fields, three parameter summaries
+and two existing case-certificate checks. Other sections pass. This additional boundary
+candidate is shelved without timing or adoption.
+
+The original partial compiler was then checked separately in fp32 on both runtimes, using
+the same trained B128 fixture and fifteen queued forward/backward calls per process.
+Actual random tensors and labels match. All ordinary metrics and 685 gradients are
+repeatable and transparent to observation; the embedding exception remains recorded.
+Standard compiled anchors verify the observation backend, and captured execution uses
+cached regions. These are numerical diagnostics, not a change to the bf16 training recipe.
+
+| Runtime | Fp32 total-loss difference, bpd | Fp32 all-gradient relative L2 difference | Bf16 all-gradient relative L2 difference |
+| --- | ---: | ---: | ---: |
+| 2.12.1 | 0 | 0.00001517% | 0.1723% |
+| 2.14.0 | 0.000000954 | 0.00001419% | 0.04845% |
+
+The much smaller fp32 gaps motivate investigating reduced-precision fusion semantics.
+They do not identify a single primitive or approve any numerical tolerance.
+Both installed runtimes expose `emulate_precision_casts` through Inductor's option listing,
+disabled by default. Its purpose is to preserve rounding between fused low-precision
+operators. [Pinned 2.12 compiler configuration](https://github.com/pytorch/pytorch/blob/7269437d655783a26cba32aa88195b741ff496aa/torch/_inductor/config.py).
+Source review finds boundary annotations in tracing and casts in shared pointwise lowering;
+Metal loads low-precision storage into float computation values and emits explicit dtype
+casts. Version 2.14 separately enables saved-output precision emulation by default. This is
+evidence for testing the existing compiler controls on MPS, not proof of their generated-code
+behavior, full-model correctness or performance. No compiler option has been adopted.
