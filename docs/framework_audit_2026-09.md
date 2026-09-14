@@ -274,11 +274,25 @@ machine, so an Instruments Metal System Trace was not captured.
 5. For the large CUDA recipe, compare selective activation checkpointing, compiled optimizer/scheduler
    tails with tensor learning rates, and fp16 GradScaler synchronization costs. Preserve the schedule,
    absolute weight decay and skipped-update behavior. Capturability is not automatically faster.
-6. Lower-priority recurring CPU work: eliminate zero-probability flip-mask construction, batch HF
-   label packaging, and measure PNG compression/layout costs with exact decoded-pixel guards. A lazy
+6. Lower-priority recurring CPU work: batch HF label packaging and measure PNG compression/layout
+   costs with exact decoded-pixel guards. A lazy
    reference cache requires an independently valid immutable source identity before it may skip reads.
 
 The audit found concrete correctness defects, measured upgrade opportunities, and cases where the
 existing implementation beats generic library recommendations. It is not a proof that every workload
 or every framework option is globally optimal. CUDA-specific performance and the full real ImageNet
 pipeline remain outside the available local hardware/data evidence.
+
+## No-flip CIFAR batching cleanup
+
+When flipping is disabled, the CIFAR batched loader now skips constructing and reducing an all-false
+mask. Positive-probability flip draws retain the same order. Eight alternating CPU Timer pairs at
+batch 128 measured 17.382 to 9.930 microseconds (IQR 0.124/0.070); the mean saving was
+7.463 microseconds with paired SD 0.133. A complete 2,000-image loader iteration measured
+0.380 to 0.257 ms (IQR 0.0071/0.0073 ms). This removes unnecessary work, but its absolute saving is
+too small to claim a meaningful end-to-end validation gain. Training with flips remains within noise.
+
+Exact image, label, order and RNG guards cover disabled, partial and always-on flips, repeated
+indices, tail batches and validation's forced no-flip policy. The complete trained CPU/MPS regression
+passes its original rules, and all 253 tests, Ruff lint/formatting and Vulture pass. This is a small
+cleanup under the simpler-code exception, not an optimizer-step speedup.

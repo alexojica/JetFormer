@@ -205,9 +205,10 @@ class TorchvisionCIFAR10(LabeledImages):
         """One gather for the whole batch; the flip draws stay per example, in batch order."""
         positions = torch.as_tensor(indices, dtype=torch.long)
         images = self.images.index_select(0, self.indices[positions])
-        flips = torch.tensor([self._flip() for _ in range(len(indices))], dtype=torch.bool)
-        if flips.any():
-            images = torch.where(flips[:, None, None, None], images.flip(-1), images)
+        if self.flip_prob > 0.0:
+            flips = torch.tensor([self._flip() for _ in range(len(indices))], dtype=torch.bool)
+            if flips.any():
+                images = torch.where(flips[:, None, None, None], images.flip(-1), images)
         return {"image": images, "label": self.labels[positions]}
 
 

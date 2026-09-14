@@ -22,6 +22,7 @@ from jetformer.data.loaders import (
     seed_epoch,
     unsharded_loader,
 )
+from jetformer.rng import capture_rng_state, preserved_rng_state, restore_rng_state
 from tests.conftest import SyntheticImages, tiny_config
 
 
@@ -118,6 +119,22 @@ def test_torchvision_cifar_is_contiguous_and_fetches_batches(monkeypatch):
     torch.testing.assert_close(batch["image"][1], dataset.images[3].flip(-1))
     subset = TorchvisionCIFAR10(False, class_subset=["dog", "cat"], max_samples=3, shuffle_seed=1)
     assert subset.classes == ["dog", "cat"] and len(subset) == 3 and set(subset.labels.tolist()) <= {0, 1}
+
+
+@pytest.mark.parametrize("train,flip_prob", [(True, 0.0), (True, 0.5), (True, 1.0), (False, 1.0)])
+def test_torchvision_cifar_batch_preserves_sample_order_and_rng(monkeypatch, train, flip_prob):
+    monkeypatch.setattr("torchvision.datasets.CIFAR10", FakeCIFAR10)
+    dataset = TorchvisionCIFAR10(train, flip_prob=flip_prob)
+    indices = [len(dataset) - 1, 0, len(dataset) - 1, 3]
+    with preserved_rng_state():
+        random.seed(17)
+        initial = capture_rng_state()
+        expected = collate([dataset[index] for index in indices])
+        expected_rng = capture_rng_state()
+        restore_rng_state(initial)
+        actual = dataset.__getitems__(indices)
+        assert all(torch.equal(actual[key], expected[key]) for key in expected)
+        assert capture_rng_state() == expected_rng
 
 
 def test_image_folder_tree_is_indexed_and_remapped(tmp_path):
